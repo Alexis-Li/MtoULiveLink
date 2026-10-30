@@ -1,7 +1,7 @@
 """Pure Unreal -> Maya camera sync mapping.
 
 This module implements the mapping frozen in
-``composite/MtoULiveLink/prototypes/camera-sync/protocol.md`` and imports
+``prototypes/camera-sync/protocol.md`` and imports
 nothing outside the Python standard library, so every rule can be checked under
 plain CPython without Maya. ``MtoUCameraSyncPrototype.py`` applies the values
 this module produces to real Maya nodes.

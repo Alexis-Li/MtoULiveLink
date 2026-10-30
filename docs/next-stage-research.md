@@ -6,9 +6,9 @@
 
 | 主题 | 后续验证与契约 |
 | --- | --- |
-| UE 相机与 Sequencer → Maya | [官方能力核对](../prototypes/camera-sync/official-capabilities.md)、[相机映射](../prototypes/camera-sync/mapping.md)、[#52 验收](../../../docs/project-history/mtou-livelink/issue-52-camera-sync-acceptance.md) |
-| UE 关卡参考几何 → Maya | [官方能力核对](../prototypes/scene-reference/official-capabilities.md)、[交接契约](../prototypes/scene-reference/transfer.md)、[#53 验收](../../../docs/project-history/mtou-livelink/issue-53-scene-reference-acceptance.md) |
-| 独立道具与多角色 | [对象协议](../prototypes/multi-subject/protocol.md)、[#54 验收](../../../docs/project-history/mtou-livelink/issue-54-multi-subject-acceptance.md) |
+| UE 相机与 Sequencer → Maya | [官方能力核对](../prototypes/camera-sync/official-capabilities.md)、[相机映射](../prototypes/camera-sync/mapping.md)、[#52 验收](history/issue-52-camera-sync-acceptance.md) |
+| UE 关卡参考几何 → Maya | [官方能力核对](../prototypes/scene-reference/official-capabilities.md)、[交接契约](../prototypes/scene-reference/transfer.md)、[#53 验收](history/issue-53-scene-reference-acceptance.md) |
+| 独立道具与多角色 | [对象协议](../prototypes/multi-subject/protocol.md)、[#54 验收](history/issue-54-multi-subject-acceptance.md) |
 
 ## 相机与时间同步的来源
 

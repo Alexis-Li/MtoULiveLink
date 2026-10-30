@@ -6,7 +6,7 @@ Run with a host Python (not mayapy):
     python maya_gui_install_check.py --maya <Maya2024>/bin/maya.exe
         --old-entry <0.9.0 MtoULiveLink.py> --evidence <scratch dir>
 
-The check builds the Maya component archive with `tools/package_maya_tool.py`
+The check builds the Maya component archive with `tools/package.py`
 and extracts it twice: under a path with a space and Chinese characters (which
 the installer copies into the Maya modules folder) and under an ASCII path
 with a space (which the `.mod` names directly). Each step starts its own Maya
@@ -304,10 +304,10 @@ def _in_maya():
 # ------------------------------------------------------------- host driver
 def _build_package(evidence):
     """Build the component archive with the repository packager; return its path."""
-    tools = Path(__file__).resolve().parents[5] / "tools"
+    tools = Path(__file__).resolve().parents[3] / "tools"
     sys.path.insert(0, str(tools))
-    import package_maya_tool
-    result = package_maya_tool.package("MtoULiveLink", evidence / "package", apply=True)
+    import package
+    result = package.package_maya(evidence / "package", apply=True)
     return evidence / "package" / Path(result["archive"]).name
 
 

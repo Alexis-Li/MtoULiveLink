@@ -6,8 +6,8 @@
   "Description": "Streams evaluated Maya character animation into Unreal Live Link.",
   "Category": "Animation",
   "CreatedBy": "Alexis-Li",
-  "CreatedByURL": "https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/tree/main/composite/MtoULiveLink",
-  "DocsURL": "https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/blob/main/composite/MtoULiveLink/README.md",
+  "CreatedByURL": "https://github.com/Alexis-Li/MtoULiveLink",
+  "DocsURL": "https://github.com/Alexis-Li/MtoULiveLink/blob/main/README.md",
   "CanContainContent": false,
   "Modules": [
     {

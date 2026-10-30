@@ -24,7 +24,7 @@ from mtou_livelink import camera as camera_module  # noqa: E402
 from mtou_livelink import reference  # noqa: E402
 
 #: The repository root, so scratch directories land beside the checkout.
-REPO = pathlib.Path(__file__).resolve().parents[5]
+REPO = pathlib.Path(__file__).resolve().parents[3]
 
 
 def scratch_directory(prefix):

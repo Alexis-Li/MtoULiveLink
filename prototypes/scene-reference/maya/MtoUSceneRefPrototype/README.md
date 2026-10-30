@@ -24,7 +24,7 @@ Run from the repository root. Set `$Mayapy` to Maya's standalone interpreter
 and `$Fbx`, `$Manifest`, `$Report` to input and output paths.
 
 ```powershell
-$prototype = 'composite/MtoULiveLink/prototypes/scene-reference/maya/MtoUSceneRefPrototype'
+$prototype = 'prototypes/scene-reference/maya/MtoUSceneRefPrototype'
 & $Mayapy "$prototype/scripts/MtoUSceneRefPrototype.py" --fbx $Fbx --manifest $Manifest --report $Report
 ```
 
@@ -106,7 +106,7 @@ box size, pivot offset and surface centroid, and 0.5 degrees for orientation.
 Detailed matching, matrix conventions, report fields and measured host
 limitations live in the [transfer contract](../../transfer.md),
 [official-capability notes](../../official-capabilities.md) and
-[accepted scope/evidence](../../../../../../docs/project-history/mtou-livelink/issue-53-scene-reference-acceptance.md).
+[accepted scope/evidence](../../../../docs/history/issue-53-scene-reference-acceptance.md).
 
 ## Verification commands
 

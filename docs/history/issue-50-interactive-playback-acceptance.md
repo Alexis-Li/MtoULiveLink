@@ -42,7 +42,7 @@ stop, completion, and segment completion from those outcomes without a
 re-upload. Recapture, clear, disconnect, and character or Preview input changes
 drop the attempt's loop selection, positioned pose, and segment state, and stale
 `play_id` outcomes are ignored. Both components identify as 0.9.0. The decision
-itself is recorded in [ADR 0013](../../../composite/MtoULiveLink/docs/adr/0013-upload-the-cache-before-local-replay.md).
+itself is recorded in [ADR 0013](../adr/0013-upload-the-cache-before-local-replay.md).
 
 ## Acceptance evidence
 

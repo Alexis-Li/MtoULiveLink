@@ -1,4 +1,62 @@
-# MtoULiveLink Rules
+# MtoULiveLink development rules
+
+This independent repository owns the MtoU Live Link product: a Maya component
+and an Unreal Editor plugin that install separately and release together. It
+can be cloned alone or mounted as a registered submodule in a collection. Run
+Git and `gh` here for product work; the parent owns only its registration and
+pinned commit. Do not change sibling projects.
+
+## Contracts and layout
+
+- Read CONTEXT.md for terminology and docs/adr/ for architecture decisions.
+  [docs/workflow.md](docs/workflow.md) defines the design, fix,
+  verification-scope and Issue/PR rules, and where work before 2026-10-30 is
+  tracked.
+- `maya/MtoULiveLink/` is the Maya component (`scripts/`, `install.mel`,
+  `tests/`) and `unreal/MtoULiveLink/` the Unreal plugin (one `.uplugin`,
+  `Source/` with its Automation tests). They cooperate only through the wire
+  contract in `protocol/`; neither loads source, configuration or runtime
+  files from the other. `protocol/`, `docs/`, `prototypes/`, `tools/` and
+  `tests/` are never installed.
+- Maya: `MtoULiveLink.py` is the user-run entry; internals use snake_case
+  modules with one `__version__`. Use Maya's bundled Python and Qt and guard
+  version-specific APIs. Repeated launches must not duplicate windows or
+  callbacks; closing removes the nodes, callbacks, scriptJobs and UI the tool
+  created, and importing runs no Maya commands. `install.mel` stays ASCII
+  (Maya 2022 misreads UTF-8 MEL) and handles Maya ignoring a `.mod` path with
+  non-ASCII characters.
+- Unreal: runtime behavior lives in the runtime module and editor-only
+  behavior in the editor module; public headers expose intentional APIs only.
+  Declare plugin and module dependencies in `.uplugin` and `.Build.cs`.
+- Change user scenes and assets only as the product documents. Do not check in
+  caches, `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`, `.vs/`,
+  generated IDE projects, archives or production assets. Keep the GPL license
+  and assess any third-party reuse separately.
+
+## Documentation and delivery
+
+- README.md and README_CN.md are aligned current manuals for first-time users:
+  compatibility, installation, workflows, troubleshooting and limits. Update
+  the affected section in place; leave out implementation, test counts and
+  development narratives. Keep vocabulary in CONTEXT.md, decisions in
+  docs/adr/, version changes in CHANGELOG.md and selected evidence in
+  docs/history/ under its retention rules. Write documents, issues and
+  comments as the current state; rewrite an outdated decision in place once
+  the user agrees.
+- Follow docs/workflow.md for Issue/PR work: `feature/<topic>` or
+  `fix/<topic>` branches with a PR to `main`, `Refs #<issue>` (never closing
+  keywords), full base/head SHAs, AC and R- finding IDs, a published review of
+  the exact head SHA before every merge, `--match-head-commit` merges, and
+  issue comments that each end with a `当前状态` footer, generated and checked
+  with `tools/issue_report.py` for status comments. Small documentation and
+  rule edits go on the current branch as docs/workflow.md defines.
+- Never publish machine-specific paths, credentials or private asset contents
+  in files, Issues or PRs; use placeholders such as `<Maya2024>`,
+  `<Project.uproject>` or `<scratch>`. Report the state reached precisely:
+  implemented, reviewed, merged, host-verified or released.
+- Keep scratch under the actual Git root's parent `.tmp/`; fall back to the
+  ignored `.tmp/` inside this repository. Remove task-owned scratch when it is
+  no longer needed.
 
 Commands run from the repository root. `<mayapy>` is Maya 2024
 `bin/mayapy.exe`; also use Maya 2022.4 when a change touches Maya API usage or
@@ -11,13 +69,14 @@ shared fixtures, or cross-host behavior changes.
 
 | Scope | Command |
 | --- | --- |
-| Maya, pure Python | `python -m unittest discover -s composite/MtoULiveLink/maya/MtoULiveLink/tests -p "test_*.py"` |
-| Maya, host | `<mayapy> -m unittest discover -s composite/MtoULiveLink/maya/MtoULiveLink/tests -p maya_host_tests.py` |
-| Protocol corpus | `python composite/MtoULiveLink/protocol/generate_unreal_corpus.py --check` (when `protocol/` or the corpus changes) |
+| Maya, pure Python | `python -m unittest discover -s maya/MtoULiveLink/tests -p "test_*.py"` |
+| Maya, host | `<mayapy> -m unittest discover -s maya/MtoULiveLink/tests -p maya_host_tests.py` |
+| Protocol corpus | `python protocol/generate_unreal_corpus.py --check` (when `protocol/` or the corpus changes) |
 | Unreal | Build stock UE 5.7.4, then `UnrealEditor-Cmd <project> -ExecCmds="Automation RunTests MtoULiveLink; Quit" -unattended -nopause -nosplash -NullRHI -ReportExportPath=<scratch>` |
+| Project files | `python tools/validate_project.py` and `python -m unittest discover -s tests` (tools, versions, protocol, CI or repository layout) |
 
-Run the repository gates only when the root rules require them; a change
-confined to this product does not.
+`<project>` is a UE 5.7 project that loads `unreal/` through
+`AdditionalPluginDirectories` or holds a copy in `Plugins/MtoULiveLink`.
 
 ## Opt-in tests
 
@@ -60,7 +119,7 @@ playback; a later stage never replaces it. Build the templates once per machine 
 a host Python:
 
 ```powershell
-python composite/MtoULiveLink/maya/MtoULiveLink/tests/maya_prefs_template.py --maya <Maya2024>/bin/maya.exe --kind minimal --out <scratch>/maya-prefs-minimal
+python maya/MtoULiveLink/tests/maya_prefs_template.py --maya <Maya2024>/bin/maya.exe --kind minimal --out <scratch>/maya-prefs-minimal
 ```
 
 `minimal` (only `modelingToolkit`) is the comparable baseline; `maya-default`
@@ -76,7 +135,7 @@ checks the packaged `install.mel` in real Maya GUI sessions: upgrade from the
 0.9.0 single file with a saved shelf button, Chinese and ASCII install paths,
 reinstall, an update while the tool is open, a broken and a partial package,
 missing parts, rollback and a clean install. Pass
-`--old-entry` the 0.9.0 `MtoULiveLink.py` (`git show 799fb07^:composite/MtoULiveLink/maya/MtoULiveLink/scripts/MtoULiveLink.py`).
+`--old-entry` the 0.9.0 `MtoULiveLink.py` (`git show 6512f3e^:maya/MtoULiveLink/scripts/MtoULiveLink.py`).
 
 `maya/MtoULiveLink/tests/maya_gui_window_check.py`, also run with a host
 Python, closes the panel, the scene-reference and the 对象配对 windows from their title bars
@@ -99,8 +158,10 @@ A test editor can run beside a person's own: `-MtoULiveLinkPort=<n>` moves
 the Unreal listener off 54321, the two Maya GUI tests pass it to the Maya they
 start, and `MTOU_LIVELINK_PORT` does the same for any other Maya.
 
-`prototypes/` is frozen verification scaffolding. Its Unreal plugins are
-disabled in `unreal/ToolsLab.uproject`, and product work does not run its tests.
+`prototypes/` is frozen verification scaffolding. Its Unreal plugins load only
+in a host project that adds their `prototypes/<name>/unreal` directory and
+enables them; their READMEs name the collection's `unreal/ToolsLab.uproject`,
+which lists them disabled. Product work does not run their tests.
 
 mayapy has no idle loop: the tool queues its main-thread work in batch mode,
 and a host loop (the `maya_*_peer.py` scripts) must call
@@ -125,6 +186,13 @@ components together; PRs leave it alone. It is 0.10.0 until that release.
 The protocol version both hosts negotiate still changes with the wire
 contract; the PR that changes it adds an `Upgrade notes` entry under
 `Unreleased` instead of bumping the product version.
+
+The release change sets the version with `python tools/version.py <version>
+--apply`. `python tools/package.py --apply` writes `MtoULiveLink-<version>.zip`
+(Maya) and `MtoULiveLink-<version>-UE<engine>.zip` (Unreal) to `releases/`;
+verify an installation from those archives before publishing. Release tags use
+`v<version>`. A collection updates its pin only to a published, reviewed
+commit; it does not track the moving tip.
 
 ## Changelog
 

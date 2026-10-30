@@ -74,8 +74,8 @@ playback ranges on either side, and no client message can move the Unreal time.
 4. Run the Maya-side checks and the cross-host session:
 
    ```
-   <mayapy> -m unittest discover -s composite/MtoULiveLink/prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests -t composite/MtoULiveLink/prototypes/camera-sync/maya/MtoUCameraSyncPrototype
-   <mayapy> composite/MtoULiveLink/prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests/maya_host_camera_tests.py
+   <mayapy> -m unittest discover -s prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests -t prototypes/camera-sync/maya/MtoUCameraSyncPrototype
+   <mayapy> prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests/maya_host_camera_tests.py
    ```
 
    The cross-host session is started by the Unreal test
@@ -86,7 +86,7 @@ playback ranges on either side, and no client message can move the Unreal time.
    UnrealEditor-Cmd.exe <repo>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI ^
      -ExecCmds="Automation RunTests MtoUCameraSyncPrototype.RealMayaPeer" -TestExit="Automation Test Queue Empty" ^
      "-MtoUCameraSyncMayapy=<mayapy>" ^
-     "-MtoUCameraSyncPeer=<repo>/composite/MtoULiveLink/prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests/maya_camera_sync_peer.py" ^
+     "-MtoUCameraSyncPeer=<repo>/prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests/maya_camera_sync_peer.py" ^
      "-MtoUEvidence=<evidence directory>"
    ```
 
@@ -150,11 +150,11 @@ On exit, check that the listener, socket, callback and borrowed scene state
 were released.
 
 Use the [protocol](protocol.md) for framing, identity and resource limits.
-The [acceptance record](../../../../docs/project-history/mtou-livelink/issue-52-camera-sync-acceptance.md)
+The [acceptance record](../../docs/history/issue-52-camera-sync-acceptance.md)
 owns the historical measurements and the distinction between tested editor
 following and unverified sustained playback.
 
 ## Related records
 
-- [Issue 52 acceptance](../../../../docs/project-history/mtou-livelink/issue-52-camera-sync-acceptance.md)
+- [Issue 52 acceptance](../../docs/history/issue-52-camera-sync-acceptance.md)
 - [Preview workflow roadmap](../../docs/preview-workflow-roadmap.md)

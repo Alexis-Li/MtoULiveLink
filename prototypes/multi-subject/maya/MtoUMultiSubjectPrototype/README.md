@@ -12,7 +12,7 @@ This prototype's contract is version 1: newline-delimited compact JSON over
 TCP, 1 MiB per line, at most two subjects with ids from
 `character`/`prop`/`arms`; `../protocol.md` records the shared host contract.
 Its parent product contract is the v9 protocol of
-`composite/MtoULiveLink/README.md`; the product's v9 protocol, the product Maya
+`README.md`; the product's v9 protocol, the product Maya
 entry point and cached playback are untouched by this prototype.
 
 ## What it proves
@@ -99,27 +99,27 @@ per declared bone.
 ```bash
 # 1. pure contract tests (any CPython 3)
 python -m unittest discover \
-  -s composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests \
-  -t composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype
+  -s prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests \
+  -t prototypes/multi-subject/maya/MtoUMultiSubjectPrototype
 
 # 2. mayapy host checks (disposable scenes, JSON evidence)
-"$MAYAPY" composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests/maya_host_multi_subject_tests.py --result host_result.json
+"$MAYAPY" prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests/maya_host_multi_subject_tests.py --result host_result.json
 
 # 3. self-contained session: the peer starts the stand-in receiver itself
-"$MAYAPY" composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests/maya_peer.py --spawn-mock --scenario character-prop \
+"$MAYAPY" prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests/maya_peer.py --spawn-mock --scenario character-prop \
   --frames 4 --remove-at 2 --evidence peer_evidence.json
 
 # 4. read-only inventory of the generated pair (no socket, no save)
-"$MAYAPY" composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/scripts/MtoUMultiSubjectPrototype.py --probe \
+"$MAYAPY" prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/scripts/MtoUMultiSubjectPrototype.py --probe \
   --evidence probe.json
 
 # 5. inspect a supplied real scene read-only, paired with a generated prop
-"$MAYAPY" composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/scripts/MtoUMultiSubjectPrototype.py --probe \
+"$MAYAPY" prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/scripts/MtoUMultiSubjectPrototype.py --probe \
   --scene /path/to/real.ma --reference-rig prop \
   --subject "character=|Group|root" --probe-times 1,1.5 --evidence probe.json
 
 # 6. same probe, plus named landmark bones' evaluated world poses in UE rows
-"$MAYAPY" composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/scripts/MtoUMultiSubjectPrototype.py --probe \
+"$MAYAPY" prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/scripts/MtoUMultiSubjectPrototype.py --probe \
   --scene /path/to/real.ma --reference-rig prop \
   --subject "character=|Group|root" --probe-times 1,120 \
   --probe-bones character=head,pelvis --evidence probe.json
@@ -143,7 +143,7 @@ on TCP and answer `ready`/`applied`/`error`; the peer is the Maya side of that
 conversation:
 
 ```bash
-"$MAYAPY" composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests/maya_peer.py \
+"$MAYAPY" prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests/maya_peer.py \
   --host 127.0.0.1 --port 54340 \
   --scenario character-prop --frames <N> --fps 30 --start-frame 1 \
   --evidence peer_evidence.json [--times 1,3,2,2] [--remove-at <frame>] [--drop-after <frames>]

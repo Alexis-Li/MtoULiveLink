@@ -1,6 +1,6 @@
 """Pure Unreal -> Maya scene reference mapping, FBX scanning and comparison.
 
-Implements the shared half of ``composite/MtoULiveLink/prototypes/scene-reference/
+Implements the shared half of ``prototypes/scene-reference/
 transfer.md``: the ``mtou-scene-ref-manifest/1`` reader, the FBX texture-record
 detector, the axis candidates, the world-position fit and the per-object
 comparison math. Nothing here imports Maya, so every rule can be checked under

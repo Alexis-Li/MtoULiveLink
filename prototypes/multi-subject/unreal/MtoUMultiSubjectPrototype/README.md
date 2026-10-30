@@ -345,5 +345,5 @@ refused.
 
 The [integration proposal](../../../../docs/preview-workflow-integration-plan.md)
 owns planned product changes. The
-[acceptance record](../../../../../../docs/project-history/mtou-livelink/issue-54-multi-subject-acceptance.md)
+[acceptance record](../../../../docs/history/issue-54-multi-subject-acceptance.md)
 owns the tested scope, real-asset results and remaining limits.

@@ -22,7 +22,7 @@ Install the Maya and Unreal components from the same release.
 
 ## Installation
 
-The component paths below are relative to this product directory.
+The component paths below are relative to this repository's root.
 
 **Maya**
 
@@ -347,4 +347,4 @@ or unloading its level ends the connection.
 ## Further reading
 
 - [Changelog](CHANGELOG.md)
-- [Development and acceptance records](../../docs/project-history/mtou-livelink/README.md)
+- [Development and acceptance records](docs/history/README.md)

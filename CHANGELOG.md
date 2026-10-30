@@ -1,5 +1,8 @@
 # Changelog
 
+Issue numbers in entries up to 0.10.0 refer to the
+[collection tracker](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues).
+
 ## Unreleased
 
 ### Upgrade notes
@@ -81,8 +84,8 @@
 
 ## 0.5.0 - 2026-09-22
 
-Milestone accepted after practical use and tagged
-`composite-mtou-livelink-v0.5.0`; no installation packages were published.
+Milestone accepted after practical use and tagged `v0.5.0`; no installation
+packages were published.
 
 ### Added
 

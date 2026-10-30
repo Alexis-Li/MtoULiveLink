@@ -12,7 +12,7 @@ The reviewed implementation comprises `907adf0`, `09b096e`, `d3a2cee`, and
 and adds independently enabled character parts. Compatibility, one-subject pose
 and Morph routing, and Primary-only garment preparation are described in the
 [architecture record](architecture.md#character-composition-and-additional-parts)
-and [ADR 0002](../../../composite/MtoULiveLink/docs/adr/0002-end-streaming-when-preview-inputs-change.md).
+and [ADR 0002](../adr/0002-end-streaming-when-preview-inputs-change.md).
 
 The acceptance fixes establish three durable boundaries:
 

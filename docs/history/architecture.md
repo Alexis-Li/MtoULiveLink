@@ -11,7 +11,7 @@ Last aligned with implementation: 2026-09-03
 This document records the completed 0.4.0 baseline. For subsequent 0.5.0
 development and its scoped acceptance evidence, use the
 [development-history index](README.md) and current project decisions under
-[`docs/adr`](../../../composite/MtoULiveLink/docs/adr/).
+[`docs/adr`](../adr/).
 
 ## Summary
 
@@ -372,14 +372,14 @@ connection and identify the upload or play attempt they belong to.
 
 This historical cache baseline used `protocol/conformance-v6.json`, retained
 in Git history. The active contract is linked from
-[ADR 0013](../../../composite/MtoULiveLink/docs/adr/0013-upload-the-cache-before-local-replay.md).
+[ADR 0013](../adr/0013-upload-the-cache-before-local-replay.md).
 Maya repository tests read it directly, and a Python-standard-library generator
 projects the same cases into a checked-in, test-only Unreal `.inl`; repository
 validation fails if that projection is stale. Neither shipped host component
 has a runtime dependency on the corpus or on its sibling host directory.
 Both adapters require v6; superseded corpora are preserved in Git. A corpus
 remains in the source tree only while it has active consumers and corresponding
-tests, as defined in [ADR 0013](../../../composite/MtoULiveLink/docs/adr/0013-upload-the-cache-before-local-replay.md).
+tests, as defined in [ADR 0013](../adr/0013-upload-the-cache-before-local-replay.md).
 
 The product has no fixed bone- or curve-count ceiling. Individual framed JSON
 payloads are limited by a frozen 32 MiB per-message framing ceiling enforced
@@ -534,7 +534,7 @@ DAG, skinning, BlendShape, callback, and timer behavior through the same
 character-scene and streaming-session interfaces.
 
 The commands, the default and opt-in test tiers, and when each build runs are
-kept in [the product rules](../../../composite/MtoULiveLink/AGENTS.md).
+kept in [the product rules](../../AGENTS.md).
 
 ### Unreal Automation tests
 
@@ -900,9 +900,9 @@ Date: 2026-08-29
 
 Issue #25 deepened Preview readiness on the Binding Actor without changing
 actor-owned, explicit, stale-safe readiness (now consolidated in
-[ADR 0001](../../../composite/MtoULiveLink/docs/adr/0001-keep-preview-meshes-transient.md)),
+[ADR 0001](../adr/0001-keep-preview-meshes-transient.md)),
 workflow negotiation (now consolidated in
-[ADR 0008](../../../composite/MtoULiveLink/docs/adr/0008-add-model-preview-to-the-existing-product.md)),
+[ADR 0008](../adr/0008-add-model-preview-to-the-existing-product.md)),
 ADR-0010 transactional Preview Morph transfer, or ADR-0011
 Accepted Preview Morph semantics.
 

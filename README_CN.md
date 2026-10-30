@@ -19,7 +19,7 @@ MtoU_LiveLink 连接同一台电脑上的 Maya 与 Unreal Editor，让你在 May
 
 ## 安装
 
-以下组件路径均相对于本产品目录。
+以下组件路径均相对于本仓库根目录。
 
 **Maya**
 
@@ -274,4 +274,4 @@ Unreal 导出时已配对目标所在的位置。目标被移动或旋转之后�
 ## 更多信息
 
 - [版本记录](CHANGELOG.md)
-- [开发与验收记录](../../docs/project-history/mtou-livelink/README.md)
+- [开发与验收记录](docs/history/README.md)

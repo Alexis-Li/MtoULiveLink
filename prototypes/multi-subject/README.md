@@ -25,7 +25,7 @@ animation import/export, or package this prototype as a production plugin.
 2. Run the Unreal Editor automation tests `MtoUMultiSubjectPrototype`.
    The opt-in `RealMayaPeer` test requires the host executable and checked-in
    peer script; pass `-MtoUMultiSubjectMayapy=<Maya2024>/bin/mayapy.exe`,
-   `-MtoUMultiSubjectPeer=<checkout>/composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests/maya_peer.py`,
+   `-MtoUMultiSubjectPeer=<checkout>/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests/maya_peer.py`,
    and `-MtoUEvidence=<writable scratch directory>`. Add
    `-MtoUMultiSubjectScenario=character-arms` for the second run. The test
    creates transient target actors/meshes and starts a disposable Maya process

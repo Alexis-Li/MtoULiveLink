@@ -200,7 +200,7 @@ the previous container aside instead of deleting it, deletes it only after the
 new container resolved every recorded path, and restores it when any step fails;
 a same-named namespace this tool does not own is refused, and a staging name it
 does not own is avoided. See the
-[current acceptance record](../../../../docs/project-history/mtou-livelink/issue-53-scene-reference-acceptance.md)
+[current acceptance record](../../docs/history/issue-53-scene-reference-acceptance.md)
 for the evidence, the remaining boundaries (failure injection is host-level
 evidence, the ownership check covers top-level foreign transforms, and only the
 fixture landscape and partition states are verified) and the completion

@@ -1,7 +1,7 @@
 # Hash-suffix skeleton mapping acceptance (Issue #46)
 
 Status: implemented and host-verified on 2026-09-20 on local `main`. The
-[Unreleased changelog](../../../composite/MtoULiveLink/CHANGELOG.md#unreleased)
+[Unreleased changelog](../../CHANGELOG.md#unreleased)
 owns the user-facing entries; this record keeps the technical evidence.
 
 Date: 2026-09-20. Follow-up to the

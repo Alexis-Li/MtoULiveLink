@@ -4,8 +4,8 @@ Standard library only: these run under CPython and under ``mayapy`` without
 starting Maya.
 
     python -m unittest discover \
-        -s composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests \
-        -t composite/MtoULiveLink/prototypes/multi-subject/maya/MtoUMultiSubjectPrototype
+        -s prototypes/multi-subject/maya/MtoUMultiSubjectPrototype/tests \
+        -t prototypes/multi-subject/maya/MtoUMultiSubjectPrototype
 """
 
 import importlib.util

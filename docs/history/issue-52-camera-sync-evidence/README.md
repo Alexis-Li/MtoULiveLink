@@ -21,7 +21,7 @@ The seven JSON files are byte-for-byte copies of review-02 results at
 Historical paths inside those results identify original runs, not current file
 locations. Expected stale/replay refusals are negative cases, not failed acceptance.
 
-Use maintained [prototype instructions](../../../../composite/MtoULiveLink/prototypes/camera-sync/README.md)
+Use maintained [prototype instructions](../../../prototypes/camera-sync/README.md)
 for general checks. The supplementary script runs with Maya 2024 `mayapy` and
 accepts an optional output JSON path; its default uses scratch beside the repo.
 The preserved script was syntax-checked during archival, not rerun as a new review.

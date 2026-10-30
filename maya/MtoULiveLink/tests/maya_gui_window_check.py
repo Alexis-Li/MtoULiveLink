@@ -12,7 +12,7 @@ never answers them. Every scenario copies it, so neither the person's daily
 preferences nor the template change, and starts its own Maya GUI process with
 ``TEMP`` inside the evidence directory, where Maya writes a crash log.
 
-The package comes from ``tools/package_maya_tool.py`` like the install check;
+The package comes from ``tools/package.py`` like the install check;
 the panel is opened from the extracted copy. Windows close with the
 ``WM_CLOSE`` message their title-bar button sends, and buttons are clicked
 through Qt, so Maya runs its own close and click handling.

@@ -34,4 +34,4 @@ threshold; output decomposition preserves tiny axes instead of clamping them to
 zero. Truly singular or numerically non-finite transforms still stop streaming.
 TRS-chain validation scope, numerical tolerances, and the actual character's
 rendered Animation/Model, Refresh and reconnect results are recorded in the
-[complete-skeleton acceptance record](../../../../docs/project-history/mtou-livelink/complete-skeleton-acceptance.md).
+[complete-skeleton acceptance record](../history/complete-skeleton-acceptance.md).

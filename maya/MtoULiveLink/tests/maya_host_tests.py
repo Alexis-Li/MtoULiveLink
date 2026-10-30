@@ -1329,7 +1329,7 @@ class MayaHostTests(unittest.TestCase):
 
     def _reference_scratch(self):
         import shutil
-        root = pathlib.Path(__file__).resolve().parents[5]
+        root = pathlib.Path(__file__).resolve().parents[3]
         for candidate in (root.parent / ".tmp", root / ".tmp"):
             if candidate.is_dir():
                 directory = pathlib.Path(tempfile.mkdtemp(

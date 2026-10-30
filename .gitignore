@@ -1,0 +1,46 @@
+# Local agent instructions
+AGENTS.override.md
+.tmp/
+
+# Operating system
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.code-workspace
+.worktrees/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Maya
+mayaCrashLog*
+mayaRenderLog.txt
+*.swatches
+*.autosave
+*.bak
+
+# Unreal Engine
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+.vs/
+*.sln
+*.suo
+*.VC.db
+*.VC.opendb
+
+# Packaged output
+releases/
+*.zip
+*.7z

@@ -84,7 +84,7 @@ Upload/play/clear identity history belongs to one Streaming session: clearing a 
 preserves that session's stale-ID rejection, while a new negotiated session
 starts fresh and accepts its own sequence from 1. Delayed commands and outcomes
 from an older session cannot advance the new one. See the
-[reconnect acceptance](../../../../docs/project-history/mtou-livelink/cached-playback-reconnect-acceptance.md)
+[reconnect acceptance](../history/cached-playback-reconnect-acceptance.md)
 for the deterministic and real-host evidence.
 
 Both adapters require protocol v9. Its executable contract is

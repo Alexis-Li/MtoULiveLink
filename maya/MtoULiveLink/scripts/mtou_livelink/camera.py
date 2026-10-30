@@ -1,7 +1,7 @@
 """Unreal -> Maya camera application for the v11 linkage contract.
 
 Two layers live here. The upper one is pure Python: the mapping frozen in the
-camera-sync prototype (``composite/MtoULiveLink/prototypes/camera-sync``) ported
+camera-sync prototype (``prototypes/camera-sync``) ported
 into the product package so nothing imports the prototype at runtime, and the
 payload validation one v11 ``camera_time`` message has to pass. The lower one is
 :class:`LinkCamera`, the Maya host adapter that writes one target to one

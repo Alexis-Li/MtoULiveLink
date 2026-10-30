@@ -3,9 +3,9 @@
 Two layers live here. The upper one is pure Python and never imports Maya: the
 ``mtou-scene-ref-manifest/1`` reader, the FBX texture and media detector both
 hosts share, the axis candidates, the world-position fit and the per-object
-comparison math ported from the scene-reference prototype (``composite/
-MtoULiveLink/prototypes/scene-reference``); :func:`inspect` reads a handoff
-directory and decides whether it may be imported. The lower one is the Maya host
+comparison math ported from the scene-reference prototype
+(``prototypes/scene-reference``); :func:`inspect` reads a handoff directory
+and decides whether it may be imported. The lower one is the Maya host
 adapter: :func:`import_handoff` stages the handoff into a free
 ``<container>_Incoming`` namespace, verifies it against the manifest and only
 then lets the staging namespace take the container's name, with the previous

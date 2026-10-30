@@ -67,16 +67,16 @@ a level, touches an object outside its container, or saves a scene.
    <Engine>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe <repo>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI -DDC-ForceMemoryCache ^
      -ExecCmds="Automation RunTests MtoUSceneRefPrototype" -TestExit="Automation Test Queue Empty" ^
      "-MtoUSceneRefMayapy=<mayapy>" ^
-     "-MtoUSceneRefPeer=<repo>/composite/MtoULiveLink/prototypes/scene-reference/maya/MtoUSceneRefPrototype/scripts/MtoUSceneRefPrototype.py" ^
+     "-MtoUSceneRefPeer=<repo>/prototypes/scene-reference/maya/MtoUSceneRefPrototype/scripts/MtoUSceneRefPrototype.py" ^
      "-MtoUEvidence=<evidence directory>"
    ```
 
 3. Run the Maya-side checks, or one handoff by hand:
 
    ```
-   <mayapy> -m unittest discover -s composite/MtoULiveLink/prototypes/scene-reference/maya/MtoUSceneRefPrototype/tests -t composite/MtoULiveLink/prototypes/scene-reference/maya/MtoUSceneRefPrototype
-   <mayapy> composite/MtoULiveLink/prototypes/scene-reference/maya/MtoUSceneRefPrototype/tests/maya_host_scene_ref_tests.py --result <json>
-   <mayapy> composite/MtoULiveLink/prototypes/scene-reference/maya/MtoUSceneRefPrototype/scripts/MtoUSceneRefPrototype.py --fbx <scope>.fbx --manifest <scope>.manifest.json --report <json>
+   <mayapy> -m unittest discover -s prototypes/scene-reference/maya/MtoUSceneRefPrototype/tests -t prototypes/scene-reference/maya/MtoUSceneRefPrototype
+   <mayapy> prototypes/scene-reference/maya/MtoUSceneRefPrototype/tests/maya_host_scene_ref_tests.py --result <json>
+   <mayapy> prototypes/scene-reference/maya/MtoUSceneRefPrototype/scripts/MtoUSceneRefPrototype.py --fbx <scope>.fbx --manifest <scope>.manifest.json --report <json>
    ```
 
 ## The fixture
@@ -181,7 +181,7 @@ every fixture build):
 
 ## Related records
 
-- [Issue 53 acceptance](../../../../docs/project-history/mtou-livelink/issue-53-scene-reference-acceptance.md)
+- [Issue 53 acceptance](../../docs/history/issue-53-scene-reference-acceptance.md)
 - [Official capability review](official-capabilities.md)
 - [Transfer contract](transfer.md)
 - [Preview workflow roadmap](../../docs/preview-workflow-roadmap.md)

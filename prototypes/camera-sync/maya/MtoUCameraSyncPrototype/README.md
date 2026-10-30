@@ -34,11 +34,11 @@ default; point the commands at your Maya installation, for example via a
 ```bash
 # 1. pure mapping tests (any CPython 3)
 python -m unittest discover \
-  -s composite/MtoULiveLink/prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests \
-  -t composite/MtoULiveLink/prototypes/camera-sync/maya/MtoUCameraSyncPrototype
+  -s prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests \
+  -t prototypes/camera-sync/maya/MtoUCameraSyncPrototype
 
 # 2. mayapy host checks (disposable scene, JSON evidence)
-"$MAYAPY" composite/MtoULiveLink/prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests/maya_host_camera_tests.py \
+"$MAYAPY" prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests/maya_host_camera_tests.py \
   --result host_result.json
 #    applies a representative payload, exercises the borrowed-camera and
 #    repeated enter/exit paths against one publisher, and checks that every
@@ -221,5 +221,5 @@ saved by this prototype.
 
 The keyed-joint witness verifies one sampled value and its time identity. It
 does not use the MtoULiveLink product's pose channel or prove full-character
-streaming or continuous playback. See the [Issue 52 acceptance record](../../../../../../docs/project-history/mtou-livelink/issue-52-camera-sync-acceptance.md)
+streaming or continuous playback. See the [Issue 52 acceptance record](../../../../docs/history/issue-52-camera-sync-acceptance.md)
 for measured host results and remaining scope.

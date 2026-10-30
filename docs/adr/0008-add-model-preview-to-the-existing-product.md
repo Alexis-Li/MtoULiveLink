@@ -24,6 +24,6 @@ of one character sharing a Skeleton asset; independent props or different
 skeleton targets must not bypass pairing by being classified as parts.
 
 Full-character display implementation and material-slot constraints are recorded
-in the [architecture history](../../../../docs/project-history/mtou-livelink/architecture.md).
+in the [architecture history](../history/architecture.md).
 Generated mesh ownership and garment comparison invariants are defined by
 [ADR 0001](0001-keep-preview-meshes-transient.md).

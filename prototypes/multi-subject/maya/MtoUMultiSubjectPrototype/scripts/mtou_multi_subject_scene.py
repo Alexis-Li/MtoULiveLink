@@ -28,9 +28,9 @@ from pathlib import Path
 #: Repository root, then the product script whose sampling contract this
 #: prototype reuses (``convert_transform``, ``_sample_pose``, ``_capture_subject``).
 _MODULE_PATH = Path(__file__).resolve()
-REPOSITORY_ROOT = _MODULE_PATH.parents[7]
-PRODUCT_SCRIPT = (REPOSITORY_ROOT / "composite" / "MtoULiveLink" / "maya"
-                  / "MtoULiveLink" / "scripts" / "MtoULiveLink.py")
+REPOSITORY_ROOT = _MODULE_PATH.parents[5]
+PRODUCT_SCRIPT = (REPOSITORY_ROOT / "maya" / "MtoULiveLink" / "scripts"
+                  / "MtoULiveLink.py")
 RECIPE_PATH = _MODULE_PATH.parent / "mtou_multi_subject_recipe.json"
 
 SCRATCH_ENVIRONMENT = "MTOU_MULTI_SUBJECT_SCRATCH"

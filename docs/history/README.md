@@ -1,23 +1,31 @@
 # MtoU Live Link history
 
-Start with the [product manual](../../../composite/MtoULiveLink/README.md) for
-current use and the [changelog](../../../composite/MtoULiveLink/CHANGELOG.md)
-for version changes. Records below describe their named acceptance baselines;
-their test results do not automatically apply to later code.
+Start with the [product manual](../../README.md) for current use and the
+[changelog](../../CHANGELOG.md) for version changes. Records below describe
+their named acceptance baselines; their test results do not automatically apply
+to later code.
+
+Records written before 2026-10-30 come from the
+[collection repository](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package),
+where this product lived at `composite/MtoULiveLink/`, now this repository's
+root. Their commands, paths, commit SHAs and bare issue numbers refer to that
+repository: `docs/project-history/mtou-livelink/` is this directory,
+`unreal/ToolsLab.uproject` is the collection's Unreal host project and
+`tools/package_*.py` became `tools/package.py`.
 
 ## Milestones and current work
 
 | Milestone | Accepted scope and source |
 | --- | --- |
 | 0.4.0, 2026-09-03 | Integrated through [PR #36](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/pull/36), followed by owner C01/Topia verification. See [stock-engine acceptance](stock-engine-acceptance.md) and [Topia acceptance](topia-engine-acceptance.md). |
-| 0.5.0, 2026-09-22 | Owner accepted practical use; local tag `composite-mtou-livelink-v0.5.0`, implementation checkpoint `278e16a001037a08933e8f180c82899a2e567e8e`. No installation packages or additional host-version certification were produced. |
+| 0.5.0, 2026-09-22 | Owner accepted practical use; tag `v0.5.0`, implementation checkpoint `278e16a001037a08933e8f180c82899a2e567e8e`. No installation packages or additional host-version certification were produced. |
 | Preview workflow, 2026-10-13 | [Parent acceptance #47](issue-47-preview-workflow-acceptance.md) covers four delivered workflows and three bounded prototypes on `codex/mtou-preview-workflow`; prototype integration remains a separate task. |
 | Preview workflow integration, 2026-10-29 | [INT-01–14 acceptance](preview-workflow-integration-acceptance.md) maps the #56 joint criteria to the I-1, I-2 and I-3 baselines accepted on `codex/mtou-preview-workflow`, merged into `main` through [PR #93](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/pull/93) at `9830f80ffdc511cc23b4224d0e1f1b54bf876ad3` (2026-10-30); unreleased (0.10.0, protocol v11). |
 
-The [joint integration proposal](../../../composite/MtoULiveLink/docs/preview-workflow-integration-plan.md)
+The [joint integration proposal](../preview-workflow-integration-plan.md)
 is tracked in [Issue #56](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/56).
 Read that issue for current decisions and progress, and the
-[workflow scope](../../../composite/MtoULiveLink/docs/preview-workflow-roadmap.md)
+[workflow scope](../preview-workflow-roadmap.md)
 for product direction.
 
 ## Architecture and host baselines
@@ -87,4 +95,27 @@ in the tracker and accepted conclusions in the topic records above.
 
 Earlier per-change chronology remains in
 [the Git version before index consolidation](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/blob/b0f9f3530def60b3d837d7af07aff766789285c8/docs/project-history/mtou-livelink/README.md).
-Retention and future additions follow the [history rules](../README.md).
+
+## Retention
+
+Keep here only what stays useful after a task: important design trade-offs,
+migration constraints, calibration and acceptance evidence that maintained
+code, tests, documentation or the tracker cannot recover. Requirements and
+status belong in Issues, delivery and routine results in PRs and comments,
+current usage in the README pair and version changes in the changelog.
+
+- Before adding a record, name the future decision or check that needs it and
+  extend an existing topic where possible. Use purpose-based file names and
+  keep existing ones that published links use.
+- Put the conclusion, accepted scope and material limits first, then the
+  baseline, environment and input identity, evidence source and reproduction
+  entry. Keep implementation, review, integration and host acceptance distinct.
+- Retain raw evidence only when it supports a result that would otherwise be
+  lost, and state each file's purpose in its record. Routine logs, debugging
+  rounds and repeated reports add no record.
+- Keep a historical conclusion tied to its baseline; a later acceptance updates
+  the topic without presenting old evidence as a new run. Comment archives stay
+  available as source artifacts for published references.
+
+Comment consolidation and scratch cleanup follow the
+[workflow](../workflow.md#closure-and-requested-archival).
