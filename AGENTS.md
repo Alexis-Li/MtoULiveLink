@@ -177,9 +177,9 @@ and a host loop (the `maya_*_peer.py` scripts) must call
 ## Versions
 
 The product version (Maya `__version__`, Unreal `VersionName` and `Version`)
-names the next release and changes only in the release change, for both
-components together; PRs leave it alone. It is 1.0.0, the latest release,
-until the next release change.
+changes only in the release change, which sets it to the version being
+released for both components together; other PRs leave it alone. It is
+1.0.0.
 The protocol version both hosts negotiate still changes with the wire
 contract; the PR that changes it adds an `Upgrade notes` entry under
 `Unreleased` instead of bumping the product version.
