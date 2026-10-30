@@ -16,8 +16,8 @@ animation import/export, or package this prototype as a production plugin.
 ## Reproduce
 
 1. Set `MtoUMultiSubjectPrototype` to `"Enabled": true` in
-   `unreal/ToolsLab.uproject`; it is disabled there by default. Then build
-   `unreal/ToolsLab.uproject` with the local UE 5.7
+   the collection's ToolsLab (`<collection>/unreal/ToolsLab.uproject`); it is
+   disabled there by default. Then build that project with the local UE 5.7
    `Engine/Build/BatchFiles/Build.bat UnrealEditor Win64 Development
    <collection>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE -NoUBA`.
    ToolsLab finds the editor-only prototype through its additional plugin
