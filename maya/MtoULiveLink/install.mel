@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Alexis-Li
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GPL with additional terms; see NOTICE.
 // MtoU_LiveLink installer: drag this file into a Maya viewport.
 //
 // It finds the folder it was extracted to and runs

@@ -348,6 +348,16 @@ import it again, or click **移除参考** to continue without it.
 Keep the Binding Actor and its level loaded while previewing; deleting the actor
 or unloading its level ends the connection.
 
+## License
+
+Copyright (C) 2026 Alexis-Li. MtoU Live Link is free software under the
+[GNU General Public License, version 3 only](LICENSE), with the additional
+permission and terms in [NOTICE](NOTICE), and comes with no warranty. You may
+use and modify it freely, commercially or inside a company. If you give a copy
+to anyone else, keep the notices, provide the source, mark your changes and do
+not present a modified version as the original. Both archives contain `LICENSE`
+and `NOTICE`; the panels show the same notice under **关于与许可**.
+
 ## Further reading
 
 - [Changelog](CHANGELOG.md)

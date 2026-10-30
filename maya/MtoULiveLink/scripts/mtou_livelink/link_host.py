@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Maya host adapter for the linkage state machine.
 
 `LinkageSession` owns the state and the scheduling; this adapter owns every

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Shared Maya layout, theme and control helpers for the MtoU_LiveLink windows.
 
 The panel controller and the two detail windows build their cards, grid rows,

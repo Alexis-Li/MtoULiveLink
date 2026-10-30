@@ -56,6 +56,17 @@ class InstallTests(unittest.TestCase):
                          os.path.normcase(os.path.normpath(plan.scripts_dir)))
         self.assertFalse((self.modules / "MtoULiveLink").exists())
 
+    def test_managed_copy_keeps_the_license_files(self):
+        root = self.component("发布 目录/MtoULiveLink")
+        (root / "LICENSE").write_text("license", encoding="utf-8")
+        (root / "NOTICE").write_text("notice", encoding="utf-8")
+        plan = self.plan(root)
+        install.apply_install(plan)
+
+        copy = pathlib.Path(plan.copy_dir)
+        self.assertEqual("license", (copy / "LICENSE").read_text(encoding="utf-8"))
+        self.assertEqual("notice", (copy / "NOTICE").read_text(encoding="utf-8"))
+
     def test_non_ascii_path_is_copied_into_modules_by_relative_path(self):
         root = self.component("发布 目录/MtoULiveLink")
         plan = self.plan(root)

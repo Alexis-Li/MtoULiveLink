@@ -5,6 +5,14 @@ Linked issue numbers point to the
 where this product was developed until 2026-10-30; bare numbers refer to this
 repository's issues.
 
+## Unreleased
+
+### Added
+
+- Both archives now contain `LICENSE` and `NOTICE`, and **关于与许可** in the Maya
+  panel and the Binding Actor's Details shows the copyright and license. The
+  license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
+
 ## 1.0.0 - 2026-10-30
 
 ### Upgrade notes
