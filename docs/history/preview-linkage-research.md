@@ -1,14 +1,14 @@
 # 预览联动能力调研
 
 调研基线：2026-09-22。本文保留最初的官方能力来源与选型依据；
-实际验证结论由以下原型记录维护，产品接入由
+实际验证结论见以下原型记录（原型源码已在 1.0.0 移除，链接指向其最后一次提交）；产品接入由
 [整合方案](preview-workflow-integration-plan.md)承接。
 
 | 主题 | 后续验证与契约 |
 | --- | --- |
-| UE 相机与 Sequencer → Maya | [官方能力核对](../prototypes/camera-sync/official-capabilities.md)、[相机映射](../prototypes/camera-sync/mapping.md)、[#52 验收](history/issue-52-camera-sync-acceptance.md) |
-| UE 关卡参考几何 → Maya | [官方能力核对](../prototypes/scene-reference/official-capabilities.md)、[交接契约](../prototypes/scene-reference/transfer.md)、[#53 验收](history/issue-53-scene-reference-acceptance.md) |
-| 独立道具与多角色 | [对象协议](../prototypes/multi-subject/protocol.md)、[#54 验收](history/issue-54-multi-subject-acceptance.md) |
+| UE 相机与 Sequencer → Maya | [官方能力核对](https://github.com/Alexis-Li/MtoULiveLink/blob/caf7d45880e0872adfca8f0c179c35e453ae0be0/prototypes/camera-sync/official-capabilities.md)、[相机映射](https://github.com/Alexis-Li/MtoULiveLink/blob/caf7d45880e0872adfca8f0c179c35e453ae0be0/prototypes/camera-sync/mapping.md)、[#52 验收](issue-52-camera-sync-acceptance.md) |
+| UE 关卡参考几何 → Maya | [官方能力核对](https://github.com/Alexis-Li/MtoULiveLink/blob/caf7d45880e0872adfca8f0c179c35e453ae0be0/prototypes/scene-reference/official-capabilities.md)、[交接契约](https://github.com/Alexis-Li/MtoULiveLink/blob/caf7d45880e0872adfca8f0c179c35e453ae0be0/prototypes/scene-reference/transfer.md)、[#53 验收](issue-53-scene-reference-acceptance.md) |
+| 独立道具与多角色 | [对象协议](https://github.com/Alexis-Li/MtoULiveLink/blob/caf7d45880e0872adfca8f0c179c35e453ae0be0/prototypes/multi-subject/protocol.md)、[#54 验收](issue-54-multi-subject-acceptance.md) |
 
 ## 相机与时间同步的来源
 

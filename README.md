@@ -22,7 +22,10 @@ Install the Maya and Unreal components from the same release.
 
 ## Installation
 
-The component paths below are relative to this repository's root.
+Download both archives of one release from the repository's Releases page:
+`MtoULiveLink-<version>.zip` (Maya) and `MtoULiveLink-<version>-UE5.7.zip`
+(Unreal source plugin). Component paths below are relative to this
+repository's root and match the archives' contents.
 
 **Maya**
 
@@ -45,7 +48,8 @@ earlier version, restart Maya when prompted.
 
 **Unreal**
 
-1. Copy `unreal/MtoULiveLink/` to `<Project>/Plugins/MtoULiveLink/`.
+1. Copy `unreal/MtoULiveLink/` (or the `MtoULiveLink` folder of the Unreal
+   archive) to `<Project>/Plugins/MtoULiveLink/`.
 2. Compile the Unreal project. For Topia Engine, use the instructions below.
 3. Enable **Live Link** and **MtoU_LiveLink**, then restart Unreal Editor.
 

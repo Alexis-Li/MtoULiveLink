@@ -52,13 +52,12 @@ rather than counted as lateness. Complete upload, bounded resources,
 stale-command isolation, and no silent frame dropping during sequential
 playback remain required.
 
-This clock ownership is scoped to Cached Playback, not all future preview modes.
-The [Issue #52 prototype](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/52)
-may disable cached playback while validating explicit Sequencer time ownership
-and restoration. Production integration requires a decision on mutually
-exclusive time control; it is not established by this cache decision.
+This clock ownership is scoped to Cached Playback. Camera linkage is a separate
+mode with its own time authority, and entering it requires the cache to be
+cleared first; mutually exclusive time control is decided in
+[ADR 0014](0014-one-time-authority-and-staged-pose-groups.md).
 
-Current protocol v9 binds `init`, each upload, each UE play attempt, each
+The protocol binds `init`, each upload, each UE play attempt, each
 pause, resume, seek, loop selection, and each clear request to authoritative
 Character, `upload_id`, `play_id`, and `clear_id` identities. Unreal reports
 `cache_playing` (with the attempt's loop selection) before that attempt's
@@ -87,10 +86,11 @@ from an older session cannot advance the new one. See the
 [reconnect acceptance](../history/cached-playback-reconnect-acceptance.md)
 for the deterministic and real-host evidence.
 
-Both adapters require protocol v9. Its executable contract is
-[`conformance-v9.json`](../../protocol/conformance-v9.json), covering message
-identities, application evidence, playback segments and their completion
-scopes, pause/seek/loop outcomes, resource accounting, and mode transitions.
-The source tree retains protocol corpora only for versions with active
-consumers and corresponding tests. Superseded contracts are preserved in Git;
-their historical limits do not govern the current adapters.
+The cache messages, identities and limits are part of the
+[wire protocol](../../protocol/README.md#cached-playback), whose
+[corpus](../../protocol/conformance.json) covers message identities,
+application evidence, playback segments and their completion scopes,
+pause/seek/loop outcomes, resource accounting, and mode transitions. The source
+tree keeps only the current protocol version's contract and corpus; superseded
+contracts are preserved in Git and their historical limits do not govern the
+current adapters.

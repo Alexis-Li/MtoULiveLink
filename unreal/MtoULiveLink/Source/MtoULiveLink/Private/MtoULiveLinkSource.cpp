@@ -1332,7 +1332,7 @@ uint32 FMtoULiveLinkSource::Run()
                             // per-message rejection: the session answers with
                             // its stable code and keeps the connection, so an
                             // operator can correct the action without losing
-                            // the streaming session (protocol/v10.md, mode and
+                            // the streaming session (protocol/README.md, mode and
                             // reference message tables).
                             SendLinkageError(LinkageErrorCode, LinkageError);
                             continue;

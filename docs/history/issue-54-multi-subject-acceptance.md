@@ -7,8 +7,8 @@ records the issue state; product integration remains with #47.
 
 ## Scope and inputs
 
-The [independently runnable prototype](../../prototypes/multi-subject/README.md)
-demonstrates two realtime subjects. Its [protocol](../../prototypes/multi-subject/protocol.md)
+The [independently runnable prototype](https://github.com/Alexis-Li/MtoULiveLink/blob/caf7d45880e0872adfca8f0c179c35e453ae0be0/prototypes/multi-subject/README.md)
+demonstrates two realtime subjects. Its [protocol](https://github.com/Alexis-Li/MtoULiveLink/blob/caf7d45880e0872adfca8f0c179c35e453ae0be0/prototypes/multi-subject/protocol.md)
 delivers identity, common time, space, exclusive preview ownership, cache-only
 design, the product-contract inventory and a minimum implementation order.
 Product v9 integration, a multi-object cache and product UI are outside this issue.

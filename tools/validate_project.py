@@ -30,6 +30,8 @@ REQUIRED_PATHS = (
     "maya/MtoULiveLink/tests",
     "unreal/MtoULiveLink/MtoULiveLink.uplugin",
     "unreal/MtoULiveLink/Source",
+    "protocol/README.md",
+    "protocol/conformance.json",
     "protocol/generate_unreal_corpus.py",
     "tools/issue_report.py",
 )

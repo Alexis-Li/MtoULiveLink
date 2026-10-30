@@ -4,7 +4,7 @@
 - 状态：通过
 - 基线：汇总审核 checkout `77da31afe358963413d92ee55c1031235a0037b9`，本地与已发布分支 `codex/mtou-preview-workflow` 一致。主产品最新实现／已审核基线为 `12199b15f8134e533a44e21a62744d22b0cff2b5`；三项原型各自基线见下表。此次只交付验收和方案文档，未提交新的运行时实现。
 - 范围：#47 原有四项实现＋三项有界验证的母规格汇总验收，覆盖 User Stories 1–24 及三个原型共同规划的前置条件。支持关闭 #47；不把后续整合、完整多对象缓存、任意生产场景或新宿主认证纳入本次通过。
-- 依据：[#47 需求](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/47)、下列七项最终独立审核／当前汇总、各项目验收记录与原型源报告归档。新方案为[后续整合草案](../preview-workflow-integration-plan.md)，不是当前实现。
+- 依据：[#47 需求](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/47)、下列七项最终独立审核／当前汇总、各项目验收记录与原型源报告归档。新方案为[后续整合草案](preview-workflow-integration-plan.md)，不是当前实现。
 - 阻塞项：无
 - 本次验证：混合
 - 更新日期：2026-10-13
@@ -28,7 +28,7 @@
 | User Stories 19–20：相机、Sequencer 有界验证 | [#52 当前汇总](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/52#issuecomment-5888803268)、[记录](issue-52-camera-sync-acceptance.md) | 透视镜头／门、cuts／子帧／求值身份、回读与恢复通过。review-02 原评论 6055097768 见源归档；完整产品姿势、交互 Maya 回调与持续播放未由单关节 witness 证明。 |
 | User Story 21：无贴图关卡参考 | [#53 当前汇总](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/53#issuecomment-5888512464)、[记录](issue-53-scene-reference-acceptance.md) | 显式范围、FBX 与产物图片检查、世界测量、灰模和失败恢复通过。最终独立 review-03 在源归档 `final_review`；对象类别／深层外来节点／真实崩溃边界保留。 |
 | User Stories 22–23：独立配对与目标骨架 | [#54 当前汇总](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/54#issuecomment-5883765955)、[记录](issue-54-multi-subject-acceptance.md) | C01＋C02 真实双对象及合成 full-body／arms、严格必要骨骼映射、世界 oracle、独立移除和最小 Sequence 恢复通过。review-04 原评论 6136464547 在源归档；产品接入与多对象缓存未实施。 |
-| User Story 24 与共同规划决定 | 全部七项记录及[整合草案](../preview-workflow-integration-plan.md) | 双端、协议、恢复和实际宿主证据按原验收范围复用；三个原型联合设计现在具备输入。新的组合路径仍须在后续实施中独立验收。 |
+| User Story 24 与共同规划决定 | 全部七项记录及[整合草案](preview-workflow-integration-plan.md) | 双端、协议、恢复和实际宿主证据按原验收范围复用；三个原型联合设计现在具备输入。新的组合路径仍须在后续实施中独立验收。 |
 
 ### 审核问题
 

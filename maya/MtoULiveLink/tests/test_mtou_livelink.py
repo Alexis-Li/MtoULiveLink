@@ -126,7 +126,7 @@ def character_snapshot(revision, root, outfit, bones, curves,
 
 
 CORPUS = json.loads(
-    (pathlib.Path(__file__).resolve().parents[3] / "protocol" / "conformance-v11.json")
+    (pathlib.Path(__file__).resolve().parents[3] / "protocol" / "conformance.json")
     .read_text(encoding="utf-8")
 )
 

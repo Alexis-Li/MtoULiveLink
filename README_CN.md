@@ -19,7 +19,9 @@ MtoU_LiveLink 连接同一台电脑上的 Maya 与 Unreal Editor，让你在 May
 
 ## 安装
 
-以下组件路径均相对于本仓库根目录。
+从仓库的 Releases 页面下载同一版本的两个压缩包：`MtoULiveLink-<版本>.zip`
+（Maya）和 `MtoULiveLink-<版本>-UE5.7.zip`（Unreal 源码插件）。以下组件路径
+均相对于本仓库根目录，与压缩包内容一致。
 
 **Maya**
 
@@ -38,7 +40,8 @@ MtoU_LiveLink 连接同一台电脑上的 Maya 与 Unreal Editor，让你在 May
 
 **Unreal**
 
-1. 将 `unreal/MtoULiveLink/` 复制到 `<Project>/Plugins/MtoULiveLink/`。
+1. 将 `unreal/MtoULiveLink/`（或 Unreal 压缩包中的 `MtoULiveLink` 文件夹）复制到
+   `<Project>/Plugins/MtoULiveLink/`。
 2. 编译 Unreal 项目。Topia Engine 用户请按下方说明操作。
 3. 启用 **Live Link** 和 **MtoU_LiveLink**，然后重启 Unreal Editor。
 

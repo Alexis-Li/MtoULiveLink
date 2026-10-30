@@ -1173,7 +1173,7 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             TestEqual(*FString::Printf(TEXT("%s acceptance"), *Id), bAccepted, bExpectedAccepted);
             // Every case of the mode, group and reference families is a
             // per-message rejection: the session answers with its stable code
-            // and keeps the connection (protocol/v10.md), so a refusal here
+            // and keeps the connection (protocol/README.md), so a refusal here
             // never carries the close-after flag.
             TestEqual(*FString::Printf(TEXT("%s close classification"), *Id), false, bExpectedClose);
             if (!bAccepted)

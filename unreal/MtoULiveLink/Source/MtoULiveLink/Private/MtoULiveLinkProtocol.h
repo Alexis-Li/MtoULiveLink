@@ -216,7 +216,7 @@ public:
     // capture (320 frames at 30 fps exceeded the original 64 MiB estimate) and
     // aligned with Maya's 1 GiB large-cache confirmation gate. These are the
     // frozen wire values; the single source of truth is the `limits` block of
-    // protocol/conformance-v11.json, and both host adapters assert their
+    // protocol/conformance.json, and both host adapters assert their
     // constants against the corpus. Encoded bytes are metered from the framing
     // boundary; parsed transient memory is preflighted from the negotiated
     // transform and curve counts before any allocation.

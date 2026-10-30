@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-CORPUS_PATH = HERE / "conformance-v11.json"
+CORPUS_PATH = HERE / "conformance.json"
 OUTPUT_PATH = (
     HERE.parent
     / "unreal"
@@ -18,10 +18,10 @@ OUTPUT_PATH = (
     / "Tests"
     / "MtoUConformanceCorpus.inl"
 )
-# Every wire operation the frozen v11 contract defines: the v9 message set plus
-# the linkage pairing, the exclusive time-control state, the complete pose
-# group, the application acknowledgement, the scene-reference handoff and the
-# removal of the second object of a set.
+# Every wire operation protocol/README.md defines: negotiation, realtime frames,
+# the cache upload and its outcomes, the linkage pairing, the exclusive
+# time-control state, the complete pose group, the application acknowledgement,
+# the scene-reference handoff and the removal of the second object of a set.
 OPERATIONS = {
     "framing", "init", "frame", "ready", "error",
     "cache_enter",
@@ -42,7 +42,7 @@ OPERATIONS = {
     "resource_limit",
 }
 HOSTS = {"maya", "unreal"}
-# The frozen v11 budgets. A resource case names one of these keys and compares
+# The frozen budgets of protocol/README.md. A resource case names one of these keys and compares
 # its measured size against the value the corpus publishes, so an oversized
 # case never carries a multi-megabyte payload of its own.
 LIMIT_KEYS = (
@@ -56,7 +56,7 @@ LIMIT_KEYS = (
     "max_cache_frame_count",
     "max_set_objects",
 )
-# Stable rejection codes from the v11 contract; the message text is diagnostic
+# Stable rejection codes from protocol/README.md; the message text is diagnostic
 # only, so a rejected corpus case must name one of these.
 ERROR_CODES = {
     "PROTOCOL_VERSION_MISMATCH", "INVALID_MESSAGE",
