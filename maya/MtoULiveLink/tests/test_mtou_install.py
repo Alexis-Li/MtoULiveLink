@@ -1,6 +1,7 @@
 # ruff: noqa: E402
 """Drag-and-drop installer: the `.mod`, the copy, conflicts and activation."""
 
+import json
 import os
 import pathlib
 import shutil
@@ -299,6 +300,9 @@ class InstallTests(unittest.TestCase):
 class InstallCheckEvaluationTests(unittest.TestCase):
     """The GUI install check fails a step that misses its expectations."""
 
+    VERSION = mtou_config.__version__
+    OLD = "0.9.0"
+
     @classmethod
     def setUpClass(cls):
         import importlib.util
@@ -308,35 +312,160 @@ class InstallCheckEvaluationTests(unittest.TestCase):
         cls.check = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(cls.check)
 
-    def drag_install(self, **changes):
-        result = {
-            "errors": [],
-            "install": {"installed": True, "version": "1.0.0",
-                        "restart_required": "MtoULiveLink.py"},
-            "loaded_before": {"version": "0.9.0"},
-            "loaded": {"version": "0.9.0", "repository_on_path": []},
-            "legacy_entry_left": False,
-            "tool_buttons_after": ["Custom"],
+    def results(self):
+        """One result per step that meets every documented expectation."""
+        new = {"version": self.VERSION, "repository_on_path": [],
+               "entry_file": os.path.join("app", "modules", "MtoULiveLink", "scripts", "e.py")}
+        old = {"version": self.OLD, "repository_on_path": []}
+        panel = {"MtoULiveLinkWindow": True}
+        installed = {"installed": True, "version": self.VERSION, "restart_required": None}
+        mod = "+ MtoULiveLink 1 MtoULiveLink\n"
+        return {
+            "install_old": {"loaded": old, "windows": panel},
+            "drag_install": {
+                "install": dict(installed, restart_required="e.py", shelf="kept"),
+                "loaded_before": old, "loaded": old, "legacy_entry_left": False,
+                "tool_buttons_after": [self.check.SHELF]},
+            "upgrade": {
+                "loaded": new,
+                "module": {"MtoULiveLink": os.path.join("app", "modules", "MtoULiveLink")},
+                "run_again_same_controller": True, "main_same_controller": True,
+                "reopened_new_controller": True, "after_close": {"w": False},
+                "window_count": {"w": 1}},
+            "reinstall": {
+                "install": dict(installed, removed=[]), "tool_buttons_after": ["s"],
+                "modules_listing": ["MtoULiveLink", "MtoULiveLink.mod"], "loaded": new},
+            "same_session": {
+                "same_package": {"installed": True, "restart_required": None},
+                "changed_package": {"installed": True, "restart_required": "e.py"},
+                "loaded": new, "imported_version_after": self.VERSION, "mod_text": mod},
+            "broken_package": {
+                "install": None, "copy_linkage_kept": True, "mod_text": mod,
+                "tool_buttons_after": ["s"],
+                "dialogs": [{"message": "scripts/mtou_livelink/install.py"}]},
+            "partial_package": {
+                "install": {"installed": False}, "copy_linkage_kept": True, "mod_text": mod,
+                "dialogs": [{"message": "scripts/mtou_livelink/linkage.py"}]},
+            "missing_module": {"opened": False, "error_type": "ImportError",
+                               "error": "mtou_livelink.linkage is missing."},
+            "missing_package": {"opened": False, "error_type": "ImportError",
+                                "error": "mtou_livelink is missing."},
+            "rollback": {"loaded": old, "windows": panel},
+            "clean_install": {
+                "install": dict(installed, shelf="added"), "tool_buttons_after": ["s"],
+                "current_shelf": "s", "loaded": new, "windows": panel},
+            "clean_restart": {
+                "loaded": dict(new, entry_file=os.path.join("release ascii", "e.py"))},
         }
-        result.update(changes)
-        return self.check.evaluate("drag_install", result, "1.0.0", "0.9.0")
 
-    def test_expected_drag_install_passes(self):
-        self.assertEqual([], self.drag_install())
+    def evaluate(self, step, results):
+        steps = self.check.STEPS
+        index = steps.index(step)
+        previous = results[steps[index - 1]] if index else None
+        return self.check.evaluate(step, results[step], self.VERSION, self.OLD, previous)
 
-    def test_missed_expectations_are_reported(self):
-        self.assertIn("installed version '0.8.0', expected '1.0.0'", self.drag_install(
-            install={"installed": True, "version": "0.8.0", "restart_required": "x"}))
-        self.assertIn("restart not requested", self.drag_install(
-            install={"installed": True, "version": "1.0.0", "restart_required": None}))
-        self.assertIn("the old single file was not deleted",
-                      self.drag_install(legacy_entry_left=True))
-        self.assertEqual(["step error: KeyError: 'x'"], self.drag_install(
-            errors=["Traceback (most recent call last):\nKeyError: 'x'\n"]))
+    def test_every_step_passes_on_its_expected_result(self):
+        results = self.results()
+        self.assertEqual(set(self.check.STEPS), set(results))
+        for step in self.check.STEPS:
+            self.assertEqual([], self.evaluate(step, results), step)
 
-    def test_a_missing_result_fails(self):
+    def test_every_step_fails_on_a_counterexample(self):
+        ignored_error = {"error_type": "IndexError", "error": "list index out of range"}
+        cases = {
+            "install_old": {"windows": {}},
+            "drag_install": {"install": {"installed": True, "version": self.VERSION,
+                                         "restart_required": "e.py", "shelf": "added"}},
+            "upgrade": {"module": {"MtoULiveLink": "elsewhere"}},
+            "reinstall": {"modules_listing": []},
+            "same_session": {"imported_version_after": "changed"},
+            "broken_package": {"mod_text": "rewritten"},
+            "partial_package": {"dialogs": [{"message": "some other dialog"}]},
+            "missing_module": ignored_error,
+            "missing_package": ignored_error,
+            "rollback": {"loaded": {"version": self.VERSION}},
+            "clean_install": {"current_shelf": "another"},
+            "clean_restart": {"loaded": {"version": self.VERSION, "entry_file": "other"}},
+        }
+        self.assertEqual(set(self.check.STEPS), set(cases))
+        for step, changes in cases.items():
+            results = self.results()
+            results[step].update(changes)
+            self.assertTrue(self.evaluate(step, results), step)
+
+    def test_a_missing_part_must_be_reported_as_an_import_error_naming_it(self):
+        results = self.results()
+        results["missing_module"]["error_type"] = "RuntimeError"
+        self.assertEqual(["the report is a RuntimeError, not an ImportError"],
+                         self.evaluate("missing_module", results))
+        results = self.results()
+        results["missing_module"]["error"] = "mtou_livelink is missing."
+        self.assertEqual(["the report does not name mtou_livelink.linkage"],
+                         self.evaluate("missing_module", results))
+
+    def test_a_step_error_or_missing_result_fails(self):
+        results = self.results()
+        results["rollback"]["errors"] = ["Traceback (most recent call last):\nKeyError: 'x'\n"]
+        self.assertIn("step error: KeyError: 'x'", self.evaluate("rollback", results))
         self.assertTrue(self.check.evaluate(
-            "clean_restart", {"errors": ["no result"]}, "1.0.0", "0.9.0"))
+            "clean_restart", {"errors": ["no result"]}, self.VERSION, self.OLD))
+
+    def test_only_this_checkouts_scripts_directory_counts_as_on_the_path(self):
+        scripts = os.path.join("repo", "maya", "MtoULiveLink", "scripts")
+        module = os.path.join("Alexis_Script_Plugin_Package", "composite", ".tmp", "scripts")
+        self.assertEqual(
+            [scripts],
+            self.check._repository_entries([module, scripts, "repo"], scripts))
+
+    def main_with_steps(self, results):
+        """Run the host driver with Maya replaced by the given step results."""
+        def run_maya(maya, app_dir, evidence, step, *args, **kwargs):
+            if step == "install_old":
+                package = pathlib.Path(app_dir, "modules", "MtoULiveLink", "scripts",
+                                       "mtou_livelink")
+                package.mkdir(parents=True)
+                (package / "linkage.py").write_text("", encoding="utf-8")
+                pathlib.Path(app_dir, "modules", "MtoULiveLink.mod").write_text(
+                    "", encoding="utf-8")
+            (pathlib.Path(evidence) / (step + ".json")).write_text(
+                json.dumps(results[step]), encoding="utf-8")
+            return 1
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            old_entry = root / "old.py"
+            old_entry.write_text('__version__ = "{0}"\n'.format(self.OLD), encoding="utf-8")
+            evidence = root / "evidence"
+            with mock.patch.object(self.check, "_run_maya", run_maya), \
+                    mock.patch("builtins.print"):
+                code = self.check.main(["--maya", "maya", "--old-entry", str(old_entry),
+                                        "--evidence", str(evidence)])
+            summary = json.loads((evidence / "summary.json").read_text(encoding="utf-8"))
+        return code, summary
+
+    def test_main_exits_zero_only_when_every_step_passes(self):
+        code, summary = self.main_with_steps(self.results())
+        self.assertEqual(0, code)
+        self.assertTrue(summary["passed"])
+        self.assertEqual({}, summary["failures"])
+
+        results = self.results()
+        results["rollback"]["windows"] = {}
+        code, summary = self.main_with_steps(results)
+        self.assertEqual(1, code)
+        self.assertFalse(summary["passed"])
+        self.assertEqual(["rollback"], list(summary["failures"]))
+
+    def test_main_refuses_an_old_entry_without_a_version_before_starting_maya(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old_entry = pathlib.Path(directory) / "old.py"
+            old_entry.write_text("print('no version')\n", encoding="utf-8")
+            with mock.patch.object(self.check, "_run_maya") as run_maya, \
+                    mock.patch("sys.stderr"), self.assertRaises(SystemExit) as raised:
+                self.check.main(["--maya", "maya", "--old-entry", str(old_entry),
+                                 "--evidence", str(pathlib.Path(directory) / "evidence")])
+        self.assertEqual(2, raised.exception.code)
+        run_maya.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -92,7 +92,7 @@ class ProjectToolTests(unittest.TestCase):
 
     def test_version_update_keeps_the_uplugin_layout(self):
         descriptor = _project_tools.UPLUGIN.read_text(encoding="utf-8-sig")
-        updated = version.uplugin_text(descriptor, "9.9.9")
+        updated = dict(version._changes("9.9.9"))[_project_tools.UPLUGIN]
         before = json.loads(descriptor)
         after = json.loads(updated)
         self.assertEqual("9.9.9", after["VersionName"])
