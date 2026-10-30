@@ -65,7 +65,7 @@ changes only with a recorded reason, never to make a failing run pass.
 
 Unreal also holds fixed budgets that are not wire values: at most one linkage
 target in flight plus one replaceable pending target, 1,536 MiB of predicted
-parsed cache memory (preflighted from the negotiated transform and curve
+parsed cache memory (preflighted from the `init` transform and curve
 counts before allocation), a captured cache rate of 1–60 fps, and a bounded
 intake queue between its network worker and game thread that applies TCP
 backpressure instead of growing. There is no fixed bone or curve count.
@@ -118,9 +118,16 @@ publication is refused with its specific code and changes no host state.
 
 `blendshapes_enabled: false` still sends the complete `curves` manifest, while
 `ready.accepted_morph_count` and the published curve list stay empty. In the
-Model workflow a current outfit that declares no BlendShapes negotiates with an
-empty accepted Morph set; a non-empty manifest that shares no name with the
-generated preview is refused with `PREVIEW_MORPH_MISMATCH`.
+Model workflow the accepted Morph set is the intersection of the Maya manifest
+with the union of Morph names on the Generated Preview, the Primary Driver and
+the enabled Additional Parts, so a name only the Driver or a part owns is
+accepted and drives that mesh
+([ADR 0011](../docs/adr/0011-activate-only-current-outfit-morphs.md)). A
+current outfit that declares no BlendShapes negotiates with an empty accepted
+Morph set. With BlendShape transfer enabled, a non-empty manifest whose
+intersection with that union is empty is refused with
+`PREVIEW_MORPH_MISMATCH`, and a partial intersection is accepted with a
+warning.
 
 With one object, a single placed Binding Actor needs no pairing; more than one
 needs an explicit pairing (`MULTIPLE_BINDING_ACTORS`) and none is
@@ -129,11 +136,16 @@ needs an explicit pairing (`MULTIPLE_BINDING_ACTORS`) and none is
 
 ## Realtime preview
 
-`frame` carries one evaluated sample at one Maya time: `transforms` in the
-accepted bone order and `curves` aligned with the negotiated curve names. A
-two-object set adds `objects[{object_id, transforms, curves}]` with the other
+`frame` carries one evaluated sample at one Maya time: `transforms` for every
+bone of that object's `init` list and `curves` for every name of its `init`
+curve list, each complete and in the `init` order. The accepted bone and Morph
+sets, the bone remaps and a disabled BlendShape transfer only decide what
+Unreal publishes from those lists: Maya never trims or reorders them, and
+`blendshapes_enabled: false` keeps the full curve count on the wire. The same
+rule holds for every object row of a `frame` or `group` and for `cache_frame`.
+A two-object set adds `objects[{object_id, transforms, curves}]` with the other
 object's row in the same message. The transform and curve counts must equal
-the negotiated ones; a wrong count or transform width, or an unnormalised
+the object's `init` counts; a wrong count or transform width, or an unnormalised
 quaternion, is a structural error that closes the connection. A frame with a
 non-finite value or a number outside the Unreal float range, or one naming an
 object the set no longer holds, is dropped, the exact bone or curve is
@@ -215,6 +227,20 @@ playback-segment semantics are in
    identities it dropped in `cache_cleared`, and Maya waits for that exact
    acknowledgement before it samples a new capture or returns to realtime.
 
+Cache errors are routed by identity like the other outcomes. A refused
+`cache_begin` and every validation error of that upload's `cache_frame` and
+`cache_end` messages carry its `upload_id`; a refused play start and
+`CACHED_PLAYBACK_PERFORMANCE` carry the attempt's `play_id` and the `upload_id`
+of the cache it plays; a refused stop, pause, resume or seek carries the
+active `play_id`; a refused `cache_clear` carries the active `upload_id` and
+`play_id`. While Maya uploads it acts
+only on an error whose `upload_id` equals the current upload; while a cache is
+ready, playing or stopping only on one whose `play_id` equals the current
+attempt. An error without the matching identity is a late answer to an older
+operation and is ignored, so Maya keeps its current state. Error identities
+are only positive integers; an error unrelated to a cache operation carries
+neither field.
+
 `cache_complete.scope` is `cache` only when one unbroken segment applied every
 pose once, in order, from the first frame within the duration bound; after a
 seek or a completed loop round it is `segment` with that segment's range and
@@ -267,7 +293,7 @@ Unreal sends `camera_time` for the target it wants answered; heartbeats repeat
 an unchanged target. Maya applies the time and camera, samples every object of
 the set at that time and answers one `group` naming the target's `eval_id`.
 `group.objects` carries one row per object of the current set, each with the
-complete bone transform list and Morph value list the object negotiated. A
+complete transform and curve lists of that object's `init`, in its order. A
 partial set is never sent; a duplicated or unknown `object_id` is
 `INVALID_MESSAGE`.
 
@@ -406,7 +432,7 @@ the container.
 | --- | --- | --- |
 | `hello_ack` | `version`, `session_id`, `capabilities`, `targets[{object_id, kind, binding_path, generation}]`, `space{space_revision, anchor}` | `targets` lists the explicitly paired targets, primary first; empty until the user pairs |
 | `ready` | `revision`, `workflow`, `missing_in_unreal`, `missing_in_maya`, `bone_name_remaps`, `target_morph_count`, `accepted_morph_count`, `session_id`, `object_id`, `set_revision`, `space_revision` | negotiation result for one object |
-| `error` | `code`, `message`, `details` | a stable code from the table below; text is diagnostic only |
+| `error` | `code`, `message`, `details`; `upload_id` and/or `play_id` for a cache error | a stable code from the table below; text is diagnostic only. A cache error carries the positive identity of the upload or play attempt it belongs to, and each field is omitted when the error has none (see [Cached playback](#cached-playback)) |
 | `cache_ready` | `upload_id`, `revision`, `frame_count` | the complete upload was accepted |
 | `cache_playing` | `upload_id`, `play_id`, `loop` | an attempt started; precedes its other outcomes |
 | `cache_progress` | `play_id`, `applied` | bounded progress of applied poses |
@@ -438,7 +464,7 @@ it.
 | `NO_BINDING_ACTOR`, `MULTIPLE_BINDING_ACTORS` | no placed Binding Actor, or several without an explicit pairing |
 | `SKELETON_MISMATCH` | the Maya bones cannot drive the required Unreal bones of every enabled display |
 | `BIND_POSE_INVALID` | a bind or pose transform needed for retargeting cannot be inverted |
-| `PREVIEW_NOT_READY`, `PREVIEW_MORPH_MISMATCH` | Model needs a ready generated preview; its BlendShape manifest shares no name with it |
+| `PREVIEW_NOT_READY`, `PREVIEW_MORPH_MISMATCH` | Model needs a ready generated preview; a non-empty BlendShape manifest shares no name with the Morphs of the Generated Preview, Primary Driver and enabled Additional Parts together |
 | `PAIRING_REQUIRED` | linkage requested (Unreal entry or Maya `mode`) for an object the user has not paired, or a second object without a pairing |
 | `TARGET_UNKNOWN` | paired target no longer resolves (destroyed, level unloaded) |
 | `TARGET_ALREADY_PAIRED` | a second object claims one target |
