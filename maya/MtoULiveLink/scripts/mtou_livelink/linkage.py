@@ -5,7 +5,7 @@ touches Maya directly: the host adapter passed to it applies the time and
 camera, samples the objects and restores the captured state, so the state
 machine and its scheduling stay testable without a host.
 
-Scheduling follows the frozen v11 contract (protocol/v11.md): one target is
+Scheduling follows the frozen v11 contract (protocol/README.md): one target is
 being applied and one newer target may wait; an advancing desired target never
 cancels the work in flight, because Unreal shows that complete result and marks
 it as lagging instead of losing the only sample that was going to arrive.

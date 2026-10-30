@@ -4,7 +4,8 @@ Two layers live here. The upper one is pure Python and never imports Maya: the
 ``mtou-scene-ref-manifest/1`` reader, the FBX texture and media detector both
 hosts share, the axis candidates, the world-position fit and the per-object
 comparison math ported from the scene-reference prototype
-(``prototypes/scene-reference``); :func:`inspect` reads a handoff directory
+(issue 53, see ``docs/history/issue-53-scene-reference-acceptance.md``);
+:func:`inspect` reads a handoff directory
 and decides whether it may be imported. The lower one is the Maya host
 adapter: :func:`import_handoff` stages the handoff into a free
 ``<container>_Incoming`` namespace, verifies it against the manifest and only
@@ -12,7 +13,7 @@ then lets the staging namespace take the container's name, with the previous
 owned reference renamed aside so a failure anywhere before the takeover is
 proven can put it back. :class:`ReferenceContainer` removes or recovers the
 tool-owned container, and :class:`ReferenceRefused` carries the frozen refusal
-codes of ``protocol/v11.md``.
+codes of ``protocol/README.md``.
 
 Conventions (identical to the prototype)
 ----------------------------------------
@@ -1924,7 +1925,7 @@ MANAGED_TIME_UNITS = frozenset((
 #: ``<scope>.manifest.json`` beside the ``<scope>.fbx`` geometry.
 MANIFEST_SUFFIX = ".manifest.json"
 
-#: The frozen refusal codes of protocol/v11.md. Only these leave this module as
+#: The frozen refusal codes of protocol/README.md. Only these leave this module as
 #: :class:`ReferenceRefused`; every other refusal is carried by a report whose
 #: ``problems`` names it, so the panel can render the outcome either way.
 CODE_STALE = "REFERENCE_STALE"
@@ -2176,7 +2177,7 @@ def _new_handoff_report(action):
 def _handoff_validation(handoff, report, budget):
     """Validate one offered handoff and fill ``report``; raises frozen refusals.
 
-    The checks own the frozen contract of ``protocol/v11.md``: the offer must
+    The checks own the frozen contract of ``protocol/README.md``: the offer must
     name a space revision, the directory content must match the offered digest,
     it must not deliver image data, and it must stay inside the frozen file,
     object and triangle budgets. Everything else the handoff declares -- scope,

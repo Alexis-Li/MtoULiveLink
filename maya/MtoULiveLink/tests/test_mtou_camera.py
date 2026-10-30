@@ -1,8 +1,7 @@
 """Unit tests for the MtoU LiveLink camera module (port + host adapter).
 
-The pure mapping tests are ported from
-``prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests/
-test_camera_sync_mapping.py``; the host adapter tests use a fake ``cmds``/``om``
+The pure mapping tests are ported from the camera-sync prototype's
+``test_camera_sync_mapping.py`` (issue 52); the host adapter tests use a fake ``cmds``/``om``
 so no Maya session is needed, plus one real mayapy host check.
 
     python -m unittest test_mtou_camera

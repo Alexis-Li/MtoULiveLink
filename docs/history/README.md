@@ -20,13 +20,11 @@ repository: `docs/project-history/mtou-livelink/` is this directory,
 | 0.4.0, 2026-09-03 | Integrated through [PR #36](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/pull/36), followed by owner C01/Topia verification. See [stock-engine acceptance](stock-engine-acceptance.md) and [Topia acceptance](topia-engine-acceptance.md). |
 | 0.5.0, 2026-09-22 | Owner accepted practical use; tag `v0.5.0`, implementation checkpoint `278e16a001037a08933e8f180c82899a2e567e8e`. No installation packages or additional host-version certification were produced. |
 | Preview workflow, 2026-10-13 | [Parent acceptance #47](issue-47-preview-workflow-acceptance.md) covers four delivered workflows and three bounded prototypes on `codex/mtou-preview-workflow`; prototype integration remains a separate task. |
-| Preview workflow integration, 2026-10-29 | [INT-01–14 acceptance](preview-workflow-integration-acceptance.md) maps the #56 joint criteria to the I-1, I-2 and I-3 baselines accepted on `codex/mtou-preview-workflow`, merged into `main` through [PR #93](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/pull/93) at `9830f80ffdc511cc23b4224d0e1f1b54bf876ad3` (2026-10-30); unreleased (0.10.0, protocol v11). |
+| Preview workflow integration, 2026-10-29 | [INT-01–14 acceptance](preview-workflow-integration-acceptance.md) maps the #56 joint criteria to the I-1, I-2 and I-3 baselines accepted on `codex/mtou-preview-workflow`, merged into `main` through [PR #93](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/pull/93) at `9830f80ffdc511cc23b4224d0e1f1b54bf876ad3` (2026-10-30). |
+| 1.0.0, 2026-10-30 | First release from this repository: the preview workflow integration above, protocol v11, tag `v1.0.0`. The three bounded prototypes were removed from the source tree; their records below link their last commit. |
 
-The [joint integration proposal](../preview-workflow-integration-plan.md)
-is tracked in [Issue #56](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/56).
-Read that issue for current decisions and progress, and the
-[workflow scope](../preview-workflow-roadmap.md)
-for product direction.
+Current scope, constraints and next-stage candidates are in the
+[roadmap](../roadmap.md).
 
 ## Architecture and host baselines
 
@@ -72,9 +70,13 @@ for product direction.
 The [parent acceptance](issue-47-preview-workflow-acceptance.md) owns the
 combined #47 conclusion. Each prototype record owns its scope, limits and
 evidence; follow those links for raw host results and reproduction inputs.
+The prototype sources were removed for 1.0.0 and remain at
+[their last commit](https://github.com/Alexis-Li/MtoULiveLink/tree/caf7d45880e0872adfca8f0c179c35e453ae0be0/prototypes).
 
 | Topic | Record |
 | --- | --- |
+| Official capability sources, 2026-09-22 | [Linkage research](preview-linkage-research.md) |
+| Joint integration design (#56) | [Integration plan](preview-workflow-integration-plan.md) |
 | UE camera and Sequencer to Maya (#52) | [Camera acceptance](issue-52-camera-sync-acceptance.md) |
 | UE level geometry reference in Maya (#53) | [Scene-reference acceptance](issue-53-scene-reference-acceptance.md) |
 | Independent prop and second character (#54) | [Multi-subject acceptance](issue-54-multi-subject-acceptance.md) |

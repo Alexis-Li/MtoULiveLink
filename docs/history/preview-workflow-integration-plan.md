@@ -1,11 +1,11 @@
 # 三项原型接入 MtoU 主流程的整合方案
 
-状态：**I-1／I-2／I-3 已完成并集成**。产品为 0.10.0（未发布）、协议 v11。
+状态：**I-1／I-2／I-3 已完成并集成，随 1.0.0（协议 v11）发布**。
 INT-01–14 的实际基线、结果及证据边界见
-[联合验收记录](history/preview-workflow-integration-acceptance.md)。
+[联合验收记录](preview-workflow-integration-acceptance.md)。
 本文保留 2026-10-13 接入前的设计与风险分析，文中的候选参数、版本和阶段任务
 描述该设计时点。当前需求由 [#56](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/56)
-拥有；生效契约以 [协议 v11](../protocol/v11.md)、[ADR 0014](adr/0014-one-time-authority-and-staged-pose-groups.md)
+拥有；生效契约以 [协议](../../protocol/README.md)、[ADR 0014](../adr/0014-one-time-authority-and-staged-pose-groups.md)
 及实际源码为准。
 
 推荐方向：**一个产品会话、一套空间约定、互斥时间控制、整组姿势提交**。
@@ -33,9 +33,9 @@ Sequencer 驱动缓存；已有单角色缓存继续可用。两者的后续扩�
 
 | 来源 | 可复用成果 | 接入时必须补齐 |
 | --- | --- | --- |
-| [#52 相机与 Sequencer](history/issue-52-camera-sync-acceptance.md) | 已求值透视相机、film fit／门、cuts／子帧、求值身份、实际回读和退出恢复 | 产品坐标映射、完整角色／Morph 回传、真实交互 Maya 回调、持续播放策略 |
-| [#53 场景参考](history/issue-53-scene-reference-acceptance.md) | 官方 FBX 关卡导出、显式范围、无图片数据检查、灰模、暂存替换与恢复 | 共同 Anchor 的逆变换、产品入口、独立文件所有权和用户场景中的安全更新 |
-| [#54 双对象](history/issue-54-multi-subject-acceptance.md) | 独立严格协商、共同帧、必要骨骼映射、一次摆放、可恢复接管 | 主产品的固定 Subject／单 Actor 约束迁移、Sequencer 求值身份关联、真实已有轨道验收 |
+| [#52 相机与 Sequencer](issue-52-camera-sync-acceptance.md) | 已求值透视相机、film fit／门、cuts／子帧、求值身份、实际回读和退出恢复 | 产品坐标映射、完整角色／Morph 回传、真实交互 Maya 回调、持续播放策略 |
+| [#53 场景参考](issue-53-scene-reference-acceptance.md) | 官方 FBX 关卡导出、显式范围、无图片数据检查、灰模、暂存替换与恢复 | 共同 Anchor 的逆变换、产品入口、独立文件所有权和用户场景中的安全更新 |
+| [#54 双对象](issue-54-multi-subject-acceptance.md) | 独立严格协商、共同帧、必要骨骼映射、一次摆放、可恢复接管 | 主产品的固定 Subject／单 Actor 约束迁移、Sequencer 求值身份关联、真实已有轨道验收 |
 
 三项分别通过不证明同一画面里的相机、参考几何、角色与道具已经一致。
 #52 的单关节 witness 不能替代完整产品姿势；#54 的组件残差不能替代世界位置；
@@ -140,7 +140,7 @@ desired，不补发整个历史队列。该策略是产品候选，未改动 #52
 这不承诺当下 UE 镜头与滞后姿势同帧。UI 同时显示目标时间、最后应用时间及延迟。
 UE 停止拖动／播放后必须在有界时间内收敛到最新目标，才可显示“已同步”。
 严格逐帧、不静默丢帧仍由 Cached Playback 承担；不修改
-[ADR 0013](adr/0013-upload-the-cache-before-local-replay.md) 来掩盖联动延迟。
+[ADR 0013](../adr/0013-upload-the-cache-before-local-replay.md) 来掩盖联动延迟。
 
 ### 身份：会话、对象集合与求值目标分开
 

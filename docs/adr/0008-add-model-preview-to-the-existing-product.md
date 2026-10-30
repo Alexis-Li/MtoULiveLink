@@ -11,15 +11,13 @@ target compatibility and display semantics, so it is a protocol contract rather
 than optional diagnostic metadata. Model requires the current Preview revision
 to be ready; Animation does not. Both components must come from the same release.
 The active protocol version, message fields, and rejection cases are maintained
-in the [protocol corpus](../../protocol/conformance-v9.json), not duplicated here.
+in the [wire protocol](../../protocol/README.md) and its corpus, not duplicated here.
 Morph acceptance is defined by [ADR 0011](0011-activate-only-current-outfit-morphs.md).
 
-The current product supports one streaming session and one `MtoU_Character`
-subject over localhost. This is the current single-character implementation
-boundary, not a permanent prohibition on multiple independent objects.
-[Issue #54](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues/54)
-validates independent pairing, subject routing, and session isolation before a
-production extension revises this decision. Additional Parts remain components
+The product runs one streaming session over localhost. Animation may stream
+the primary character (`MtoU_Character`) and one independently paired skeletal
+object (`MtoU_Secondary`), each negotiated against its own Binding Actor; Model
+and Cached Playback keep a single character. Additional Parts remain components
 of one character sharing a Skeleton asset; independent props or different
 skeleton targets must not bypass pairing by being classified as parts.
 

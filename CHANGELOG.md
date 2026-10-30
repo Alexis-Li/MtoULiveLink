@@ -5,7 +5,7 @@ Linked issue numbers point to the
 where this product was developed until 2026-10-30; bare numbers refer to this
 repository's issues.
 
-## Unreleased
+## 1.0.0 - 2026-10-30
 
 ### Upgrade notes
 

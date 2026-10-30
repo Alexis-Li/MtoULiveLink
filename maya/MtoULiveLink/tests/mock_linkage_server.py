@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 """Minimal Unreal-side peer for the linkage host checks.
 
-Implements the v11 linkage conversation from the Unreal side (protocol/v11.md)
+Implements the v11 linkage conversation from the Unreal side (protocol/README.md)
 so the Maya adapter can be exercised without an editor: it greets the client,
 accepts one object, sends camera/time targets, applies the answered groups,
 reports the application evidence, and records latency and convergence.

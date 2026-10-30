@@ -2,7 +2,7 @@
 
 import os
 
-__version__ = "0.10.0"
+__version__ = "1.0.0"
 
 PROTOCOL_VERSION = 11
 
@@ -83,7 +83,7 @@ CACHED_MODE = "cached"
 
 # The third exclusive time-control state: Unreal drives the Level Sequence
 # time and the evaluated camera while Maya follows and answers with complete
-# pose groups. See protocol/v11.md.
+# pose groups. See protocol/README.md.
 LINKAGE_MODE = "linkage"
 
 MODES = (REALTIME_MODE, CACHED_MODE, LINKAGE_MODE)

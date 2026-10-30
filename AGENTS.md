@@ -15,9 +15,9 @@ pinned commit. Do not change sibling projects.
 - `maya/MtoULiveLink/` is the Maya component (`scripts/`, `install.mel`,
   `tests/`) and `unreal/MtoULiveLink/` the Unreal plugin (one `.uplugin`,
   `Source/` with its Automation tests). They cooperate only through the wire
-  contract in `protocol/`; neither loads source, configuration or runtime
-  files from the other. `protocol/`, `docs/`, `prototypes/`, `tools/` and
-  `tests/` are never installed.
+  contract in `protocol/` (`protocol/README.md` and its corpus); neither
+  loads source, configuration or runtime files from the other. `protocol/`,
+  `docs/`, `tools/` and `tests/` are never installed.
 - Maya: `MtoULiveLink.py` is the user-run entry; internals use snake_case
   modules with one `__version__`. Use Maya's bundled Python and Qt and guard
   version-specific APIs. Repeated launches must not duplicate windows or
@@ -39,7 +39,8 @@ pinned commit. Do not change sibling projects.
   compatibility, installation, workflows, troubleshooting and limits. Update
   the affected section in place; leave out implementation, test counts and
   development narratives. Keep vocabulary in CONTEXT.md, decisions in
-  docs/adr/, version changes in CHANGELOG.md and selected evidence in
+  docs/adr/, current scope, constraints and next-stage candidates in
+  docs/roadmap.md, version changes in CHANGELOG.md and selected evidence in
   docs/history/ under its retention rules. Write documents, issues and
   comments as the current state; rewrite an outdated decision in place once
   the user agrees.
@@ -158,13 +159,6 @@ A test editor can run beside a person's own: `-MtoULiveLinkPort=<n>` moves
 the Unreal listener off 54321, the two Maya GUI tests pass it to the Maya they
 start, and `MTOU_LIVELINK_PORT` does the same for any other Maya.
 
-`prototypes/` is frozen verification scaffolding. Its Unreal plugins load only
-in a host project that adds their `prototypes/<name>/unreal` directory and
-enables them; their READMEs use the collection's ToolsLab project, which
-lists them disabled. In those READMEs `<collection>` is the collection checkout
-that mounts this repository and `<repo>` or `<checkout>` is this repository.
-Product work does not run their tests.
-
 mayapy has no idle loop: the tool queues its main-thread work in batch mode,
 and a host loop (the `maya_*_peer.py` scripts) must call
 `mayaapi.drain_deferred()` on its own thread.
@@ -184,7 +178,8 @@ and a host loop (the `maya_*_peer.py` scripts) must call
 
 The product version (Maya `__version__`, Unreal `VersionName` and `Version`)
 names the next release and changes only in the release change, for both
-components together; PRs leave it alone. It is 0.10.0 until that release.
+components together; PRs leave it alone. It is 1.0.0, the latest release,
+until the next release change.
 The protocol version both hosts negotiate still changes with the wire
 contract; the PR that changes it adds an `Upgrade notes` entry under
 `Unreleased` instead of bumping the product version.
