@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from _project_tools import (
@@ -14,6 +15,9 @@ from _project_tools import (
     maya_runtime_files,
     require_semver,
 )
+
+VERSION_NAME_RE = re.compile(r'("VersionName"\s*:\s*)"(?:[^"\\]|\\.)*"')
+VERSION_NUMBER_RE = re.compile(r'("Version"\s*:\s*)-?\d+')
 
 
 def _changes(version: str) -> list[tuple[Path, str]]:
@@ -27,11 +31,24 @@ def _changes(version: str) -> list[tuple[Path, str]]:
             changes.append((runtime_file, replaced))
     if not changes:
         raise ValueError("Maya component must declare __version__ or PLUGIN_VERSION")
-    metadata = json.loads(UPLUGIN.read_text(encoding="utf-8-sig"))
-    metadata["VersionName"] = version
-    metadata["Version"] = int(metadata.get("Version", 0)) + 1
-    changes.append((UPLUGIN, json.dumps(metadata, ensure_ascii=False, indent=2) + "\n"))
+    changes.append((UPLUGIN, uplugin_text(UPLUGIN.read_text(encoding="utf-8-sig"), version)))
     return changes
+
+
+def uplugin_text(text: str, version: str) -> str:
+    """Set VersionName and increment Version in place, keeping the descriptor's layout."""
+    number = json.loads(text).get("Version")
+    if isinstance(number, bool) or not isinstance(number, int):
+        raise ValueError(".uplugin Version must be an integer")
+    replaced, names = VERSION_NAME_RE.subn(
+        lambda match: match.group(1) + json.dumps(version), text, count=1)
+    replaced, numbers = VERSION_NUMBER_RE.subn(
+        lambda match: match.group(1) + str(number + 1), replaced, count=1)
+    updated = json.loads(replaced)
+    if (names, numbers) != (1, 1) or (
+            updated.get("VersionName"), updated.get("Version")) != (version, number + 1):
+        raise ValueError(".uplugin must declare top-level VersionName and Version")
+    return replaced
 
 
 def update(version: str, apply: bool = False) -> dict:

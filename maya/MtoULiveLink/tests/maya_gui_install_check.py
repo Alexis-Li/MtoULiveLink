@@ -44,7 +44,10 @@ dialogs are answered with their first button and recorded.
    loads from the extracted folder.
 
 Inside Maya the same file runs one step, chosen by ``MTOU_INSTALL_STEP``, and
-writes ``<step>.json`` and window images into the evidence directory.
+writes ``<step>.json`` and window images into the evidence directory. The host
+compares every step with the expectations above, records them under
+``failures`` in ``summary.json``, prints each as ``FAIL <step>: ...`` and exits
+0 only when no step failed.
 """
 
 import json
@@ -68,6 +71,13 @@ SAVED_BUTTON_STEPS = ("drag_install", "upgrade", "same_session", "missing_module
                       "missing_package", "rollback", "clean_restart")
 # Version marker of the package `same_session` writes over the installed copy.
 CHANGED_VERSION = "0.10.0+install-check"
+
+
+def _repository_entries(paths, scripts):
+    """The search-path entries that are this checkout's own scripts directory."""
+    def normal(path):
+        return os.path.normcase(os.path.abspath(path))
+    return [entry for entry in paths if normal(entry) == normal(scripts)]
 
 
 # ------------------------------------------------------------------ in Maya
@@ -150,8 +160,8 @@ def _in_maya():
             "version": getattr(module, "__version__", None)
             or getattr(sys.modules.get("mtou_livelink.config"), "__version__", None),
             "protocol": getattr(module, "PROTOCOL_VERSION", None),
-            "repository_on_path": [entry for entry in sys.path
-                                   if "Alexis_Script_Plugin_Package" in entry],
+            "repository_on_path": _repository_entries(
+                sys.path, os.environ["MTOU_INSTALL_REPO_SCRIPTS"]),
         }
 
     def drop_install_mel(source=None):
@@ -253,7 +263,11 @@ def _in_maya():
             show_saved_shelves()
             result["tool_buttons_after"] = [shelf for shelf, _ in tool_buttons()]
             result["current_shelf"] = cmds.tabLayout(shelf_top(), query=True, selectTab=True)
-            if step != "broken_package":
+            if step == "broken_package":
+                copy = Path(cmds.internalVar(userAppDir=True)) / "modules" / "MtoULiveLink"
+                result["copy_linkage_kept"] = (copy / "scripts" / "mtou_livelink"
+                                               / "linkage.py").exists()
+            else:
                 press_saved()
                 result["loaded"] = loaded()
                 result["windows"] = windows()
@@ -322,7 +336,8 @@ def _run_maya(maya, app_dir, evidence, step, release, timeout, release2=None):
     env = dict(os.environ)
     env.update({"MAYA_APP_DIR": str(app_dir), "MTOU_INSTALL_STEP": step,
                 "MTOU_INSTALL_EVIDENCE": str(evidence), "MTOU_INSTALL_RELEASE": str(release),
-                "MTOU_INSTALL_RELEASE2": str(release2 or "")})
+                "MTOU_INSTALL_RELEASE2": str(release2 or ""),
+                "MTOU_INSTALL_REPO_SCRIPTS": str(Path(__file__).resolve().parents[1] / "scripts")})
     env.pop("PYTHONPATH", None)
     command = ('python("import runpy; runpy.run_path(r\'{0}\', '
                'run_name=\'mtou_install_step\')")').format(Path(__file__).resolve().as_posix())
@@ -337,6 +352,121 @@ def _run_maya(maya, app_dir, evidence, step, release, timeout, release2=None):
     return process.pid
 
 
+def _inside(path, folder):
+    """Whether ``path`` lies under ``folder``, compared as normalised paths."""
+    path, folder = (os.path.normcase(os.path.abspath(str(item))) for item in (path, folder))
+    return path.startswith(folder + os.sep)
+
+
+def _declared_version(path):
+    """The ``__version__`` a Maya entry or config file declares, or None."""
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    if '__version__ = "' not in text:
+        return None
+    return text.split('__version__ = "', 1)[1].split('"', 1)[0]
+
+
+def evaluate(step, result, version, old_version, previous=None):
+    """Return the expectations of the module docstring that ``result`` misses.
+
+    ``previous`` is the result of the step before it, which an incomplete
+    package must leave unchanged.
+    """
+    failures = ["step error: " + error.strip().splitlines()[-1]
+                for error in result.get("errors") or []]
+    install = result.get("install") or {}
+    loaded = result.get("loaded") or {}
+    windows = result.get("windows") or {}
+
+    def expect(condition, label):
+        if not condition:
+            failures.append(label)
+
+    def expect_installed(restart):
+        expect(install.get("installed") is True, "install.mel did not install")
+        expect(install.get("version") == version,
+               "installed version {0!r}, expected {1!r}".format(install.get("version"), version))
+        expect(bool(install.get("restart_required")) == restart,
+               "restart {0}requested".format("not " if restart else ""))
+
+    def expect_loaded(expected):
+        expect(loaded.get("version") == expected,
+               "loaded version {0!r}, expected {1!r}".format(loaded.get("version"), expected))
+        expect(not loaded.get("repository_on_path"), "a repository checkout is on sys.path")
+
+    if step in ("install_old", "rollback"):
+        expect_loaded(old_version)
+        expect(windows.get("MtoULiveLinkWindow"), "the panel did not open")
+    elif step == "drag_install":
+        expect_installed(restart=True)
+        expect((result.get("loaded_before") or {}).get("version") == old_version,
+               "the saved button did not open the old release")
+        expect(loaded.get("version") == old_version, "the session switched code without restart")
+        expect(result.get("legacy_entry_left") is False, "the old single file was not deleted")
+        expect(result.get("tool_buttons_after") == [SHELF], "the shelf button was not kept once")
+        expect(install.get("shelf") == "kept", "the installer did not keep the existing button")
+    elif step == "upgrade":
+        expect_loaded(version)
+        module = (result.get("module") or {}).get("MtoULiveLink")
+        expect(module and _inside(loaded.get("entry_file"), module),
+               "the release did not load from the module")
+        for key in ("run_again_same_controller", "main_same_controller",
+                    "reopened_new_controller"):
+            expect(result.get(key) is True, key + " is not true")
+        expect(not any((result.get("after_close") or {}).values()), "a window survived closing")
+        expect(all(count == 1 for count in (result.get("window_count") or {0: 0}).values()),
+               "a window exists more than once after reopening")
+    elif step == "reinstall":
+        expect_installed(restart=False)
+        expect(not install.get("conflicts") and not install.get("removed"),
+               "a reinstall reported conflicts")
+        expect(len(result.get("tool_buttons_after") or []) == 1, "reinstall changed the buttons")
+        expect((result.get("modules_listing") or []).count("MtoULiveLink.mod") == 1,
+               "not exactly one MtoULiveLink.mod")
+        expect_loaded(version)
+    elif step == "same_session":
+        same = result.get("same_package") or {}
+        changed = result.get("changed_package") or {}
+        expect(same.get("installed") is True and not same.get("restart_required"),
+               "the same package asked for a restart")
+        expect(changed.get("installed") is True and bool(changed.get("restart_required")),
+               "a changed package did not ask for a restart")
+        expect_loaded(version)
+        expect(result.get("imported_version_after") == version,
+               "the session imported the changed package without a restart")
+    elif step in ("broken_package", "partial_package"):
+        expect(install.get("installed") is not True, "an incomplete package was installed")
+        missing = ("scripts/mtou_livelink/install.py" if step == "broken_package"
+                   else "scripts/mtou_livelink/linkage.py")
+        expect(any(missing in str(dialog.get("message")) for dialog in result.get("dialogs") or []),
+               "the dialog does not name " + missing)
+        expect(result.get("copy_linkage_kept") is True, "the installed copy was changed")
+        expect(result.get("mod_text") and result.get("mod_text") == (previous or {}).get("mod_text"),
+               "the .mod was changed")
+        if step == "broken_package":
+            expect(len(result.get("tool_buttons_after") or []) == 1,
+                   "an incomplete package changed the buttons")
+    elif step in ("missing_module", "missing_package"):
+        expect(result.get("opened") is False, "the tool opened with missing parts")
+        expect(result.get("error_type") == "ImportError",
+               "the report is a {0}, not an ImportError".format(result.get("error_type")))
+        missing = "mtou_livelink.linkage" if step == "missing_module" else "mtou_livelink"
+        expect(missing + " is missing" in str(result.get("error")),
+               "the report does not name " + missing)
+    elif step == "clean_install":
+        expect_installed(restart=False)
+        expect(install.get("shelf") == "added", "the installer did not add a button")
+        expect(result.get("current_shelf") in (result.get("tool_buttons_after") or []),
+               "the button is not on the current shelf")
+        expect_loaded(version)
+        expect(windows.get("MtoULiveLinkWindow"), "the panel did not open")
+    elif step == "clean_restart":
+        expect_loaded(version)
+        expect("release ascii" in str(loaded.get("entry_file") or ""),
+               "the module did not load from the extracted folder")
+    return failures
+
+
 def main(argv):
     import argparse
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -345,6 +475,9 @@ def main(argv):
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args(argv)
+    old_version = _declared_version(args.old_entry)
+    if not old_version:
+        parser.error("--old-entry declares no __version__: " + args.old_entry)
 
     evidence = Path(args.evidence).resolve()
     if evidence.exists():
@@ -397,12 +530,25 @@ def main(argv):
         summary["steps"][step] = json.loads(path.read_text(encoding="utf-8")) if path.exists() \
             else {"errors": ["no result"]}
         summary["steps"][step]["seconds"] = round(time.time() - started, 1)
+    summary["failures"] = {}
+    previous = None
+    for step in STEPS:
+        result = summary["steps"][step]
+        failures = evaluate(step, result, version, old_version, previous)
+        if failures:
+            summary["failures"][step] = failures
+        previous = result
+    summary["passed"] = not summary["failures"]
     (evidence / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1),
                                            encoding="utf-8")
     print(json.dumps({step: {key: value for key, value in result.items()
                              if key not in ("shots",)}
-                      for step, result in summary["steps"].items()}, ensure_ascii=False, indent=1))
-    return 0
+                      for step, result in summary["steps"].items()}, indent=1))
+    for step, failures in summary["failures"].items():
+        for failure in failures:
+            print(ascii("FAIL {0}: {1}".format(step, failure))[1:-1], file=sys.stderr)
+    print("install check {0}".format("passed" if summary["passed"] else "failed"))
+    return 0 if summary["passed"] else 1
 
 
 if __name__ == "mtou_install_step":
