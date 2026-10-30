@@ -227,19 +227,32 @@ playback-segment semantics are in
    identities it dropped in `cache_cleared`, and Maya waits for that exact
    acknowledgement before it samples a new capture or returns to realtime.
 
-Cache errors are routed by identity like the other outcomes. A refused
-`cache_begin` and every validation error of that upload's `cache_frame` and
-`cache_end` messages carry its `upload_id`; a refused play start and
-`CACHED_PLAYBACK_PERFORMANCE` carry the attempt's `play_id` and the `upload_id`
-of the cache it plays; a refused stop, pause, resume or seek carries the
-active `play_id`; a refused `cache_clear` carries the active `upload_id` and
-`play_id`. While Maya uploads it acts
-only on an error whose `upload_id` equals the current upload; while a cache is
-ready, playing or stopping only on one whose `play_id` equals the current
-attempt. An error without the matching identity is a late answer to an older
-operation and is ignored, so Maya keeps its current state. Error identities
-are only positive integers; an error unrelated to a cache operation carries
-neither field.
+Cache errors are routed by identity like the other outcomes. Only a
+recoverable cache error that belongs to an existing upload or play attempt
+carries an identity, and only a positive one:
+
+- a refused `cache_begin` with a valid `upload_id` (`CACHE_METADATA_INVALID`,
+  `CACHE_PAYLOAD_TOO_LARGE`, `CACHE_REVISION_MISMATCH`) and the semantic
+  `cache_frame` and `cache_end` errors of the upload being received carry that
+  `upload_id`; after a refused `cache_begin`, the frames and end of that upload
+  are dropped without further answers;
+- a refused play start and `CACHED_PLAYBACK_PERFORMANCE` carry the attempt's
+  `play_id` and the `upload_id` of the cache it plays;
+- a refused pause, resume or seek carries the active `play_id` when an attempt
+  exists; `cache_stop` is never refused;
+- a `cache_clear` with an old or repeated `clear_id` is refused with
+  `CACHE_METADATA_INVALID` and carries **no** identity, because it belongs to
+  no current operation (only an accepted clear reports identities, in
+  `cache_cleared`).
+
+Structural cache errors, such as a `cache_begin` without a valid `upload_id`
+or a `cache_frame` without an integer `index`, are `INVALID_MESSAGE` without an
+identity and close the connection. While Maya uploads it acts only on an error
+whose `upload_id` equals the current upload; while a cache is ready, playing or
+stopping only on one whose `play_id` equals the current attempt; in its other
+cache states it acts on no cache error. Any other cache error, with an older
+identity or none, is ignored, so a stale `cache_clear` refusal arriving during
+a new upload never fails or clears that upload.
 
 `cache_complete.scope` is `cache` only when one unbroken segment applied every
 pose once, in order, from the first frame within the duration bound; after a
@@ -432,7 +445,7 @@ the container.
 | --- | --- | --- |
 | `hello_ack` | `version`, `session_id`, `capabilities`, `targets[{object_id, kind, binding_path, generation}]`, `space{space_revision, anchor}` | `targets` lists the explicitly paired targets, primary first; empty until the user pairs |
 | `ready` | `revision`, `workflow`, `missing_in_unreal`, `missing_in_maya`, `bone_name_remaps`, `target_morph_count`, `accepted_morph_count`, `session_id`, `object_id`, `set_revision`, `space_revision` | negotiation result for one object |
-| `error` | `code`, `message`, `details`; `upload_id` and/or `play_id` for a cache error | a stable code from the table below; text is diagnostic only. A cache error carries the positive identity of the upload or play attempt it belongs to, and each field is omitted when the error has none (see [Cached playback](#cached-playback)) |
+| `error` | `code`, `message`, `details`; `upload_id` and/or `play_id` for a cache error | a stable code from the table below; text is diagnostic only. A recoverable cache error carries the positive identity of the upload or play attempt it belongs to; each field is omitted when the error has none, including a refused stale `cache_clear` and structural errors (see [Cached playback](#cached-playback)) |
 | `cache_ready` | `upload_id`, `revision`, `frame_count` | the complete upload was accepted |
 | `cache_playing` | `upload_id`, `play_id`, `loop` | an attempt started; precedes its other outcomes |
 | `cache_progress` | `play_id`, `applied` | bounded progress of applied poses |
