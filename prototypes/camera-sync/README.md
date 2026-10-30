@@ -50,7 +50,8 @@ playback ranges on either side, and no client message can move the Unreal time.
 
 ## Reproduce
 
-1. The prototype is disabled in `unreal/ToolsLab.uproject` by default. Set
+1. The prototype is disabled in the collection's ToolsLab
+   (`<collection>/unreal/ToolsLab.uproject`) by default. Set
    `MtoUCameraSyncPrototype` to `"Enabled": true` there, then build the
    Unreal host project that loads it:
 

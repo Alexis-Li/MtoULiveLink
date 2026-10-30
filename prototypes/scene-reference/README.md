@@ -52,7 +52,8 @@ a level, touches an object outside its container, or saves a scene.
 
 ## Reproduce
 
-1. The prototype is disabled in `unreal/ToolsLab.uproject` by default. Set
+1. The prototype is disabled in the collection's ToolsLab
+   (`<collection>/unreal/ToolsLab.uproject`) by default. Set
    `MtoUSceneRefPrototype` to `"Enabled": true` there, then build the host
    project that loads it:
 
