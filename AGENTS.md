@@ -137,6 +137,8 @@ checks the packaged `install.mel` in real Maya GUI sessions: upgrade from the
 reinstall, an update while the tool is open, a broken and a partial package,
 missing parts, rollback and a clean install. Pass
 `--old-entry` the 0.9.0 `MtoULiveLink.py` (`git show 6512f3e^:maya/MtoULiveLink/scripts/MtoULiveLink.py`).
+It exits 1 and prints `FAIL <step>: ...` when a step misses its expected
+result; `summary.json` keeps every step's observations and failures.
 
 `maya/MtoULiveLink/tests/maya_gui_window_check.py`, also run with a host
 Python, closes the panel, the scene-reference and the 对象配对 windows from their title bars

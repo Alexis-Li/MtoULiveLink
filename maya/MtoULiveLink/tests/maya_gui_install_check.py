@@ -44,7 +44,10 @@ dialogs are answered with their first button and recorded.
    loads from the extracted folder.
 
 Inside Maya the same file runs one step, chosen by ``MTOU_INSTALL_STEP``, and
-writes ``<step>.json`` and window images into the evidence directory.
+writes ``<step>.json`` and window images into the evidence directory. The host
+compares every step with the expectations above, records them under
+``failures`` in ``summary.json``, prints each as ``FAIL <step>: ...`` and exits
+0 only when no step failed.
 """
 
 import json
@@ -337,6 +340,97 @@ def _run_maya(maya, app_dir, evidence, step, release, timeout, release2=None):
     return process.pid
 
 
+def _declared_version(path):
+    """The ``__version__`` a Maya entry or config file declares, or None."""
+    text = Path(path).read_text(encoding="utf-8", errors="replace")
+    if '__version__ = "' not in text:
+        return None
+    return text.split('__version__ = "', 1)[1].split('"', 1)[0]
+
+
+def evaluate(step, result, version, old_version):
+    """Return the expectations of the module docstring that ``result`` misses."""
+    failures = ["step error: " + error.strip().splitlines()[-1]
+                for error in result.get("errors") or []]
+    install = result.get("install") or {}
+    loaded = result.get("loaded") or {}
+    windows = result.get("windows") or {}
+
+    def expect(condition, label):
+        if not condition:
+            failures.append(label)
+
+    def expect_installed(restart):
+        expect(install.get("installed") is True, "install.mel did not install")
+        expect(install.get("version") == version,
+               "installed version {0!r}, expected {1!r}".format(install.get("version"), version))
+        expect(bool(install.get("restart_required")) == restart,
+               "restart {0}requested".format("not " if restart else ""))
+
+    def expect_loaded(expected):
+        expect(loaded.get("version") == expected,
+               "loaded version {0!r}, expected {1!r}".format(loaded.get("version"), expected))
+        expect(not loaded.get("repository_on_path"), "a repository checkout is on sys.path")
+
+    if step in ("install_old", "rollback"):
+        expect_loaded(old_version)
+        expect(windows.get("MtoULiveLinkWindow"), "the panel did not open")
+    elif step == "drag_install":
+        expect_installed(restart=True)
+        expect((result.get("loaded_before") or {}).get("version") == old_version,
+               "the saved button did not open the old release")
+        expect(loaded.get("version") == old_version, "the session switched code without restart")
+        expect(result.get("legacy_entry_left") is False, "the old single file was not deleted")
+        expect(len(result.get("tool_buttons_after") or []) == 1, "the shelf button was not kept once")
+    elif step == "upgrade":
+        expect_loaded(version)
+        for key in ("run_again_same_controller", "main_same_controller",
+                    "reopened_new_controller"):
+            expect(result.get(key) is True, key + " is not true")
+        expect(not any((result.get("after_close") or {}).values()), "a window survived closing")
+        expect(all(count == 1 for count in (result.get("window_count") or {0: 0}).values()),
+               "a window exists more than once after reopening")
+    elif step == "reinstall":
+        expect_installed(restart=False)
+        expect(not install.get("conflicts") and not install.get("removed"),
+               "a reinstall reported conflicts")
+        expect(len(result.get("tool_buttons_after") or []) == 1, "reinstall changed the buttons")
+        expect((result.get("modules_listing") or []).count("MtoULiveLink.mod") == 1,
+               "not exactly one MtoULiveLink.mod")
+        expect_loaded(version)
+    elif step == "same_session":
+        same = result.get("same_package") or {}
+        changed = result.get("changed_package") or {}
+        expect(same.get("installed") is True and not same.get("restart_required"),
+               "the same package asked for a restart")
+        expect(changed.get("installed") is True and bool(changed.get("restart_required")),
+               "a changed package did not ask for a restart")
+        expect_loaded(version)
+        expect(result.get("imported_version_after") == version,
+               "the session imported the changed package without a restart")
+    elif step in ("broken_package", "partial_package"):
+        expect(install.get("installed") is not True, "an incomplete package was installed")
+        expect(result.get("dialogs"), "an incomplete package was not reported")
+        if step == "partial_package":
+            expect(result.get("copy_linkage_kept") is True, "the installed copy was changed")
+        else:
+            expect(len(result.get("tool_buttons_after") or []) == 1,
+                   "an incomplete package changed the buttons")
+    elif step in ("missing_module", "missing_package"):
+        expect(result.get("opened") is False, "the tool opened with missing parts")
+        expect(result.get("error"), "the missing part was not reported")
+    elif step == "clean_install":
+        expect_installed(restart=False)
+        expect(result.get("tool_buttons_after"), "no shelf button was added")
+        expect_loaded(version)
+        expect(windows.get("MtoULiveLinkWindow"), "the panel did not open")
+    elif step == "clean_restart":
+        expect_loaded(version)
+        expect("release ascii" in str(loaded.get("entry_file") or ""),
+               "the module did not load from the extracted folder")
+    return failures
+
+
 def main(argv):
     import argparse
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -397,12 +491,23 @@ def main(argv):
         summary["steps"][step] = json.loads(path.read_text(encoding="utf-8")) if path.exists() \
             else {"errors": ["no result"]}
         summary["steps"][step]["seconds"] = round(time.time() - started, 1)
+    old_version = _declared_version(args.old_entry)
+    summary["failures"] = {
+        step: failures for step, failures in (
+            (step, evaluate(step, result, version, old_version))
+            for step, result in summary["steps"].items())
+        if failures}
+    summary["passed"] = not summary["failures"]
     (evidence / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1),
                                            encoding="utf-8")
     print(json.dumps({step: {key: value for key, value in result.items()
                              if key not in ("shots",)}
                       for step, result in summary["steps"].items()}, ensure_ascii=False, indent=1))
-    return 0
+    for step, failures in summary["failures"].items():
+        for failure in failures:
+            print("FAIL {0}: {1}".format(step, failure), file=sys.stderr)
+    print("install check {0}".format("passed" if summary["passed"] else "failed"))
+    return 0 if summary["passed"] else 1
 
 
 if __name__ == "mtou_install_step":

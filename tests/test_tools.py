@@ -1,6 +1,7 @@
 # ruff: noqa: E402
 
 import importlib.util
+import json
 import pathlib
 import sys
 import tempfile
@@ -88,6 +89,26 @@ class ProjectToolTests(unittest.TestCase):
         self.assertEqual(current, _project_tools.maya_version())
         with self.assertRaises(ValueError):
             version.update("next", apply=False)
+
+    def test_version_update_keeps_the_uplugin_layout(self):
+        descriptor = _project_tools.UPLUGIN.read_text(encoding="utf-8-sig")
+        updated = version.uplugin_text(descriptor, "9.9.9")
+        before = json.loads(descriptor)
+        after = json.loads(updated)
+        self.assertEqual("9.9.9", after["VersionName"])
+        self.assertEqual(before["Version"] + 1, after["Version"])
+        self.assertEqual(
+            {key: value for key, value in before.items() if key not in ("Version", "VersionName")},
+            {key: value for key, value in after.items() if key not in ("Version", "VersionName")},
+        )
+        changed = [
+            (old, new) for old, new in zip(descriptor.splitlines(), updated.splitlines())
+            if old != new
+        ]
+        self.assertEqual(len(descriptor.splitlines()), len(updated.splitlines()))
+        self.assertEqual(2, len(changed))
+        with self.assertRaises(ValueError):
+            version.uplugin_text('{"FileVersion": 3, "VersionName": "1.0.0"}', "9.9.9")
 
     def test_packages_can_be_previewed(self):
         current = _project_tools.maya_version()

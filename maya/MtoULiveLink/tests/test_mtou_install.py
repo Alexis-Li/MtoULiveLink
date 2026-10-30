@@ -296,5 +296,48 @@ class InstallTests(unittest.TestCase):
         self.assertIn("install_from_maya(root)", text)
 
 
+class InstallCheckEvaluationTests(unittest.TestCase):
+    """The GUI install check fails a step that misses its expectations."""
+
+    @classmethod
+    def setUpClass(cls):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "mtou_gui_install_check", pathlib.Path(__file__).with_name(
+                "maya_gui_install_check.py"))
+        cls.check = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.check)
+
+    def drag_install(self, **changes):
+        result = {
+            "errors": [],
+            "install": {"installed": True, "version": "1.0.0",
+                        "restart_required": "MtoULiveLink.py"},
+            "loaded_before": {"version": "0.9.0"},
+            "loaded": {"version": "0.9.0", "repository_on_path": []},
+            "legacy_entry_left": False,
+            "tool_buttons_after": ["Custom"],
+        }
+        result.update(changes)
+        return self.check.evaluate("drag_install", result, "1.0.0", "0.9.0")
+
+    def test_expected_drag_install_passes(self):
+        self.assertEqual([], self.drag_install())
+
+    def test_missed_expectations_are_reported(self):
+        self.assertIn("installed version '0.8.0', expected '1.0.0'", self.drag_install(
+            install={"installed": True, "version": "0.8.0", "restart_required": "x"}))
+        self.assertIn("restart not requested", self.drag_install(
+            install={"installed": True, "version": "1.0.0", "restart_required": None}))
+        self.assertIn("the old single file was not deleted",
+                      self.drag_install(legacy_entry_left=True))
+        self.assertEqual(["step error: KeyError: 'x'"], self.drag_install(
+            errors=["Traceback (most recent call last):\nKeyError: 'x'\n"]))
+
+    def test_a_missing_result_fails(self):
+        self.assertTrue(self.check.evaluate(
+            "clean_restart", {"errors": ["no result"]}, "1.0.0", "0.9.0"))
+
+
 if __name__ == "__main__":
     unittest.main()
