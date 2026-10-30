@@ -1,3 +1,6 @@
+// Copyright (C) 2026 Alexis-Li
+// SPDX-License-Identifier: GPL-3.0-only
+// Licensed under the GPL with additional terms; see NOTICE.
 #include "MtoULiveLinkActor.h"
 #include "MtoULiveLinkFactories.h"
 #include "MtoULiveLinkPreview.h"
@@ -52,6 +55,7 @@ public:
         MtoUSection->AddCategory("MtoU Linkage");
         MtoUSection->AddCategory("MtoU Scene Reference");
         MtoUSection->AddCategory("MtoU Advanced");
+        MtoUSection->AddCategory("MtoU About");
 
         // The editor half of the v10 linkage boundary, once per editor session.
         FMtoULinkageEditor::InstallHooks();

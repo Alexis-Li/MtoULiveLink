@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Maya timeline, playback range and playback cap helpers."""
 
 from .config import DEFAULT_PLAYBACK_CAP, PLAYBACK_CAP_CHOICES, PLAYBACK_CAP_OPTION_VAR

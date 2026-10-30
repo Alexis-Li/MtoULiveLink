@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """对象配对 detail window: the object set this panel streams to Unreal.
 
 The window owns no state: the primary character, the second object and every

@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
@@ -135,6 +136,8 @@ class ProjectToolTests(unittest.TestCase):
             self.assertIn("scripts/mtou_livelink/ui/style.py", names)
             self.assertIn("install.mel", names)
             self.assertIn("scripts/mtou_livelink/install.py", names)
+            self.assertIn("LICENSE", names)
+            self.assertIn("NOTICE", names)
             self.assertFalse([name for name in names if name.startswith("tests/")])
             self.assertFalse(
                 [name for name in names if "__pycache__" in name or name.endswith(".pyc")]
@@ -146,8 +149,10 @@ class ProjectToolTests(unittest.TestCase):
             self.assertIn(
                 "MtoULiveLink/Source/MtoULiveLink/Private/Tests/MtoULiveLinkTests.cpp", names
             )
+            self.assertIn("MtoULiveLink/LICENSE", names)
+            self.assertIn("MtoULiveLink/NOTICE", names)
             forbidden_names = {
-                "README.md", "README_CN.md", "CHANGELOG.md", "LICENSE", "AGENTS.md", ".gitkeep",
+                "README.md", "README_CN.md", "CHANGELOG.md", "AGENTS.md", ".gitkeep",
             }
             self.assertFalse(
                 [name for name in names if pathlib.PurePosixPath(name).name in forbidden_names]
@@ -156,6 +161,14 @@ class ProjectToolTests(unittest.TestCase):
                 [name for name in names
                  if {"Binaries", "Intermediate", "Saved"} & set(pathlib.PurePosixPath(name).parts)]
             )
+
+    def test_packaging_fails_without_the_legal_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(package, "ROOT", pathlib.Path(directory)):
+                with self.assertRaisesRegex(ValueError, "LICENSE, NOTICE"):
+                    package.package_maya(pathlib.Path(directory))
+                with self.assertRaisesRegex(ValueError, "LICENSE, NOTICE"):
+                    package.package_unreal("5.7", pathlib.Path(directory))
 
 
 if __name__ == "__main__":

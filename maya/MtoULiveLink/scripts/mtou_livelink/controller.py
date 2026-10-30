@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Product controller: panel, session and scene state authority."""
 
 import contextlib
@@ -24,6 +27,7 @@ from .config import (
     WORKFLOWS,
 )
 from .diagnostics import DIAGNOSTICS, make_diagnostic
+from .legal import LEGAL_TEXT, LEGAL_TITLE
 from .linkage import LinkageError, LinkageSession, is_scheduling_conflict
 from .mayaapi import cmds, om, omui
 from .protocol import (
@@ -328,7 +332,9 @@ class Controller(object):
             label="选中重名骨骼（0）", height=BUTTON_HEIGHT, enable=False,
             annotation="重名会被 UE 自动映射；点击可在场景中选中所有冲突骨骼。",
             command=lambda *_: self.select_duplicate_bones())
-        self._grid_row([display, self._duplicate_button])
+        legal = cmds.button(label=LEGAL_TITLE, height=BUTTON_HEIGHT,
+                            command=lambda *_: self.show_legal_notice())
+        self._grid_row([display, self._duplicate_button, legal])
         cmds.setParent("..")
 
         # Card 6 · diagnostics.
@@ -1269,6 +1275,9 @@ class Controller(object):
         lines.extend("  {0}".format(line)
                      for line in reference_report_lines(self.reference_report()))
         return "\n".join(lines)
+
+    def show_legal_notice(self, *unused):
+        cmds.confirmDialog(title=LEGAL_TITLE, message=LEGAL_TEXT, button=["关闭"])
 
     def show_diagnostics(self, *unused):
         if cmds.window(DIAGNOSTIC_WINDOW_NAME, exists=True):
