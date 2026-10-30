@@ -30,7 +30,7 @@ The prototype is loaded by the repository's Unreal test project
 its `"Enabled"` entry to `true` before building:
 
 ```
-<Engine>/Engine/Build/BatchFiles/Build.bat UnrealEditor Win64 Development <repo>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE
+<Engine>/Engine/Build/BatchFiles/Build.bat UnrealEditor Win64 Development <collection>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE
 ```
 
 In an interactive editor session:
@@ -62,7 +62,7 @@ that fixture only.
 Run them with:
 
 ```
-<Engine>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe <repo>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI -DDC-ForceMemoryCache -ExecCmds="Automation RunTests MtoUCameraSyncPrototype" -TestExit="Automation Test Queue Empty"
+<Engine>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe <collection>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI -DDC-ForceMemoryCache -ExecCmds="Automation RunTests MtoUCameraSyncPrototype" -TestExit="Automation Test Queue Empty"
 ```
 
 ## Limits

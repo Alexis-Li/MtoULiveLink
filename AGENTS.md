@@ -160,8 +160,10 @@ start, and `MTOU_LIVELINK_PORT` does the same for any other Maya.
 
 `prototypes/` is frozen verification scaffolding. Its Unreal plugins load only
 in a host project that adds their `prototypes/<name>/unreal` directory and
-enables them; their READMEs name the collection's `unreal/ToolsLab.uproject`,
-which lists them disabled. Product work does not run their tests.
+enables them; their READMEs use the collection's ToolsLab project, which
+lists them disabled. In those READMEs `<collection>` is the collection checkout
+that mounts this repository and `<repo>` or `<checkout>` is this repository.
+Product work does not run their tests.
 
 mayapy has no idle loop: the tool queues its main-thread work in batch mode,
 and a host loop (the `maya_*_peer.py` scripts) must call

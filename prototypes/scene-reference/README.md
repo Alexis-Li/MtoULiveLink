@@ -57,14 +57,14 @@ a level, touches an object outside its container, or saves a scene.
    project that loads it:
 
    ```
-   <Engine>/Engine/Build/BatchFiles/Build.bat UnrealEditor Win64 Development <repo>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE
+   <Engine>/Engine/Build/BatchFiles/Build.bat UnrealEditor Win64 Development <collection>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE
    ```
 
 2. Run the Unreal-side checks (they build the fixture themselves) and, with the
    three arguments, the cross-host check:
 
    ```
-   <Engine>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe <repo>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI -DDC-ForceMemoryCache ^
+   <Engine>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe <collection>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI -DDC-ForceMemoryCache ^
      -ExecCmds="Automation RunTests MtoUSceneRefPrototype" -TestExit="Automation Test Queue Empty" ^
      "-MtoUSceneRefMayapy=<mayapy>" ^
      "-MtoUSceneRefPeer=<repo>/prototypes/scene-reference/maya/MtoUSceneRefPrototype/scripts/MtoUSceneRefPrototype.py" ^

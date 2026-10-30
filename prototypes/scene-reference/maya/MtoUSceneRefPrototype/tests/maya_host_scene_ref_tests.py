@@ -199,7 +199,7 @@ class Checks(object):
 
 def scratch_directory():
     """A disposable directory under the repository's scratch folder."""
-    repo = HERE.parents[6]
+    repo = HERE.parents[4]
     for candidate in (repo.parent / ".tmp", repo / ".tmp"):
         if candidate.is_dir() and os.access(str(candidate), os.W_OK):
             return Path(tempfile.mkdtemp(prefix="mtou_scene_ref_host_", dir=str(candidate)))
