@@ -19,7 +19,7 @@ animation import/export, or package this prototype as a production plugin.
    `unreal/ToolsLab.uproject`; it is disabled there by default. Then build
    `unreal/ToolsLab.uproject` with the local UE 5.7
    `Engine/Build/BatchFiles/Build.bat UnrealEditor Win64 Development
-   <checkout>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE -NoUBA`.
+   <collection>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE -NoUBA`.
    ToolsLab finds the editor-only prototype through its additional plugin
    directories. This is separate from the user's production Backups project.
 2. Run the Unreal Editor automation tests `MtoUMultiSubjectPrototype`.

@@ -55,7 +55,7 @@ playback ranges on either side, and no client message can move the Unreal time.
    Unreal host project that loads it:
 
    ```
-   <Engine>/Engine/Build/BatchFiles/Build.bat UnrealEditor Win64 Development <repo>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE
+   <Engine>/Engine/Build/BatchFiles/Build.bat UnrealEditor Win64 Development <collection>/unreal/ToolsLab.uproject -WaitMutex -NoHotReloadFromIDE
    ```
 
 2. Open a Level Sequence in the Unreal editor and run
@@ -68,7 +68,7 @@ playback ranges on either side, and no client message can move the Unreal time.
 3. Run the Unreal-only checks:
 
    ```
-   <Engine>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe <repo>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI -DDC-ForceMemoryCache -ExecCmds="Automation RunTests MtoUCameraSyncPrototype" -TestExit="Automation Test Queue Empty"
+   <Engine>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe <collection>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI -DDC-ForceMemoryCache -ExecCmds="Automation RunTests MtoUCameraSyncPrototype" -TestExit="Automation Test Queue Empty"
    ```
 
 4. Run the Maya-side checks and the cross-host session:
@@ -83,7 +83,7 @@ playback ranges on either side, and no client message can move the Unreal time.
    passes it a fixture file:
 
    ```
-   UnrealEditor-Cmd.exe <repo>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI ^
+   UnrealEditor-Cmd.exe <collection>/unreal/ToolsLab.uproject -unattended -nop4 -nosplash -NullRHI ^
      -ExecCmds="Automation RunTests MtoUCameraSyncPrototype.RealMayaPeer" -TestExit="Automation Test Queue Empty" ^
      "-MtoUCameraSyncMayapy=<mayapy>" ^
      "-MtoUCameraSyncPeer=<repo>/prototypes/camera-sync/maya/MtoUCameraSyncPrototype/tests/maya_camera_sync_peer.py" ^

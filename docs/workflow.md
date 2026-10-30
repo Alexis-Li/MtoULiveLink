@@ -7,8 +7,9 @@ clone. Runtime, host and verification commands live in [AGENTS.md](../AGENTS.md)
 Issues and pull requests up to the repository's extraction (2026-10-30) live in
 the collection tracker,
 [Alexis-Li/Alexis_Script_Plugin_Package](https://github.com/Alexis-Li/Alexis_Script_Plugin_Package/issues).
-A bare issue number in a history record, ADR, roadmap or changelog entry of that
-period refers to that tracker; new work uses this repository's tracker.
+A bare issue number in a history record, ADR or roadmap of that period refers
+to that tracker, and the changelog links those numbers to it; new work and
+new changelog entries use this repository's tracker.
 
 ## Design before implementation
 
