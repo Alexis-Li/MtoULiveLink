@@ -168,9 +168,7 @@ class Controller(object):
     def build_ui(self):
         cmds.window(WINDOW_NAME, title="MtoU Live Link", closeCommand=self.close,
                     sizeable=False, width=PANEL_WIDTH + 2 * PANEL_MARGIN,
-                    resizeToFitChildren=True, menuBar=True)
-        cmds.menu(label="帮助")
-        cmds.menuItem(label=LEGAL_TITLE, command=lambda *_: self.show_legal_notice())
+                    resizeToFitChildren=True)
         cmds.columnLayout(adjustableColumn=True, rowSpacing=ROW_SPACING,
                           columnAttach=("both", PANEL_MARGIN))
         cmds.text(label="", height=1)
@@ -352,9 +350,11 @@ class Controller(object):
 
         cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
         cmds.separator(height=1, style="single")
-        cmds.rowLayout(numberOfColumns=1, columnWidth1=CARD_CONTENT)
+        cmds.rowLayout(numberOfColumns=2, adjustableColumn=1,
+                       columnWidth2=(CARD_CONTENT - 48, 48))
         self._warning_checkbox = cmds.checkBox(
             label="连接成功后弹出差异警告", value=True)
+        cmds.button(label="关于", width=48, command=lambda *_: self.show_legal_notice())
         cmds.setParent("..")
         cmds.setParent("..")
         self._refresh_fps()

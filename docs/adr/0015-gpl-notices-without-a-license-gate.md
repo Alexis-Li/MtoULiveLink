@@ -5,7 +5,7 @@ additional terms under section 7, all stated in `NOTICE`. Both release archives
 carry `LICENSE` and `NOTICE`, shipped source files carry a copyright and SPDX
 header that points to `NOTICE`, and both hosts display the Appropriate Legal
 Notices where a tool's owner information is expected, out of the working area:
-**帮助 > 关于 MtoU Live Link** in the Maya panel's menu bar, and the plugin's
+a small **关于** button at the bottom right of the Maya panel, and the plugin's
 description in Unreal's Plugins window. The panel's cards and the Binding Actor's
 Details hold only working controls.
 

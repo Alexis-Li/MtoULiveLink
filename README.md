@@ -356,7 +356,7 @@ permission and terms in [NOTICE](NOTICE), and comes with no warranty. You may
 use and modify it freely, commercially or inside a company. If you give a copy
 to anyone else, keep the notices, provide the source, mark your changes and do
 not present a modified version as the original. Both archives contain `LICENSE`
-and `NOTICE`. The notice is also under **帮助 > 关于 MtoU Live Link** in the Maya
+and `NOTICE`. The notice is also under **关于** at the bottom right of the Maya
 panel and in the plugin's entry in Unreal's **Edit > Plugins**.
 
 ## Further reading
