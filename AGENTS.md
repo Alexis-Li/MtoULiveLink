@@ -30,8 +30,9 @@ pinned commit. Do not change sibling projects.
   Declare plugin and module dependencies in `.uplugin` and `.Build.cs`.
 - Change user scenes and assets only as the product documents. Do not check in
   caches, `Binaries/`, `Intermediate/`, `Saved/`, `DerivedDataCache/`, `.vs/`,
-  generated IDE projects, archives or production assets. Keep the GPL license
-  and assess any third-party reuse separately.
+  generated IDE projects, archives or production assets. Keep the GPL license,
+  `NOTICE` and the legal header in every shipped source file (ADR 0015), add no
+  check that blocks use over them, and assess any third-party reuse separately.
 
 ## Documentation and delivery
 

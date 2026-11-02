@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Linkage: follow the Unreal camera and time, answer with complete pose groups.
 
 The session owns the exclusive time-control state on the Maya side. It never

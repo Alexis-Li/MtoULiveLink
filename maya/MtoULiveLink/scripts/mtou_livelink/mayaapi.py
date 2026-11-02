@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Maya bindings shared by the adapter modules.
 
 Each module imports the names it uses, so a module that never touches Maya stays

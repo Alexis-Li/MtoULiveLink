@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Product controller: panel, session and scene state authority."""
 
 import contextlib
@@ -24,6 +27,7 @@ from .config import (
     WORKFLOWS,
 )
 from .diagnostics import DIAGNOSTICS, make_diagnostic
+from .legal import LEGAL_TEXT, LEGAL_TITLE
 from .linkage import LinkageError, LinkageSession, is_scheduling_conflict
 from .mayaapi import cmds, om, omui
 from .protocol import (
@@ -346,9 +350,11 @@ class Controller(object):
 
         cmds.columnLayout(adjustableColumn=True, rowSpacing=4)
         cmds.separator(height=1, style="single")
-        cmds.rowLayout(numberOfColumns=1, columnWidth1=CARD_CONTENT)
+        cmds.rowLayout(numberOfColumns=2, adjustableColumn=1,
+                       columnWidth2=(CARD_CONTENT - 48, 48))
         self._warning_checkbox = cmds.checkBox(
             label="连接成功后弹出差异警告", value=True)
+        cmds.button(label="关于", width=48, command=lambda *_: self.show_legal_notice())
         cmds.setParent("..")
         cmds.setParent("..")
         self._refresh_fps()
@@ -1269,6 +1275,9 @@ class Controller(object):
         lines.extend("  {0}".format(line)
                      for line in reference_report_lines(self.reference_report()))
         return "\n".join(lines)
+
+    def show_legal_notice(self, *unused):
+        cmds.confirmDialog(title=LEGAL_TITLE, message=LEGAL_TEXT, button=["关闭"])
 
     def show_diagnostics(self, *unused):
         if cmds.window(DIAGNOSTIC_WINDOW_NAME, exists=True):

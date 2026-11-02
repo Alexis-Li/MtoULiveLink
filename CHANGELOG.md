@@ -5,6 +5,14 @@ Linked issue numbers point to the
 where this product was developed until 2026-10-30; bare numbers refer to this
 repository's issues.
 
+## Unreleased
+
+### Added
+
+- Both archives now contain `LICENSE` and `NOTICE`, and the copyright and license
+  are shown under **关于** at the bottom right of the Maya panel and in Unreal's
+  plugin entry. The license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
+
 ## 1.0.0 - 2026-10-30
 
 ### Upgrade notes

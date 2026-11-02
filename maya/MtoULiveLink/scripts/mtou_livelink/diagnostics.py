@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Stable diagnostic codes and the diagnostics derived from Unreal replies."""
 
 from .config import WORKFLOW_MODEL

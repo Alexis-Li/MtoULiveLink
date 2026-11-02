@@ -3,7 +3,7 @@
   "Version": 10,
   "VersionName": "1.0.0",
   "FriendlyName": "MtoU_LiveLink",
-  "Description": "Streams evaluated Maya character animation into Unreal Live Link.",
+  "Description": "Streams evaluated Maya character animation into Unreal Live Link. Copyright (C) 2026 Alexis-Li. Free software under GPL-3.0-only with the terms in NOTICE; you may convey it under that license. No warranty. See LICENSE and NOTICE in the plugin folder.",
   "Category": "Animation",
   "CreatedBy": "Alexis-Li",
   "CreatedByURL": "https://github.com/Alexis-Li/MtoULiveLink",

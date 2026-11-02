@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Unreal -> Maya scene reference handoff: validation, import and comparison.
 
 Two layers live here. The upper one is pure Python and never imports Maya: the

@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """场景参考 detail window: one Unreal handoff offer and its import outcome.
 
 The window owns no state: the offered handoff, the last report and even the

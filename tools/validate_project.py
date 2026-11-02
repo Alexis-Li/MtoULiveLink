@@ -21,6 +21,7 @@ REQUIRED_PATHS = (
     "README_CN.md",
     "CHANGELOG.md",
     "LICENSE",
+    "NOTICE",
     ".gitignore",
     ".gitattributes",
     "docs/workflow.md",
@@ -59,6 +60,13 @@ ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_])[A-Za-z]:[\\/]|(?<![A-Za-z0-9_.-])/(?:Users|home|private/tmp|var/folders)/"
 )
 ARCHIVE_SUFFIX = "comment-archive.json"
+SHIPPED_SOURCE_DIRS = ("maya/MtoULiveLink/scripts", "unreal/MtoULiveLink/Source")
+SHIPPED_SOURCE_SUFFIXES = {".py", ".cpp", ".h", ".inl", ".cs"}
+LEGAL_HEADER = (
+    "Copyright (C) 2026 Alexis-Li",
+    "SPDX-License-Identifier: GPL-3.0-only",
+    "see NOTICE",
+)
 
 
 def _version_control_paths(root: Path) -> list[Path]:
@@ -200,6 +208,23 @@ def _validate_files(root: Path, errors: list[str]) -> None:
                 )
 
 
+def _validate_legal_headers(root: Path, errors: list[str]) -> None:
+    sources = [root / "maya/MtoULiveLink/install.mel"]
+    for directory in SHIPPED_SOURCE_DIRS:
+        sources.extend(
+            path for path in (root / directory).rglob("*")
+            if path.suffix in SHIPPED_SOURCE_SUFFIXES
+        )
+    for path in sources:
+        if not path.is_file():
+            continue
+        with path.open(encoding="utf-8-sig") as handle:
+            head = "".join(handle.readline() for _ in range(3))
+        if not all(line in head for line in LEGAL_HEADER):
+            errors.append("missing legal header: {0}".format(
+                path.relative_to(root).as_posix()))
+
+
 def _validate_versions(errors: list[str]) -> None:
     try:
         maya, unreal = maya_version(), unreal_version()
@@ -233,6 +258,7 @@ def validate(root: Path = ROOT) -> dict:
         if not (root / relative_path).exists():
             errors.append("missing required path: {0}".format(relative_path))
     _validate_files(root, errors)
+    _validate_legal_headers(root, errors)
     _validate_versions(errors)
     _validate_conformance(root, errors)
     return {"ok": not errors, "errors": sorted(set(errors))}

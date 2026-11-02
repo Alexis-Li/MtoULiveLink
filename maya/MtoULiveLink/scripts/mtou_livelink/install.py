@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """Register an extracted Maya component as the MtoULiveLink Maya module.
 
 `install.mel` at the component root loads this file by path and calls
@@ -23,6 +26,7 @@ ENTRY_FILE = "MtoULiveLink.py"
 PACKAGE_DIR = "mtou_livelink"
 MOD_FILE = MODULE_NAME + ".mod"
 COPY_MARKER = ".mtou_module_copy"
+LEGAL_FILES = ("LICENSE", "NOTICE")
 SHELF_COMMAND = "import MtoULiveLink\nMtoULiveLink.run()"
 SHELF_LABEL = "MtoU"
 TITLE = "MtoU_LiveLink"
@@ -317,6 +321,10 @@ def apply_install(plan):
             shutil.rmtree(plan.copy_dir)
         shutil.copytree(os.path.join(plan.root, "scripts"), plan.scripts_dir,
                         ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        for name in LEGAL_FILES:
+            source = os.path.join(plan.root, name)
+            if os.path.isfile(source):
+                shutil.copy2(source, os.path.join(plan.copy_dir, name))
         with open(os.path.join(plan.copy_dir, COPY_MARKER), "w", encoding="utf-8") as handle:
             handle.write(plan.root + "\n")
     os.makedirs(os.path.dirname(plan.mod_path), exist_ok=True)

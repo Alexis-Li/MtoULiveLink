@@ -1,3 +1,6 @@
+# Copyright (C) 2026 Alexis-Li
+# SPDX-License-Identifier: GPL-3.0-only
+# Licensed under the GPL with additional terms; see NOTICE.
 """MtoU_LiveLink Maya adapter package.
 
 The entry module `MtoULiveLink.py` re-exports the product entry points;
