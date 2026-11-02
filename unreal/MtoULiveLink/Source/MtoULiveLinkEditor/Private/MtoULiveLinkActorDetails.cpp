@@ -1929,22 +1929,6 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
             ]
         ];
 
-    // The Appropriate Legal Notices; displayed only, nothing depends on them.
-    IDetailCategoryBuilder& About = DetailBuilder.EditCategory(
-        "MtoU About", LOCTEXT("AboutCategory", "关于与许可"),
-        ECategoryPriority::Default);
-    About.AddCustomRow(LOCTEXT("AboutFilter", "关于与许可"))
-        .WholeRowContent()
-        [
-            SNew(STextBlock)
-            .AutoWrapText(true)
-            .Text(LOCTEXT("AboutNotice",
-                "MtoU Live Link  版权所有 (C) 2026 Alexis-Li\n"
-                "https://github.com/Alexis-Li/MtoULiveLink\n"
-                "本程序是自由软件，你可以按 GNU 通用公共许可证第 3 版以及 NOTICE 中的附加条款再分发和修改。本程序不提供任何担保。\n"
-                "查看许可证：插件目录中的 LICENSE 和 NOTICE，或 https://www.gnu.org/licenses/gpl-3.0.html"))
-        ];
-
     IDetailCategoryBuilder& Advanced = DetailBuilder.EditCategory(
         "MtoU Advanced", LOCTEXT("AdvancedCategory", "高级设置与诊断"),
         ECategoryPriority::Default);

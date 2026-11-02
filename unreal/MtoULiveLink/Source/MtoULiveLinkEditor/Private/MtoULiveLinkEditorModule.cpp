@@ -55,7 +55,6 @@ public:
         MtoUSection->AddCategory("MtoU Linkage");
         MtoUSection->AddCategory("MtoU Scene Reference");
         MtoUSection->AddCategory("MtoU Advanced");
-        MtoUSection->AddCategory("MtoU About");
 
         // The editor half of the v10 linkage boundary, once per editor session.
         FMtoULinkageEditor::InstallHooks();

@@ -420,13 +420,13 @@ class LinkagePanelTests(unittest.TestCase):
             self.controller.build_ui()
 
     # --------------------------------------------------------------- tests
-    def test_panel_shows_the_legal_notice_without_blocking_anything(self):
+    def test_help_menu_shows_the_legal_notice(self):
         self.build_ui()
 
-        button = next(call for call in self.fake_cmds.button.call_args_list
-                      if call[1].get("label") == "关于与许可")
+        item = next(call for call in self.fake_cmds.menuItem.call_args_list
+                    if call[1].get("label") == "关于 MtoU Live Link")
         with self.bindings:
-            button[1]["command"]()
+            item[1]["command"]()
 
         message = self.fake_cmds.confirmDialog.call_args[1]["message"]
         for expected in ("版权所有 (C) 2026 Alexis-Li", "不提供任何担保", "再分发和修改",

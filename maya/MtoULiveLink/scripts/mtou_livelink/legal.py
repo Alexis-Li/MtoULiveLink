@@ -5,7 +5,7 @@
 
 from .config import __version__
 
-LEGAL_TITLE = "关于与许可"
+LEGAL_TITLE = "关于 MtoU Live Link"
 LEGAL_TEXT = (
     "MtoU Live Link {0}\n"
     "版权所有 (C) 2026 Alexis-Li\n"

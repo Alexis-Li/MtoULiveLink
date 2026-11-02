@@ -4,8 +4,10 @@ MtoU Live Link is licensed under GPL-3.0-only with an additional permission and
 additional terms under section 7, all stated in `NOTICE`. Both release archives
 carry `LICENSE` and `NOTICE`, shipped source files carry a copyright and SPDX
 header that points to `NOTICE`, and both hosts display the Appropriate Legal
-Notices: the **关于与许可** button in the Maya panel and the group of the same
-name in the Binding Actor's Details.
+Notices where a tool's owner information is expected, out of the working area:
+**帮助 > 关于 MtoU Live Link** in the Maya panel's menu bar, and the plugin's
+description in Unreal's Plugins window. The panel's cards and the Binding Actor's
+Details hold only working controls.
 
 The notices are displayed and never checked. Nothing refuses to start when they
 are missing or changed. A check could be removed by editing one line of source

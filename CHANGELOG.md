@@ -9,9 +9,9 @@ repository's issues.
 
 ### Added
 
-- Both archives now contain `LICENSE` and `NOTICE`, and **关于与许可** in the Maya
-  panel and the Binding Actor's Details shows the copyright and license. The
-  license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
+- Both archives now contain `LICENSE` and `NOTICE`, and the copyright and license
+  are shown under **帮助 > 关于 MtoU Live Link** in the Maya panel and in Unreal's
+  plugin entry. The license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
 
 ## 1.0.0 - 2026-10-30
 

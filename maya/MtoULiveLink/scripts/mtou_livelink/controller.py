@@ -168,7 +168,9 @@ class Controller(object):
     def build_ui(self):
         cmds.window(WINDOW_NAME, title="MtoU Live Link", closeCommand=self.close,
                     sizeable=False, width=PANEL_WIDTH + 2 * PANEL_MARGIN,
-                    resizeToFitChildren=True)
+                    resizeToFitChildren=True, menuBar=True)
+        cmds.menu(label="帮助")
+        cmds.menuItem(label=LEGAL_TITLE, command=lambda *_: self.show_legal_notice())
         cmds.columnLayout(adjustableColumn=True, rowSpacing=ROW_SPACING,
                           columnAttach=("both", PANEL_MARGIN))
         cmds.text(label="", height=1)
@@ -332,9 +334,7 @@ class Controller(object):
             label="选中重名骨骼（0）", height=BUTTON_HEIGHT, enable=False,
             annotation="重名会被 UE 自动映射；点击可在场景中选中所有冲突骨骼。",
             command=lambda *_: self.select_duplicate_bones())
-        legal = cmds.button(label=LEGAL_TITLE, height=BUTTON_HEIGHT,
-                            command=lambda *_: self.show_legal_notice())
-        self._grid_row([display, self._duplicate_button, legal])
+        self._grid_row([display, self._duplicate_button])
         cmds.setParent("..")
 
         # Card 6 · diagnostics.

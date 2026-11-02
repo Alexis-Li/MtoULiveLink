@@ -3825,7 +3825,9 @@ class ControllerLifecycleTests(unittest.TestCase):
                 patch_global("om", mock.MagicMock()):
             controller.build_ui()
 
-        labels = [call[1]["label"] for call in fake_cmds.menuItem.call_args_list]
+        # The option menu's items carry no command; the menu bar's do.
+        labels = [call[1]["label"] for call in fake_cmds.menuItem.call_args_list
+                  if "command" not in call[1]]
         self.assertEqual(list(mtou_config.PLAYBACK_CAP_CHOICES), labels)
         self.assertEqual("15 fps", controller._playback_cap)
         self.assertTrue(any(
