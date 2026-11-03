@@ -224,8 +224,9 @@ playback-segment semantics are in
    attempt's progress, pause, seek, loop, completion or stop, and every later
    outcome carries the same `play_id`.
 5. `cache_clear` with a new `clear_id` releases the cache; Unreal echoes the
-   identities it dropped in `cache_cleared`, and Maya waits for that exact
-   acknowledgement before it samples a new capture or returns to realtime.
+   identities it dropped in `cache_cleared`. Maya resumes realtime frames right
+   after the clear, which precede them on the socket, and samples a new
+   capture or enters linkage only once it received that exact acknowledgement.
 
 Cache errors are routed by identity like the other outcomes. Only a
 recoverable cache error that belongs to an existing upload or play attempt

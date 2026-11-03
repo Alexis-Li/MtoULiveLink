@@ -26,6 +26,7 @@ from mtou_livelink import mayaapi as mtou_mayaapi
 from mtou_livelink import protocol as mtou_protocol
 from mtou_livelink import scene as mtou_scene
 from mtou_livelink import session as mtou_session
+from mtou_livelink import timecontrol as mtou_timecontrol
 from mtou_livelink.ui import objects_window as mtou_objects_window
 
 CHARACTER = mtou_config.CHARACTER_OBJECT_ID
@@ -274,7 +275,7 @@ class _FakeOpenMaya(object):
 class FakeWorker(object):
     """The sender worker surface a streaming session drives."""
 
-    def __init__(self, init_messages, hello_message=None):
+    def __init__(self, init_messages, hello_message=None, on_reply=None):
         self.init_messages = init_messages
         self.hello_message = hello_message
         self.frames = []
@@ -441,6 +442,7 @@ class SetHost(object):
 class SetLinkageSession(object):
     def __init__(self):
         self.messages = []
+        self.time_control = mtou_timecontrol.TimeControl()
 
     def submit_linkage(self, message):
         self.messages.append(message)
@@ -566,9 +568,16 @@ class PanelSession(object):
         self.adopted = []
         self.stopped = False
         self.hello_reply = dict(GREETING)
+        self.time_control = mtou_timecontrol.TimeControl()
+        # The panel's statement handler, as connect() would register it.
+        self.statement_handler = None
 
     def is_ready(self):
         return True
+
+    def route(self, reply):
+        """Deliver one Unreal message the way the connection's sender does."""
+        return mtou_session.route_reply(reply, self.time_control, self.statement_handler)
 
     def request_secondary_removal(self, session_id, detail=""):
         self.requests.append((session_id, detail))
@@ -586,11 +595,14 @@ class PanelSession(object):
     def stop(self):
         self.stopped = True
 
-    def set_cached_reply_listener(self, listener):
-        pass
-
 
 class PanelObjectTests(unittest.TestCase):
+    def route(self, session, reply):
+        session.statement_handler = (
+            lambda statement: self.controller._on_session_statement(
+                {"session": session}, statement))
+        return session.route(reply)
+
     def setUp(self):
         self.cmds = mock.MagicMock()
         self.cmds.control.return_value = True
@@ -690,7 +702,7 @@ class PanelObjectTests(unittest.TestCase):
 
         reply = {"type": "object_removed", "session_id": 4242, "object_id": SECONDARY,
                  "set_revision": 2, "restored": True, "detail": "restored"}
-        self.assertTrue(self.controller._on_runtime_reply(reply))
+        self.assertTrue(self.route(session, reply))
         # The linkage adopts the new set on the sender thread at once.
         linkage.adopt_set.assert_called_once_with(2, [CHARACTER])
         with mock.patch.object(mtou_controller, "CachedPlayback"):
@@ -699,6 +711,59 @@ class PanelObjectTests(unittest.TestCase):
         self.assertIsNone(self.controller._secondary_scene)
         self.assertTrue(secondary.closed)
         self.assertIn("已移除副对象", self.controller._object_set_detail)
+
+    def connect_delivering(self, session, *early):
+        """connect() whose sender reports ``early`` before start() returns."""
+        handlers = []
+
+        def start(*args, **kwargs):
+            session.statement_handler = kwargs["on_statement"]
+            handlers.append(kwargs["on_statement"])
+            for reply in early:
+                session.route(reply)
+            return session
+
+        with mock.patch.object(mtou_controller.StreamingSession, "start",
+                               side_effect=start):
+            self.controller.connect()
+        return handlers[0]
+
+    def test_a_removal_confirmed_before_start_returns_is_adopted(self):
+        secondary = secondary_scene()
+        self.controller._secondary_scene = secondary
+        session = PanelSession(secondary)
+        reply = {"type": "object_removed", "session_id": 4242, "object_id": SECONDARY,
+                 "set_revision": 2, "restored": True, "detail": "restored"}
+
+        self.connect_delivering(session, reply)
+        with mock.patch.object(mtou_controller, "CachedPlayback"):
+            self.flush()
+
+        self.assertIs(session, self.controller._session)
+        self.assertEqual([reply], session.adopted)
+        self.assertEqual(2, session.set_revision)
+        self.assertIsNone(self.controller._secondary_scene)
+        self.assertTrue(secondary.closed)
+
+    def test_a_late_removal_of_an_ended_connection_is_dropped(self):
+        secondary = secondary_scene()
+        self.controller._secondary_scene = secondary
+        old = PanelSession(secondary)
+        old_handler = self.connect_delivering(old)
+        self.controller._session = None
+        current = PanelSession(secondary)
+        self.connect_delivering(current)
+
+        old_handler({"type": "object_removed", "session_id": 4242,
+                     "object_id": SECONDARY, "set_revision": 2,
+                     "restored": True, "detail": "restored"})
+        with mock.patch.object(mtou_controller, "CachedPlayback"):
+            self.flush()
+
+        self.assertEqual([], old.adopted)
+        self.assertEqual([], current.adopted)
+        self.assertIs(secondary, self.controller._secondary_scene)
+        self.assertFalse(secondary.closed)
 
     def test_removing_without_a_connection_only_forgets_the_object(self):
         secondary = secondary_scene()
@@ -712,7 +777,7 @@ class PanelObjectTests(unittest.TestCase):
         session = PanelSession(secondary)
         self.controller._session = session
         self.controller._secondary_scene = secondary
-        self.controller._on_runtime_reply({
+        self.route(session, {
             "type": "object_removed", "session_id": 4242, "object_id": SECONDARY,
             "set_revision": 2, "restored": False,
             "detail": "the muted writer 'transform:Sword' no longer exists"})

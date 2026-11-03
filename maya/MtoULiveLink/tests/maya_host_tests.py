@@ -39,6 +39,7 @@ from mtou_livelink import (
 from mtou_livelink import (
     scene as mtou_scene,
 )
+from mtou_livelink import timecontrol  # noqa: E402
 from mtou_livelink import (
     session as mtou_session,
 )
@@ -531,7 +532,7 @@ class MayaHostTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_messages, hello_message=None):
+            def __init__(self, init_messages, hello_message=None, on_reply=None):
                 # One init per object of the set; this session has one object.
                 self.init_message = init_messages[0]
                 self.init_count = len(init_messages)
@@ -589,7 +590,7 @@ class MayaHostTests(unittest.TestCase):
         events = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 pass
 
             def start(self):
@@ -713,22 +714,17 @@ class MayaHostTests(unittest.TestCase):
 
                 def __init__(self):
                     self.resumed = 0
-                    self.reply_listener = None
+                    self.time_control = timecontrol.TimeControl(
+                        resume=self._resume)
 
-                def pause_for_cached(self, reply_listener=None):
-                    self.reply_listener = reply_listener
-
-                def resume_from_cached(self):
+                def _resume(self):
                     self.resumed += 1
 
                 def submit_cached(self, message):
-                    if message["type"] == "cache_clear" and self.reply_listener:
-                        self.reply_listener({"type": "cache_cleared",
-                                             "upload_id": 0, "play_id": 0,
-                                             "clear_id": message["clear_id"]})
-
-                def end_cached_replay(self):
-                    pass
+                    if message["type"] == "cache_clear":
+                        mtou_session.route_reply(
+                            {"type": "cache_cleared", "upload_id": 0, "play_id": 0,
+                             "clear_id": message["clear_id"]}, self.time_control)
 
             stream = FakeStream()
             progress = []
@@ -1233,6 +1229,7 @@ class MayaHostTests(unittest.TestCase):
 
         class Session(object):
             messages = []
+            time_control = timecontrol.TimeControl()
 
             def submit_linkage(self, message):
                 self.messages.append(message)
