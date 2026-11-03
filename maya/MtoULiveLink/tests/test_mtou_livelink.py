@@ -290,6 +290,33 @@ class PlaybackSchedulingTests(unittest.TestCase):
             self.assertEqual(2, scene.sample.call_count)
             session.stop()
 
+    def test_a_rate_changed_while_a_lease_holds_time_applies_on_release(self):
+        state = {"playing": False}
+        intervals = []
+        callbacks = []
+        worker = mock.Mock()
+        worker.status.return_value = (
+            "ready", "Connected", {
+                "missing_in_unreal": [], "missing_in_maya": [],
+                "bone_name_remaps": [], "has_warning": False,
+            }, None)
+        fake_om, scene, playback_state = self._runtime(
+            state, intervals, callbacks, worker)
+
+        with patch_global("om", fake_om), \
+             patch_global("SenderWorker", return_value=worker), \
+             mock.patch.object(time, "time", return_value=100.0):
+            session = mtou_session.StreamingSession.start(
+                scene, 30.0, playback_state=playback_state)
+            lease = session.time_control.acquire(mtou_config.CACHED_MODE, object())
+            session.change_rate(24.0)
+            # While the lease holds time the timer only watches the connection.
+            self.assertEqual([1.0 / 30.0], intervals)
+
+            lease.release()
+            self.assertEqual([1.0 / 30.0, 1.0 / 24.0], intervals)
+            session.stop()
+
     def test_follow_scene_and_numeric_caps_never_exceed_scene_rate(self):
         state = {"playing": True}
         intervals = []

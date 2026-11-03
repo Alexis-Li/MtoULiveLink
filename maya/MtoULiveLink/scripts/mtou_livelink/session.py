@@ -857,7 +857,9 @@ class StreamingSession(object):
             self._worker.end_ordered(discard_pending=False)
         if self._outcome is not None or self._worker is None:
             return
-        self._last_sample_time = None
+        # A rate or cap changed while paused reaches the timer only now.
+        if not self._replace_timer(self._effective_rate()):
+            return
         self._sample_and_submit(force=True)
 
     def _route_reply(self, reply):
