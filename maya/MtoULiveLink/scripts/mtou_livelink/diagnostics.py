@@ -181,6 +181,15 @@ def make_diagnostic(code, message="", solution="", details=""):
     }
 
 
+def error_reply_diagnostic(reply):
+    """The diagnostic of one Unreal ``error``: the same when it is reported and
+    when it later ends the connection, so the panel recognises a repeat."""
+    message = reply.get("message") or "Unreal 报告了一个错误。"
+    return make_diagnostic(
+        reply.get("code") or "STREAM_INTERRUPTED", message,
+        details=reply.get("details") or message)
+
+
 def blendshape_warning_from_reply(reply):
     missing_in_unreal = list(reply.get("missing_in_unreal")
                              or reply.get("missing_curves") or [])

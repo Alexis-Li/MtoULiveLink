@@ -80,6 +80,7 @@ class UnrealSocket(object):
         self.closed = False
         # While set, cache clears are recorded but not yet confirmed.
         self.held_clears = None
+        self.hung_up = False
         self.push({"type": "hello_ack", "version": mtou_config.PROTOCOL_VERSION,
                    "session_id": SESSION_ID,
                    "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
@@ -101,7 +102,12 @@ class UnrealSocket(object):
 
     def readable(self):
         with self._lock:
-            return bool(self._inbound)
+            return bool(self._inbound) or self.hung_up
+
+    def hang_up(self):
+        """Unreal closes the connection once what it already sent is read."""
+        with self._lock:
+            self.hung_up = True
 
     def settimeout(self, timeout):
         del timeout
@@ -187,10 +193,13 @@ class ConnectionHarness(unittest.TestCase):
         self.controller = mtou_controller.Controller()
         self.controller._scene = FakeScene()
         holder = {}
+        # Started the way the panel's connect() starts it.
         self.session = mtou_session.StreamingSession.start(
             self.controller._scene, 24.0,
             lambda event: self.controller._on_streaming_session_event(
-                holder.get("session"), event))
+                holder.get("session"), event),
+            on_statement=lambda reply: self.controller._on_session_statement(
+                holder, reply))
         holder["session"] = self.session
         self.controller._session = self.session
         self.addCleanup(self._stop)
@@ -245,6 +254,12 @@ class ConnectionHarness(unittest.TestCase):
     def tick(self):
         """Maya's time changes once, as when the animator scrubs."""
         self.session._on_time_changed()
+        self.flush()
+
+    def fire_timers(self):
+        """Run every Maya timer the tool registered once (session, cache, pump)."""
+        for callback in list(self.timers.values()):
+            callback()
         self.flush()
 
     def wait_until(self, predicate, what):
@@ -348,6 +363,162 @@ class LinkageAfterCachedTests(ConnectionHarness):
         self.controller.enter_linkage()
         self.assertEqual(mtou_config.LINKAGE_MODE, self.controller._mode)
         self.wait_until(lambda: "mode" in self.sent_after(mark), "the linkage entry")
+
+
+ANCHOR = {"location_cm": [0.0, 0.0, 0.0],
+          "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
+
+
+def mode_state(revision, mode="linkage"):
+    message = {"type": "mode_state", "session_id": SESSION_ID,
+               "mode_revision": revision, "mode": mode,
+               "control": "unreal" if mode == "linkage" else "maya", "detail": ""}
+    if mode == "linkage":
+        message["anchor"] = ANCHOR
+    return message
+
+
+REFERENCE_OFFER = {
+    "type": "reference_offer", "session_id": SESSION_ID, "transfer_id": "tx-1",
+    "directory": "handoff/tx-1", "manifest_digest": "ab12",
+    "scope": {"level": "L_Main"}, "space_revision": 1,
+    "counts": {"objects": 1, "triangles": 2, "bytes": 3}}
+
+
+class UnrealDuringCachedTests(ConnectionHarness):
+    """Unreal's statements reach the panel while Cached Playback holds time."""
+
+    def enter_cached(self):
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        return self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+
+    def test_an_unreal_entry_is_refused_at_once_and_the_cache_keeps_time(self):
+        mark = self.enter_cached()
+        view = self.controller._cached_playback.view
+
+        self.socket.push(mode_state(1))
+        self.wait_for_sent(mark, ["mode"], "Maya's answer to the entry")
+
+        refusal = self.socket.sent[mark]
+        self.assertEqual(("realtime", 1, "failed"),
+                         (refusal["mode"], refusal["mode_revision"],
+                          refusal["transition"]))
+        self.assertEqual("CACHE_NOT_CLEARED", self.errors[-1]["code"])
+        self.assertIsNone(self.controller._linkage)
+        self.assertEqual(mtou_config.CACHED_MODE, self.session.time_control.state)
+        self.assertEqual(view.state, self.controller._cached_playback.view.state)
+        self.assertNotIn("cache_clear", self.sent_after(mark))
+
+    def test_a_reference_offer_reaches_the_reference_window(self):
+        self.enter_cached()
+
+        self.socket.push(REFERENCE_OFFER)
+        self.wait_until(lambda: self.controller.reference_offer() is not None,
+                        "the reference offer")
+
+        self.assertEqual("tx-1", self.controller.reference_offer()["transfer_id"])
+
+
+class UnrealErrorTests(ConnectionHarness):
+    """An Unreal error has one outcome whatever modes the connection used."""
+
+    ERROR = {"type": "error", "code": "INVALID_MESSAGE", "message": "bad frame",
+             "details": "frame 3 has 2 transforms"}
+
+    def use_every_mode(self):
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        mark = self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+        self.mode(mtou_config.REALTIME_MODE)
+        mark = self.wait_for_sent(mark, ["cache_clear", "frame"], "the cache clear")
+        self.wait_until(lambda: not self.session.time_control.cache_holds_connection(),
+                        "Unreal to confirm the clear")
+        self.controller.enter_linkage()
+        mark = self.wait_for_sent(mark, ["mode"], "the linkage entry")
+        self.controller.leave_linkage("realtime")
+        mark = self.wait_for_sent(mark, ["leave_linkage", "frame"],
+                                  "the return to realtime")
+        self.controller.leave_linkage("end")
+        self.wait_for_sent(mark, ["leave_linkage"], "the end of the preview")
+
+    def report(self):
+        self.socket.push(dict(self.ERROR))
+        self.wait_until(lambda: self.errors, "the error to be reported")
+
+    def assert_reported_once_and_kept(self):
+        self.report()
+        self.fire_timers()
+        self.assertEqual([("INVALID_MESSAGE", "frame 3 has 2 transforms")],
+                         [(error["code"], error["details"]) for error in self.errors])
+        self.assertIs(self.session, self.controller._session)
+        self.assertTrue(self.session.is_ready)
+
+    def assert_reported_once_and_ended(self):
+        self.report()
+        self.socket.hang_up()
+        self.wait_until(lambda: (self.fire_timers() or self.controller._session is None),
+                        "the connection to end")
+        self.assertEqual([("INVALID_MESSAGE", "frame 3 has 2 transforms")],
+                         [(error["code"], error["details"]) for error in self.errors])
+        self.assertEqual("bad frame", self.controller._last_diagnostic["message"])
+
+    def test_on_a_fresh_connection_it_is_reported_and_the_connection_stays(self):
+        self.assert_reported_once_and_kept()
+
+    def test_after_every_mode_it_is_reported_and_the_connection_stays(self):
+        self.use_every_mode()
+        self.assert_reported_once_and_kept()
+
+    def test_on_a_fresh_connection_unreal_closing_ends_with_that_reason(self):
+        self.assert_reported_once_and_ended()
+
+    def test_after_every_mode_unreal_closing_ends_with_that_reason(self):
+        self.use_every_mode()
+        self.assert_reported_once_and_ended()
+
+    def test_a_cache_error_without_an_identity_is_ignored(self):
+        self.socket.push({"type": "error", "code": "CACHE_METADATA_INVALID",
+                          "message": "stale clear", "details": "clear_id 1"})
+        self.socket.push(REFERENCE_OFFER)
+        self.wait_until(lambda: self.controller.reference_offer() is not None,
+                        "the message after the error")
+        self.assertEqual([], self.errors)
+        self.assertTrue(self.session.is_ready)
+
+
+class DisconnectReasonTests(ConnectionHarness):
+    """A connection lost while sampling is paused ends with its real reason."""
+
+    def assert_ends_with(self, code, details=None):
+        self.socket.hang_up()
+        self.wait_until(lambda: (self.fire_timers() or self.controller._session is None),
+                        "the connection to end")
+        self.assertEqual(code, self.errors[-1]["code"])
+        if details is not None:
+            self.assertEqual(details, self.errors[-1]["details"])
+        self.assertEqual(1, len(self.errors))
+
+    def test_during_cached_playback(self):
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+        self.assert_ends_with("STREAM_INTERRUPTED")
+
+    def test_during_linkage(self):
+        start = len(self.socket.types())
+        self.controller.enter_linkage()
+        self.wait_for_sent(start, ["mode"], "the linkage entry")
+        self.assert_ends_with("STREAM_INTERRUPTED")
+
+    def test_after_an_error_during_cached_playback(self):
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+        self.socket.push({"type": "error", "code": "PAIRING_REQUIRED",
+                          "message": "the target was removed",
+                          "details": "Binding Actor deleted"})
+        self.assert_ends_with("PAIRING_REQUIRED", "Binding Actor deleted")
 
 
 if __name__ == "__main__":

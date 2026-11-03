@@ -275,7 +275,7 @@ class _FakeOpenMaya(object):
 class FakeWorker(object):
     """The sender worker surface a streaming session drives."""
 
-    def __init__(self, init_messages, hello_message=None, on_cache_cleared=None):
+    def __init__(self, init_messages, hello_message=None, on_reply=None):
         self.init_messages = init_messages
         self.hello_message = hello_message
         self.frames = []
@@ -568,9 +568,16 @@ class PanelSession(object):
         self.adopted = []
         self.stopped = False
         self.hello_reply = dict(GREETING)
+        self.time_control = mtou_timecontrol.TimeControl()
+        # The panel's statement handler, as connect() would register it.
+        self.statement_handler = None
 
     def is_ready(self):
         return True
+
+    def route(self, reply):
+        """Deliver one Unreal message the way the connection's sender does."""
+        return mtou_session.route_reply(reply, self.time_control, self.statement_handler)
 
     def request_secondary_removal(self, session_id, detail=""):
         self.requests.append((session_id, detail))
@@ -588,11 +595,14 @@ class PanelSession(object):
     def stop(self):
         self.stopped = True
 
-    def set_cached_reply_listener(self, listener):
-        pass
-
 
 class PanelObjectTests(unittest.TestCase):
+    def route(self, session, reply):
+        session.statement_handler = (
+            lambda statement: self.controller._on_session_statement(
+                {"session": session}, statement))
+        return session.route(reply)
+
     def setUp(self):
         self.cmds = mock.MagicMock()
         self.cmds.control.return_value = True
@@ -692,7 +702,7 @@ class PanelObjectTests(unittest.TestCase):
 
         reply = {"type": "object_removed", "session_id": 4242, "object_id": SECONDARY,
                  "set_revision": 2, "restored": True, "detail": "restored"}
-        self.assertTrue(self.controller._on_runtime_reply(reply))
+        self.assertTrue(self.route(session, reply))
         # The linkage adopts the new set on the sender thread at once.
         linkage.adopt_set.assert_called_once_with(2, [CHARACTER])
         with mock.patch.object(mtou_controller, "CachedPlayback"):
@@ -714,7 +724,7 @@ class PanelObjectTests(unittest.TestCase):
         session = PanelSession(secondary)
         self.controller._session = session
         self.controller._secondary_scene = secondary
-        self.controller._on_runtime_reply({
+        self.route(session, {
             "type": "object_removed", "session_id": 4242, "object_id": SECONDARY,
             "set_revision": 2, "restored": False,
             "detail": "the muted writer 'transform:Sword' no longer exists"})

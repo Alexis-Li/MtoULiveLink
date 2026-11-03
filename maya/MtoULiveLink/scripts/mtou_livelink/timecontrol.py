@@ -16,6 +16,10 @@ Whether an entry is allowed is decided here and nowhere else:
 Unreal answers every increasing clear id, and the connection's end resets this
 state with it, so the wait for the confirmation has no timeout.
 
+A lease also names where the results of its state go: the connection routes
+cache outcomes to the Cached Playback lease and linkage targets and receipts
+to the linkage lease, and drops them while nobody holds that state.
+
 The sender thread reports clears and Maya's main thread takes, releases and
 reads leases, so the state is guarded by one lock. The pause and resume hooks
 run on the thread that took or released the lease (Maya's main thread); the
@@ -52,10 +56,11 @@ class TimeControlRefused(Exception):
 class TimeControlLease(object):
     """One holder's claim on a time-control state."""
 
-    def __init__(self, control, state, owner):
+    def __init__(self, control, state, owner, receive=None):
         self._control = control
         self._state = state
         self._owner = owner
+        self._receive = receive
 
     @property
     def state(self):
@@ -64,6 +69,11 @@ class TimeControlLease(object):
     @property
     def owner(self):
         return self._owner
+
+    @property
+    def receive(self):
+        """Where the connection delivers this state's results, or None."""
+        return self._receive
 
     @property
     def active(self):
@@ -124,11 +134,12 @@ class TimeControl(object):
         return (self._pending_clear is not None
                 or (self._lease is not None and self._lease.state == CACHED_MODE))
 
-    def acquire(self, state, owner):
+    def acquire(self, state, owner, receive=None):
         """Take ``state`` for ``owner``; raises :class:`TimeControlRefused`.
 
-        The same owner asking again for the state it holds gets its lease back
-        without pausing twice.
+        ``receive(reply)`` gets the results of ``state`` while the lease is
+        current, on the sender thread. The same owner asking again for the
+        state it holds gets its lease back without pausing twice.
         """
         if state not in (CACHED_MODE, LINKAGE_MODE):
             raise ValueError("time control state must be cached or linkage")
@@ -156,7 +167,7 @@ class TimeControl(object):
                     if current.state == LINKAGE_MODE
                     else "缓存播放进行中，无法再次进入。",
                     "time control: {0}, requested {1}".format(current.state, state))
-            lease = TimeControlLease(self, state, owner)
+            lease = TimeControlLease(self, state, owner, receive)
             self._lease = lease
         if self._pause is not None:
             self._pause()
@@ -185,6 +196,17 @@ class TimeControl(object):
                 return False
             self._pending_clear = None
         self._notify()
+        return True
+
+    def deliver(self, state, reply):
+        """Hand ``reply`` to the current holder of ``state``; False drops it."""
+        with self._lock:
+            lease = self._lease
+            receive = (lease.receive if lease is not None and lease.state == state
+                       else None)
+        if receive is None:
+            return False
+        receive(reply)
         return True
 
     def terminate(self):

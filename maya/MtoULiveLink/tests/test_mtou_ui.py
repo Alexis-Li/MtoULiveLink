@@ -161,7 +161,9 @@ class FakeStreamingSession(object):
         self.messages = []
         self.paused = 0
         self.resumed = 0
-        self.listeners = []
+        self.reasons = []
+        # The panel's statement handler, as connect() would register it.
+        self.statement_handler = None
         self.time_control = mtou_timecontrol.TimeControl(
             pause=self._pause, resume=self._resume)
         self.object_id = mtou_config.CHARACTER_OBJECT_ID
@@ -188,8 +190,10 @@ class FakeStreamingSession(object):
     def stop(self):
         self.stopped = True
 
-    def set_cached_reply_listener(self, listener):
-        self.listeners.append(listener)
+    def route(self, reply):
+        """Deliver one Unreal message the way the connection's sender does."""
+        return mtou_session.route_reply(
+            reply, self.time_control, self.statement_handler, self.reasons.append)
 
 
 class FakeCharacterScene(object):
@@ -317,6 +321,9 @@ class LinkagePanelTests(unittest.TestCase):
         self.reference = FakeReferenceModule()
         self.controller = mtou_controller.Controller()
         self.controller._session = self.session
+        self.session.statement_handler = (
+            lambda reply: self.controller._on_session_statement(
+                {"session": self.session}, reply))
         self.controller._scene = FakeCharacterScene()
         self.fake_cmds = self._fake_cmds()
         self.fake_om = self._fake_om()
@@ -551,10 +558,10 @@ class LinkagePanelTests(unittest.TestCase):
     def test_diagnostic_details_keep_the_linkage_read_back(self):
         self.enter_linkage()
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time(display_frame=12.0))
+            self.session.route(camera_time(display_frame=12.0))
         self.run_timer()
         with self.bindings:
-            self.controller._on_runtime_reply(
+            self.session.route(
                 applied_message(eval_id="seq@10+0/cam#c1", sample_serial=1))
 
         text = self.controller._diagnostic_text()
@@ -649,7 +656,6 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(1, linkage.mode_revision())
         self.assertEqual(1, self.host.captured)
         self.assertEqual(1, self.session.paused)
-        self.assertIn(self.controller._on_runtime_reply, self.session.listeners)
         self.assertEqual(7, linkage.status().session_id)
         self.assertEqual(1, len(self.timers))
         self.assertLessEqual(self.timers[0][0], 1.0 / 60.0)
@@ -669,7 +675,7 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
 
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time(display_frame=12.0))
+            self.session.route(camera_time(display_frame=12.0))
         self.assertEqual(1, self.controller._linkage.pending_count())
 
         self.run_timer()
@@ -692,12 +698,12 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
 
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time(eval_serial=3))
+            self.session.route(camera_time(eval_serial=3))
         # A routed target waits for the pump; the status keeps it honest.
         self.assertEqual(1, self.controller._linkage.pending_count())
 
         with self.bindings:
-            self.controller._on_runtime_reply(
+            self.session.route(
                 applied_message(eval_id="seq@10+0/cam#c1", sample_serial=1))
         status = self.controller.linkage_status()
         self.assertEqual(1, status["applied_count"])
@@ -705,7 +711,7 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(0.02, status["lag_seconds"])
 
         with self.bindings:
-            self.controller._on_runtime_reply({
+            self.session.route({
                 "type": "mode_state", "session_id": 7, "mode_revision": 1,
                 "mode": "linkage", "control": "unreal", "detail": "UE 已接管",
                 "anchor": IDENTITY_ANCHOR})
@@ -719,9 +725,9 @@ class LinkagePanelTests(unittest.TestCase):
         current = self.controller._linkage.mode_revision()
 
         with self.bindings:
-            self.controller._on_runtime_reply(
+            self.session.route(
                 camera_time(mode_revision=current - 1))
-            self.controller._on_runtime_reply(
+            self.session.route(
                 applied_message(mode_revision=current - 1))
             self.flush()
 
@@ -731,7 +737,7 @@ class LinkagePanelTests(unittest.TestCase):
 
     def _send_one_group(self):
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time())
+            self.session.route(camera_time())
         self.run_timer()
 
     def _assert_counted(self, details, message="A group named a different mode revision."):
@@ -805,7 +811,7 @@ class LinkagePanelTests(unittest.TestCase):
         current = self.controller._linkage.mode_revision()
 
         with self.bindings:
-            self.controller._on_runtime_reply(
+            self.session.route(
                 camera_time(mode_revision=current + 1))
             self.flush()
 
@@ -821,7 +827,7 @@ class LinkagePanelTests(unittest.TestCase):
 
     def _route(self, reply):
         with self.bindings:
-            handled = self.controller._on_runtime_reply(reply)
+            handled = self.session.route(reply)
             self.flush()
         return handled
 
@@ -942,7 +948,7 @@ class LinkagePanelTests(unittest.TestCase):
 
     def test_a_deferred_statement_of_an_ended_connection_is_dropped(self):
         with self.bindings:
-            self.controller._on_runtime_reply(self._mode_state(1))
+            self.session.route(self._mode_state(1))
         # The connection ends and a new one (session 8) is ready before the
         # main thread runs the deferred statement.
         replacement = FakeStreamingSession(session_id=8)
@@ -961,15 +967,20 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(mtou_config.LINKAGE_MODE, self.controller._mode)
         self.assertEqual([], self.host.restored)
 
-    def test_dispatcher_leaves_errors_to_the_session_before_linkage(self):
-        # Without linkage an Unreal error still ends the realtime connection.
-        handled = self._route({"type": "error", "code": "INVALID_MESSAGE",
-                               "message": "bad frame"})
-        self.assertFalse(handled)
+    def test_an_error_is_reported_the_same_way_before_and_during_linkage(self):
+        # Unreal refusing one message keeps the connection in every mode; the
+        # report is also the reason if Unreal closes the connection next.
+        error = {"type": "error", "code": "INVALID_MESSAGE",
+                 "message": "bad frame", "details": "frame 3"}
+        self.assertTrue(self._route(dict(error)))
+        self.assertEqual("INVALID_MESSAGE", self.show_error.call_args[0][0]["code"])
+        self.assertEqual(["INVALID_MESSAGE"],
+                         [reason["code"] for reason in self.session.reasons])
         self.enter_linkage()
-        handled = self._route({"type": "error", "code": "MODE_CONFLICT",
-                               "message": "stale"})
-        self.assertTrue(handled)
+        self.show_error.reset_mock()
+        self.assertTrue(self._route(dict(error)))
+        self.assertEqual("INVALID_MESSAGE", self.show_error.call_args[0][0]["code"])
+        self.assertEqual(2, len(self.session.reasons))
 
     def test_runtime_reply_stores_a_reference_offer_and_refreshes_its_window(self):
         self.enter_linkage()
@@ -984,7 +995,7 @@ class LinkagePanelTests(unittest.TestCase):
         }
 
         with self.bindings:
-            self.controller._on_runtime_reply(offer)
+            self.session.route(offer)
         self.flush()
 
         stored = self.controller.reference_offer()
@@ -996,7 +1007,7 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
 
         with self.bindings:
-            self.controller._on_runtime_reply({
+            self.session.route({
                 "type": "error", "code": "PAIRING_REQUIRED",
                 "message": "target is not paired", "details": "no target"})
         self.flush()
@@ -1009,9 +1020,9 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
 
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time(eval_serial=5))
+            self.session.route(camera_time(eval_serial=5))
             # An older target than the one already waiting is refused.
-            self.controller._on_runtime_reply(camera_time(eval_serial=4))
+            self.session.route(camera_time(eval_serial=4))
         self.flush()
 
         self.show_error.assert_not_called()
@@ -1028,7 +1039,7 @@ class LinkagePanelTests(unittest.TestCase):
 
         with self.bindings:
             # A message for another session fails the identity check.
-            self.controller._on_runtime_reply(applied_message(session_id=99))
+            self.session.route(applied_message(session_id=99))
         self.flush()
 
         self.show_error.assert_called()
@@ -1044,11 +1055,10 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertFalse(linkage.is_active)
         self.assertEqual([{"time": 42.0, "camera": "persp"}], self.host.restored)
         self.assertEqual(1, self.session.resumed)
-        # The dispatcher stays installed for the session's lifetime: Unreal
-        # answers a leave with a mode statement and may push a reference offer
-        # while Maya is merely streaming realtime, and neither may end the
-        # connection the user is still using.
-        self.assertEqual([self.controller._on_runtime_reply], self.session.listeners)
+        # Unreal answers a leave with a mode statement and may push a
+        # reference offer while Maya is merely streaming realtime; statements
+        # keep reaching the panel and neither ends the connection.
+        self.assertTrue(self.session.route(self._mode_state(2, mode="realtime")))
         self.assertEqual(mtou_config.REALTIME_MODE, self.controller._mode)
         self.assertEqual(1, len(self.removed_callbacks))
         left = [message for message in self.session.messages
@@ -1141,7 +1151,7 @@ class LinkagePanelTests(unittest.TestCase):
 
         with self.bindings:
             # Unreal may still be answering the transition it already saw.
-            self.controller._on_runtime_reply(camera_time(eval_serial=9))
+            self.session.route(camera_time(eval_serial=9))
         self.flush()
 
         self.assertEqual(reported, len(self.show_error.call_args_list))
@@ -1191,6 +1201,9 @@ class ReferenceActionTests(unittest.TestCase):
         self.reference = FakeReferenceModule()
         self.controller = mtou_controller.Controller()
         self.controller._session = self.session
+        self.session.statement_handler = (
+            lambda reply: self.controller._on_session_statement(
+                {"session": self.session}, reply))
         self.controller._scene = FakeCharacterScene()
         self.fake_cmds = self._fake_cmds()
         self.fake_om = self._fake_om()
@@ -1437,6 +1450,9 @@ class DetailWindowTests(unittest.TestCase):
         self.session = FakeStreamingSession()
         self.controller = mtou_controller.Controller()
         self.controller._session = self.session
+        self.session.statement_handler = (
+            lambda reply: self.controller._on_session_statement(
+                {"session": self.session}, reply))
         self.controller._scene = FakeCharacterScene()
         self.fake_cmds = self._fake_cmds()
         self.fake_om = self._fake_om()

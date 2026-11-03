@@ -640,7 +640,7 @@ class StreamingSessionTests(unittest.TestCase):
         registered = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 self.init_message = init_message
                 self.hello_message = hello_message
                 self.started = False
@@ -668,8 +668,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         class FakeSceneMessage(object):
             kBeforeNew = 1
@@ -720,7 +718,7 @@ class StreamingSessionTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
                 self.submitted = []
@@ -750,8 +748,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
             def stop(self):
                 pass
@@ -801,7 +797,7 @@ class StreamingSessionTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
                 self.submitted = []
@@ -831,8 +827,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
             def stop(self):
                 pass
@@ -934,7 +928,7 @@ class StreamingSessionTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
                 self.stop_count = 0
@@ -966,8 +960,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om = type("FakeOpenMaya", (), {
             "MSceneMessage": type("FakeSceneMessage", (), {
@@ -1016,7 +1008,7 @@ class StreamingSessionTests(unittest.TestCase):
         timer_callbacks = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1047,8 +1039,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om = type("FakeOpenMaya", (), {
             "MSceneMessage": type("FakeSceneMessage", (), {
@@ -1094,7 +1084,7 @@ class StreamingSessionTests(unittest.TestCase):
         removed = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1119,8 +1109,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om = type("FakeOpenMaya", (), {
             "MSceneMessage": type("FakeSceneMessage", (), {
@@ -1210,7 +1198,7 @@ class StreamingSessionTests(unittest.TestCase):
         timers = []
 
         class DisconnectedWorker(object):
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1238,8 +1226,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om, fake_cmds, scene = self._runtime(timers, deferred)
         with patch_global("om", fake_om), \
@@ -1262,7 +1248,7 @@ class StreamingSessionTests(unittest.TestCase):
         state = {"value": "ready"}
 
         class Worker(object):
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1293,8 +1279,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om, fake_cmds, scene = self._runtime(timers, deferred)
         scene.sample.return_value = mtou_scene.CharacterFrame(7, [[1, 2, 3]], [])
@@ -1700,28 +1684,27 @@ class SenderLifecycleTests(unittest.TestCase):
         self.assertEqual("Connected", detail)
         self.assertIsNone(diagnostic)
 
-    def test_runtime_structured_error_is_preserved(self):
-        worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
-        runtime_error = mtou_protocol.encode_message({
-            "type": "error",
-            "code": "INVALID_MESSAGE",
-            "message": "bad frame",
-            "details": "transform count mismatch",
+    @staticmethod
+    def _ready_then(*messages):
+        """A socket that answers the handshake with ready, then ``messages``."""
+        packet = mtou_protocol.encode_message({
+            "type": "ready", "revision": 7,
+            "missing_in_unreal": [], "missing_in_maya": [],
+            "bone_name_remaps": [], "workflow": "animation",
+            "target_morph_count": 0, "accepted_morph_count": 0,
         })
+        for message in messages:
+            packet += mtou_protocol.encode_message(message)
 
-        class RuntimeErrorSocket(object):
+        class ScriptedSocket(object):
             def __init__(self):
-                self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "workflow": "animation",
-                    "target_morph_count": 0, "accepted_morph_count": 0,
-                }) + runtime_error
+                self.reply = packet
 
             def settimeout(self, timeout):
                 pass
 
             def recv(self, size):
+                # An empty read is Unreal closing the connection.
                 chunk, self.reply = self.reply[:size], self.reply[size:]
                 return chunk
 
@@ -1731,177 +1714,107 @@ class SenderLifecycleTests(unittest.TestCase):
             def close(self):
                 pass
 
-        fake_socket = RuntimeErrorSocket()
+        return ScriptedSocket()
+
+    def _run_until_read(self, worker, fake_socket):
+        """Run the sender loop until every scripted message was read."""
+        def selectable(unused_rlist, unused_wlist, unused_xlist, unused_timeout):
+            if fake_socket.reply:
+                return ([fake_socket], [], [])
+            worker.stop()
+            return ([], [], [])
+
+        with mock.patch.object(worker, "_connect", return_value=fake_socket), \
+             mock.patch.object(worker, "_send_initial", return_value=True), \
+             mock.patch.object(select, "select", side_effect=selectable):
+            worker.run()
+
+    def test_an_error_unreal_closes_the_connection_after_is_its_reason(self):
+        control = mtou_timecontrol.TimeControl()
+        reported = []
+
+        def route(reply):
+            return mtou_session.route_reply(
+                reply, control, reported.append, worker.note_reason)
+
+        worker = mtou_session.SenderWorker({"type": "init", "revision": 7},
+                                           on_reply=route)
+        fake_socket = self._ready_then({
+            "type": "error", "code": "INVALID_MESSAGE", "message": "bad frame",
+            "details": "transform count mismatch"})
         with mock.patch.object(worker, "_connect", return_value=fake_socket), \
              mock.patch.object(worker, "_send_initial", return_value=True), \
              mock.patch.object(select, "select", return_value=([fake_socket], [], [])):
             worker.run()
 
         state, _, _, diagnostic = worker.status()
+        self.assertEqual(["error"], [reply["type"] for reply in reported])
         self.assertEqual("error", state)
         self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
+        self.assertEqual("bad frame", diagnostic["message"])
         self.assertEqual("transform count mismatch", diagnostic["details"])
 
-    def test_reply_listener_receives_cache_replies_and_keeps_connection(self):
-        worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
+    def test_routed_replies_keep_the_connection(self):
         received = []
-        worker.set_reply_listener(received.append)
-        cache_ready = mtou_protocol.encode_message({
-            "type": "cache_ready", "upload_id": 1, "revision": 7,
-            "frame_count": 321})
+        worker = mtou_session.SenderWorker(
+            {"type": "init", "revision": 7},
+            on_reply=lambda reply: received.append(reply) is None)
+        cache_ready = {"type": "cache_ready", "upload_id": 1, "revision": 7,
+                       "frame_count": 321}
+        fake_socket = self._ready_then(cache_ready)
+        fake_socket.recv = (lambda size, recv=fake_socket.recv:
+                            recv(size) or b"\x00")
 
-        class ListenerSocket(object):
-            def __init__(self):
-                self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "workflow": "animation",
-                    "target_morph_count": 0, "accepted_morph_count": 0,
-                }) + cache_ready
+        self._run_until_read(worker, fake_socket)
 
-            def settimeout(self, timeout):
-                pass
-
-            def recv(self, size):
-                chunk, self.reply = self.reply[:size], self.reply[size:]
-                return chunk or b"\x00"
-
-            def sendall(self, packet):
-                pass
-
-            def close(self):
-                pass
-
-        fake_socket = ListenerSocket()
-
-        def selectable(unused_rlist, unused_wlist, unused_xlist, unused_timeout):
-            if fake_socket.reply:
-                return ([fake_socket], [], [])
-            worker.stop()
-            return ([], [], [])
-
-        with mock.patch.object(worker, "_connect", return_value=fake_socket), \
-             mock.patch.object(worker, "_send_initial", return_value=True), \
-             mock.patch.object(select, "select", side_effect=selectable):
-            worker.run()
-
-        self.assertEqual(
-            [{"type": "cache_ready", "upload_id": 1, "revision": 7,
-              "frame_count": 321}], received)
+        self.assertEqual([cache_ready], received)
         self.assertEqual("disconnected", worker.status()[0])
 
-    def test_a_statement_before_the_listener_reaches_it_once_installed(self):
-        # Unreal may start linkage the moment the set is ready, before Maya's
-        # main thread installs the panel's listener; the statement must not
-        # be lost.
-        worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
-        received = []
-        mode_state = {"type": "mode_state", "session_id": 1, "mode_revision": 1,
-                      "mode": "linkage", "control": "unreal", "detail": "",
-                      "anchor": {"location_cm": [0.0, 0.0, 0.0],
-                                 "rotation_deg": {"roll": 0.0, "pitch": 0.0,
-                                                  "yaw": 0.0}}}
+    def test_a_message_the_connection_does_not_accept_ends_it(self):
+        worker = mtou_session.SenderWorker({"type": "init", "revision": 7},
+                                           on_reply=lambda reply: False)
+        fake_socket = self._ready_then({
+            "type": "cache_ready", "upload_id": 1, "revision": 7, "frame_count": 1})
 
-        class EarlySocket(object):
-            def __init__(self):
-                self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "workflow": "animation",
-                    "target_morph_count": 0, "accepted_morph_count": 0,
-                }) + mtou_protocol.encode_message(mode_state)
+        self._run_until_read(worker, fake_socket)
 
-            def settimeout(self, timeout):
-                pass
+        state, _, _, diagnostic = worker.status()
+        self.assertEqual("error", state)
+        self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
 
-            def recv(self, size):
-                chunk, self.reply = self.reply[:size], self.reply[size:]
-                return chunk or b"\x00"
-
-            def sendall(self, packet):
-                pass
-
-            def close(self):
-                pass
-
-        fake_socket = EarlySocket()
-        calls = []
-
-        def selectable(unused_rlist, unused_wlist, unused_xlist, unused_timeout):
-            if fake_socket.reply:
-                return ([fake_socket], [], [])
-            calls.append(None)
-            if len(calls) == 1:
-                # The main thread installs the listener only now.
-                worker.set_reply_listener(received.append)
-            else:
-                worker.stop()
-            return ([], [], [])
-
-        with mock.patch.object(worker, "_connect", return_value=fake_socket), \
-             mock.patch.object(worker, "_send_initial", return_value=True), \
-             mock.patch.object(select, "select", side_effect=selectable):
-            worker.run()
-
-        self.assertEqual([mode_state], received)
-        self.assertEqual("disconnected", worker.status()[0])
-
-    def test_held_statements_precede_a_reply_read_once_the_listener_exists(self):
-        # The listener appears between the top of a loop and its read: the
-        # statement held before it still reaches the listener first.
-        worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
-        received = []
+    def test_statements_right_after_ready_reach_the_handler_in_order(self):
+        # Unreal may start linkage, offer a reference and confirm a removal the
+        # moment the set is ready; the handler exists before the sender starts.
         anchor = {"location_cm": [0.0, 0.0, 0.0],
                   "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
-        held = {"type": "mode_state", "session_id": 1, "mode_revision": 1,
-                "mode": "linkage", "control": "unreal", "detail": "",
-                "anchor": anchor}
-        newer = {"type": "mode_state", "session_id": 1, "mode_revision": 2,
-                 "mode": "realtime", "control": "maya", "detail": ""}
+        statements = [
+            {"type": "mode_state", "session_id": 1, "mode_revision": 1,
+             "mode": "linkage", "control": "unreal", "detail": "", "anchor": anchor},
+            {"type": "reference_offer", "session_id": 1, "transfer_id": "tx-1",
+             "directory": "handoff/tx-1", "manifest_digest": "ab12",
+             "scope": {"level": "L_Main"}, "space_revision": 1,
+             "counts": {"objects": 1, "triangles": 2, "bytes": 3}},
+            {"type": "object_removed", "session_id": 1, "object_id": "secondary",
+             "set_revision": 2, "restored": True, "detail": ""},
+        ]
+        for state in (mtou_config.REALTIME_MODE, mtou_config.CACHED_MODE,
+                      mtou_config.LINKAGE_MODE):
+            with self.subTest(state=state):
+                control = mtou_timecontrol.TimeControl()
+                if state != mtou_config.REALTIME_MODE:
+                    control.acquire(state, object(), receive=self.fail)
+                received = []
+                worker = mtou_session.SenderWorker(
+                    {"type": "init", "revision": 7},
+                    on_reply=lambda reply, control=control, received=received:
+                    mtou_session.route_reply(reply, control, received.append))
+                fake_socket = self._ready_then(*statements)
+                fake_socket.recv = (lambda size, recv=fake_socket.recv:
+                                    recv(size) or b"\x00")
 
-        class InterleavedSocket(object):
-            def __init__(self):
-                self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "workflow": "animation",
-                    "target_morph_count": 0, "accepted_morph_count": 0,
-                }) + mtou_protocol.encode_message(held)
+                self._run_until_read(worker, fake_socket)
 
-            def settimeout(self, timeout):
-                pass
-
-            def recv(self, size):
-                chunk, self.reply = self.reply[:size], self.reply[size:]
-                return chunk or b"\x00"
-
-            def sendall(self, packet):
-                pass
-
-            def close(self):
-                pass
-
-        fake_socket = InterleavedSocket()
-        calls = []
-
-        def selectable(unused_rlist, unused_wlist, unused_xlist, unused_timeout):
-            if fake_socket.reply:
-                return ([fake_socket], [], [])
-            calls.append(None)
-            if len(calls) == 1:
-                # Installed after this loop's top, with a newer reply waiting.
-                worker.set_reply_listener(received.append)
-                fake_socket.reply = mtou_protocol.encode_message(newer)
-                return ([fake_socket], [], [])
-            worker.stop()
-            return ([], [], [])
-
-        with mock.patch.object(worker, "_connect", return_value=fake_socket), \
-             mock.patch.object(worker, "_send_initial", return_value=True), \
-             mock.patch.object(select, "select", side_effect=selectable):
-            worker.run()
-
-        self.assertEqual([held, newer], received)
+                self.assertEqual(statements, received)
 
     def test_ordered_controls_survive_the_switch_back_to_latest_mode(self):
         worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
@@ -2432,7 +2345,9 @@ class CachedPlaybackTests(unittest.TestCase):
         def __init__(self, revision=7):
             self.is_ready = True
             self.revision = revision
-            self.listener = None
+            self.polled = 0
+            # While a list, Unreal's messages wait here instead of arriving.
+            self.held = None
             self.submitted = []
             self.actions = []
             self.paused = 0
@@ -2451,8 +2366,9 @@ class CachedPlaybackTests(unittest.TestCase):
             self.resumed += 1
             self.actions.append("resume")
 
-        def set_cached_reply_listener(self, listener):
-            self.listener = listener
+        def poll_connection(self):
+            self.polled += 1
+            return self.is_ready
 
         def submit_cached(self, message):
             self.submitted.append(message)
@@ -2461,10 +2377,9 @@ class CachedPlaybackTests(unittest.TestCase):
                 self.upload_id = message["upload_id"]
                 self.play_id = 0
             elif message["type"] == "cache_clear":
-                if self.listener is not None:
-                    self.emit({"type": "cache_cleared", "upload_id": self.upload_id,
-                               "play_id": self.play_id,
-                               "clear_id": message["clear_id"]})
+                self.emit({"type": "cache_cleared", "upload_id": self.upload_id,
+                           "play_id": self.play_id,
+                           "clear_id": message["clear_id"]})
                 self.upload_id = 0
                 self.play_id = 0
 
@@ -2476,14 +2391,16 @@ class CachedPlaybackTests(unittest.TestCase):
             self.is_ready = False
 
         def emit(self, message):
-            if self.listener is None:
-                raise AssertionError("Cached Playback did not attach a reply listener")
             if message["type"] == "cache_playing":
                 self.play_id = message["play_id"]
-            if message["type"] == "cache_cleared":
-                # The sender reports every clear to the time control first.
-                self.time_control.cache_cleared(message["clear_id"])
-            self.listener(message)
+            if self.held is not None:
+                self.held.append(message)
+                return
+            self.deliver(message)
+
+        def deliver(self, message):
+            # The connection routes it as the sender thread does.
+            mtou_session.route_reply(message, self.time_control)
 
     def setUp(self):
         self.temp = __import__("tempfile").TemporaryDirectory()
@@ -2705,21 +2622,19 @@ class CachedPlaybackTests(unittest.TestCase):
         self._capture_to_replay(cached, stream)
         before = len(self.timeline.set_frames)
         # Hold the clear acknowledgement while the old playback is active.
-        real_listener = stream.listener
-        queued = []
-        stream.listener = lambda reply: queued.append(reply)
+        queued = stream.held = []
         cached.capture(24.0, capture_range=(-1, 0))
         clear_id = stream.submitted[-2]["clear_id"]
         self.timer.fire()
         self.assertEqual(before, len(self.timeline.set_frames))
         self.assertEqual(clear_id, cached._awaiting_clear)
-        stream.listener = real_listener
-        real_listener({"type": "cache_cleared", "upload_id": 1,
-                       "play_id": 1, "clear_id": clear_id + 1})
+        stream.held = None
+        stream.deliver({"type": "cache_cleared", "upload_id": 1,
+                        "play_id": 1, "clear_id": clear_id + 1})
         self.timer.fire()
         self.assertEqual(before, len(self.timeline.set_frames))
         for reply in queued:
-            real_listener(reply)
+            stream.deliver(reply)
         self.timer.fire_until(lambda: len(self.timeline.set_frames) > before)
         self.assertEqual(-1, self.timeline.set_frames[before])
         self.assertNotIn("cache_play", self._types(stream))
@@ -2740,18 +2655,16 @@ class CachedPlaybackTests(unittest.TestCase):
         self.assertEqual(1, cached._play_id)
 
         before = len(self.timeline.set_frames)
-        real_listener = stream.listener
-        held = []
-        stream.listener = held.append
+        held = stream.held = []
         cached.capture(24.0, capture_range=(5, 5))
         self.assertEqual(2, cached._awaiting_clear)
-        real_listener({"type": "cache_cleared", "upload_id": 1,
-                       "play_id": 1, "clear_id": 1})
+        stream.deliver({"type": "cache_cleared", "upload_id": 1,
+                        "play_id": 1, "clear_id": 1})
         self.timer.fire()
         self.assertEqual(before, len(self.timeline.set_frames))
-        stream.listener = real_listener
+        stream.held = None
         for reply in held:
-            real_listener(reply)
+            stream.deliver(reply)
         self.timer.fire_until(lambda: len(self.timeline.set_frames) > before)
         self.assertEqual(5, self.timeline.set_frames[before])
         self.assertIsNone(cached._awaiting_clear)
@@ -2774,9 +2687,7 @@ class CachedPlaybackTests(unittest.TestCase):
         cached, stream = self._attached()
         self._capture_to_replay(cached, stream)
         before = len(self.timeline.set_frames)
-        real_listener = stream.listener
-        held = []
-        stream.listener = held.append
+        held = stream.held = []
         cached.capture(24.0, capture_range=(-1, 1))
         self.assertEqual(1, len(held))
         cached.cancel_capture()
@@ -2788,7 +2699,8 @@ class CachedPlaybackTests(unittest.TestCase):
         self.assertEqual(1, stream.resumed)
         self.assertEqual(1, len([message for message in stream.submitted
                                   if message["type"] == "cache_begin"]))
-        real_listener(held[0])
+        stream.held = None
+        stream.deliver(held[0])
         self.timer.fire()
         self.assertEqual(cached.REALTIME, cached.view.state)
         self.assertEqual(before + 1, len(self.timeline.set_frames))
@@ -3292,7 +3204,7 @@ class CachedPlaybackTests(unittest.TestCase):
 
         self.assertEqual(mtou_cache.CachedPlayback.DETACHED, cached.view.state)
         self.assertIsNotNone(retention)
-        self.assertEqual(1, stream.stopped)
+        self.assertEqual(1, stream.polled)
 
     def test_incompatible_retention_and_partial_capture_are_discarded(self):
         cached, stream = self._attached()
@@ -3427,7 +3339,7 @@ class CachedPlaybackTests(unittest.TestCase):
         self.assertEqual(1, scene.sample.call_count)
         self.assertEqual(42, self.timeline.current)
         self.assertEqual([], list(pathlib.Path(self.temp.name).iterdir()))
-        self.assertEqual(1, stream.stopped)
+        self.assertEqual(1, stream.polled)
         self.assertEqual(0, stream.resumed)
 
     def test_cached_idle_observes_transport_termination_without_user_action(self):
@@ -3442,7 +3354,7 @@ class CachedPlaybackTests(unittest.TestCase):
         detached = [view for view in changes
                     if view.state == mtou_cache.CachedPlayback.DETACHED]
         self.assertEqual("STREAM_INTERRUPTED", detached[-1].diagnostic["code"])
-        self.assertEqual(1, stream.stopped)
+        self.assertEqual(1, stream.polled)
 
     def test_completed_and_stopped_states_keep_observing_the_connection(self):
         cached, stream = self._attached()
@@ -3458,7 +3370,7 @@ class CachedPlaybackTests(unittest.TestCase):
         stream.is_ready = False
         self.timer.fire()
         self.assertEqual(mtou_cache.CachedPlayback.DETACHED, cached.view.state)
-        self.assertEqual(1, stream.stopped)
+        self.assertEqual(1, stream.polled)
 
     def test_stopped_cached_state_observes_transport_termination(self):
         cached, stream = self._attached()
@@ -4513,7 +4425,7 @@ class WorkflowTests(unittest.TestCase):
         worker = mock.Mock()
         worker.status.return_value = ("connecting", "Connecting", None, None)
 
-        def worker_factory(init_messages, hello_message=None, on_cache_cleared=None):
+        def worker_factory(init_messages, hello_message=None, on_reply=None):
             # One init per object of the set; a one-character set sends one.
             self.assertEqual(1, len(init_messages))
             captured["init"] = init_messages[0]
