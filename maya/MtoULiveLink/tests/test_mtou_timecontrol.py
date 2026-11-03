@@ -65,6 +65,31 @@ class TransitionTableTests(unittest.TestCase):
         self.assertEqual(LINKAGE_MODE,
                          self.control.acquire(LINKAGE_MODE, self.linkage).state)
 
+    def test_a_confirmation_that_arrives_before_the_release_is_kept(self):
+        # The clear is queued before the lease is released, so the sender
+        # thread can report its confirmation first.
+        lease = self.control.acquire(CACHED_MODE, self.cache)
+        self.assertFalse(self.control.cache_cleared(1))
+
+        lease.release(clear_id=1)
+
+        self.assertIsNone(self.control.pending_clear())
+        self.assertFalse(self.control.cache_holds_connection())
+        self.assertEqual(LINKAGE_MODE,
+                         self.control.acquire(LINKAGE_MODE, self.linkage).state)
+
+    def test_an_earlier_confirmation_does_not_answer_a_newer_clear(self):
+        lease = self.control.acquire(CACHED_MODE, self.cache)
+        self.control.cache_cleared(1)
+
+        lease.release(clear_id=2)
+
+        self.assertEqual(2, self.control.pending_clear())
+        self.assertEqual("CACHE_NOT_CLEARED", self.refusal(LINKAGE_MODE, self.linkage))
+        self.assertFalse(self.control.cache_cleared(1))
+        self.assertTrue(self.control.cache_cleared(2))
+        self.assertFalse(self.control.cache_holds_connection())
+
     def test_cached_refuses_linkage(self):
         self.control.acquire(CACHED_MODE, self.cache)
         self.recorder.calls[:] = []

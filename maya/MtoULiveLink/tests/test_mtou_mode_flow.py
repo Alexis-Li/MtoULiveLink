@@ -349,6 +349,39 @@ class LinkageAfterCachedTests(ConnectionHarness):
         self.assertEqual(mtou_config.LINKAGE_MODE, self.controller._mode)
         self.wait_until(lambda: "mode" in self.sent_after(mark), "the linkage entry")
 
+    def test_a_confirmation_that_arrives_before_the_release_still_frees_the_entry(self):
+        # The clear is queued before the cache releases its lease, so the
+        # sender thread may report Unreal's confirmation first.
+        control = self.session.time_control
+        worker = self.session._worker
+        confirmed = threading.Event()
+        report = worker._on_cache_cleared
+
+        def report_then_signal(clear_id):
+            report(clear_id)
+            confirmed.set()
+
+        release = control.release
+
+        def release_after_the_confirmation(lease, clear_id=None):
+            if clear_id is not None:
+                self.assertTrue(confirmed.wait(WAIT_SECONDS),
+                                "the sender thread to report the clear")
+            return release(lease, clear_id)
+
+        worker._on_cache_cleared = report_then_signal
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        mark = self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+
+        with mock.patch.object(control, "release", release_after_the_confirmation):
+            self.mode(mtou_config.REALTIME_MODE)
+
+        self.wait_for_sent(mark, ["cache_clear"], "the cache clear")
+        self.assertIsNone(control.pending_clear())
+        self.assertFalse(control.cache_holds_connection())
+        self.assertTrue(self.enter_linkage_enabled()[0])
+
 
 if __name__ == "__main__":
     unittest.main()
