@@ -547,6 +547,17 @@ class UnrealErrorTests(ConnectionHarness):
 class UploadTimeoutTests(ConnectionHarness):
     """Unreal never accepts an upload while the connection stays open."""
 
+    def setUp(self):
+        super(UploadTimeoutTests, self).setUp()
+        self.status = []
+        show = self.controller._set_connected
+        patcher = mock.patch.object(
+            self.controller, "_set_connected",
+            lambda connected, status: (self.status.append(status),
+                                       show(connected, status)))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_the_upload_fails_and_realtime_resumes_on_the_same_connection(self):
         start = len(self.socket.types())
         self.mode(mtou_config.CACHED_MODE)
@@ -572,10 +583,34 @@ class UploadTimeoutTests(ConnectionHarness):
         self.assertEqual("upload_failed", cached._phase)
         # The panel stays connected and names the failure in its status line.
         self.assertEqual(mtou_cache.CachedPlayback.REALTIME, cached.view.state)
-        self.assertEqual("CACHED_UPLOAD_FAILED", self.controller._last_diagnostic["code"])
+        self.assertEqual("CACHED_UPLOAD_TIMEOUT", self.controller._last_diagnostic["code"])
         self.assertTrue(self.controller._session_ready())
+        self.assertIn("未在时限内确认", self.status[-1])
         self.wait_until(lambda: not control.cache_holds_connection(),
                         "Unreal to confirm the clear")
+
+    def test_a_send_failure_on_a_usable_connection_does_not_say_it_ended(self):
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        mark = self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+        cached = self.controller._cached_playback
+        upload = mock.Mock()
+        upload.advance.return_value = mtou_cache.CacheUploadResult(
+            False, mtou_cache.CacheUpload.TRANSPORT,
+            mtou_session.StreamingSessionError(
+                "STREAM_INTERRUPTED", "the cached queue refused a frame"))
+        cached._phase = "uploading"
+        cached._upload = upload
+
+        cached._poll()
+        self.flush()
+
+        self.wait_for_sent(mark, ["cache_clear", "frame"], "the clear and the live pose")
+        self.assertEqual(mtou_config.REALTIME_MODE, self.session.time_control.state)
+        self.assertTrue(self.controller._session_ready())
+        self.assertEqual("CACHED_UPLOAD_INTERRUPTED",
+                         self.controller._last_diagnostic["code"])
+        self.assertNotIn("中断", self.status[-1])
 
 
 class DisconnectReasonTests(ConnectionHarness):

@@ -146,6 +146,12 @@ DIAGNOSTICS = {
     "CACHED_UPLOAD_FAILED": (
         "缓存上传被 Unreal 拒绝",
         "Unreal 已丢弃未完成的缓存；请重新捕获后再试。"),
+    "CACHED_UPLOAD_TIMEOUT": (
+        "Unreal 未在时限内确认缓存上传",
+        "已恢复实时预览，连接保持。请再次切换到“缓存播放”并点击“捕获并上传”。"),
+    "CACHED_UPLOAD_INTERRUPTED": (
+        "缓存上传未能完成",
+        "已恢复实时预览，连接保持。请再次切换到“缓存播放”并点击“捕获并上传”。"),
     "CACHED_PLAYBACK_FRAME_LIMIT": (
         "缓存帧数超过 20,000 上限，捕获已提前停止",
         "请缩短 Playback Range 后重新捕获。"),

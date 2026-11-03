@@ -27,9 +27,9 @@ repository's issues.
   When Unreal then closes the connection, the Maya panel shows that reason, also during
   Cached Playback and linkage, instead of a generic disconnect; an error that only
   refuses one message keeps the connection. (#9)
-- When Unreal does not accept a cache upload within 60 seconds, Maya returns to **实时**
-  on the same connection and names the failure, instead of disconnecting; click
-  **缓存播放** to upload again. (#9)
+- When Unreal does not confirm a cache upload within 60 seconds, Maya returns to **实时**
+  on the same connection and says so, instead of disconnecting; switch to **缓存播放**
+  and click **捕获并上传** to try again. (#9)
 
 ## 1.0.0 - 2026-10-30
 

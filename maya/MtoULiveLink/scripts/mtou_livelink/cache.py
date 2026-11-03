@@ -681,9 +681,8 @@ class CacheUpload(object):
             # Unreal has not answered, but the connection may still be open:
             # the upload fails and the connection is not blamed.
             return CacheUploadResult(False, self.FAILED, make_diagnostic(
-                "CACHED_UPLOAD_FAILED",
-                "Timed out waiting for Unreal to accept the uploaded cache.",
-                solution="已返回实时预览；请再次点击缓存播放上传。"))
+                "CACHED_UPLOAD_TIMEOUT",
+                "Timed out waiting for Unreal to accept the uploaded cache."))
         if self._declaring:
             return self._pump_declaration()
         return self._pump_frames()
@@ -1905,7 +1904,9 @@ class CachedPlayback(object):
             # The connection is still usable, so it is not what failed: end
             # the upload and give time back to realtime instead of holding the
             # lease behind a view that says the connection is gone.
-            self._fail_upload(diagnostic)
+            self._fail_upload(make_diagnostic(
+                "CACHED_UPLOAD_INTERRUPTED", diagnostic["message"],
+                details=diagnostic["details"]))
             return
         self._remove_playback_poller()
         self._discard_upload()

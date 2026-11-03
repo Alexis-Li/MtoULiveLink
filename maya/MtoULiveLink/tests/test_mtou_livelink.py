@@ -3620,7 +3620,7 @@ class CacheUploadTests(unittest.TestCase):
             outcome = upload.advance()
             self.assertFalse(outcome.processed)
             self.assertEqual(mtou_cache.CacheUpload.FAILED, outcome.action)
-            self.assertEqual("CACHED_UPLOAD_FAILED", outcome.detail["code"])
+            self.assertEqual("CACHED_UPLOAD_TIMEOUT", outcome.detail["code"])
 
     def test_open_failure_is_corrupt(self):
         class BadCache(self._FakeCache):
@@ -5064,7 +5064,8 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(model_message["blendshapes_enabled"])
         with self.assertRaisesRegex(ValueError, "workflow"):
             mtou_protocol.make_init_message([["root", -1, identity]], [], 7, "preview", True)
-        for code in ("CACHED_UPLOAD_FAILED", "CACHED_PLAYBACK_PERFORMANCE"):
+        for code in ("CACHED_UPLOAD_FAILED", "CACHED_UPLOAD_TIMEOUT",
+                     "CACHED_UPLOAD_INTERRUPTED", "CACHED_PLAYBACK_PERFORMANCE"):
             cached_diagnostic = mtou_diagnostics.make_diagnostic(code)
             self.assertEqual(code, cached_diagnostic["code"])
             self.assertNotEqual(
