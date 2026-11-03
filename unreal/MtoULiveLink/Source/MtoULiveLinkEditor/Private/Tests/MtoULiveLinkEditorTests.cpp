@@ -655,28 +655,37 @@ bool FMtoUDetailsLinkageStatusTextTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
     const FString EvalId = TEXT("Main@1392000+000//Game/Level/Cam.CameraComponent#field_0=0.000000;~e3");
-    auto Status = [](const FMtoULinkageView& View)
+    auto Status = [](const FMtoULinkageView& View, const FMtoUTimeControlView& Time)
     {
-        return FMtoULiveLinkActorDetails::FormatLinkageStatus(View).ToString();
+        return FMtoULiveLinkActorDetails::FormatLinkageStatus(View, Time).ToString();
     };
+    // Who drives time comes from the source's merged time-control view.
+    const FMtoUTimeControlView MayaTime;
+    FMtoUTimeControlView CacheTime;
+    CacheTime.Authority = EMtoUTimeAuthority::Cache;
+    FMtoUTimeControlView HeldTime;
+    HeldTime.bTakeoverHeld = true;
+    FMtoUTimeControlView SequenceTime;
+    SequenceTime.Authority = EMtoUTimeAuthority::Sequence;
+    FMtoUTimeControlView TransitionTime = SequenceTime;
+    TransitionTime.bTransitioning = true;
 
     // Not in linkage: one line, nothing to report.
     FMtoULinkageView Idle;
-    TestEqual(TEXT("realtime reads as not linked"), Status(Idle), FString(TEXT("未进入联动")));
+    TestEqual(TEXT("realtime reads as not linked"), Status(Idle, MayaTime), FString(TEXT("未进入联动")));
     TestTrue(TEXT("no lag row while not linked"), FMtoULiveLinkActorDetails::FormatLinkageLag(Idle).IsEmpty());
     TestTrue(TEXT("no restore row without a residual"),
         FMtoULiveLinkActorDetails::FormatLinkageRecovery(Idle).IsEmpty());
     TestTrue(TEXT("an untouched linkage adds no diagnostics"),
         FMtoULiveLinkActorDetails::FormatLinkageDiagnostics(Idle).IsEmpty());
 
-    FMtoULinkageView Cached;
-    Cached.Mode = TEXT("cached");
-    Cached.Control = TEXT("cache");
-    TestEqual(TEXT("cached playback names itself"), Status(Cached), FString(TEXT("未进入联动 · 缓存播放中")));
+    TestEqual(TEXT("cached playback names itself"), Status(Idle, CacheTime),
+        FString(TEXT("未进入联动 · 缓存播放中")));
 
     FMtoULinkageView Held;
     Held.bTakeoverHeld = true;
-    TestTrue(TEXT("a held takeover says how to hand it back"), Status(Held).Contains(TEXT("结束预览")));
+    TestTrue(TEXT("a held takeover says how to hand it back"),
+        Status(Held, HeldTime).Contains(TEXT("结束预览")));
 
     // In linkage and keeping up: control and mode in one line, no read-back.
     FMtoULinkageView Synced;
@@ -691,27 +700,29 @@ bool FMtoUDetailsLinkageStatusTextTest::RunTest(const FString& Parameters)
     Synced.AppliedDisplayFrame = 1739.0;
     Synced.AppliedSampleSerial = 412;
     Synced.AppliedLagSeconds = 0.13;
-    TestEqual(TEXT("linkage that keeps up"), Status(Synced),
+    TestEqual(TEXT("linkage that keeps up"), Status(Synced, SequenceTime),
         FString(TEXT("镜头联动中 · Unreal 控制时间 · 同步正常")));
     TestTrue(TEXT("a small lag is not reported"), FMtoULiveLinkActorDetails::FormatLinkageLag(Synced).IsEmpty());
     for (const TCHAR* Internal : {TEXT("Main@"), TEXT("revision"), TEXT("样本"), TEXT("eval")})
     {
-        TestFalse(*FString::Printf(TEXT("the status line hides '%s'"), Internal), Status(Synced).Contains(Internal));
+        TestFalse(*FString::Printf(TEXT("the status line hides '%s'"), Internal),
+            Status(Synced, SequenceTime).Contains(Internal));
     }
 
     FMtoULinkageView Syncing = Synced;
     Syncing.AppliedEvalId.Reset();
-    TestEqual(TEXT("before the first complete application"), Status(Syncing),
+    TestEqual(TEXT("before the first complete application"), Status(Syncing, SequenceTime),
         FString(TEXT("镜头联动中 · Unreal 控制时间 · 正在同步")));
 
     FMtoULinkageView Transitioning = Synced;
     Transitioning.bTransitioning = true;
-    TestTrue(TEXT("a transition says to wait"), Status(Transitioning).Contains(TEXT("请稍候")));
+    TestTrue(TEXT("a transition says to wait"),
+        Status(Transitioning, TransitionTime).Contains(TEXT("请稍候")));
 
     // Lagging: the status says so and the lag row gives the number and what to do.
     FMtoULinkageView Lagging = Synced;
     Lagging.AppliedLagSeconds = 0.8;
-    TestEqual(TEXT("a lagging linkage"), Status(Lagging),
+    TestEqual(TEXT("a lagging linkage"), Status(Lagging, SequenceTime),
         FString(TEXT("镜头联动中 · Unreal 控制时间 · Maya 跟不上")));
     const FString Lag = FMtoULiveLinkActorDetails::FormatLinkageLag(Lagging).ToString();
     TestTrue(TEXT("the lag row names the lag"), Lag.StartsWith(TEXT("Maya 跟不上，滞后 0.8 秒")));
@@ -723,7 +734,7 @@ bool FMtoUDetailsLinkageStatusTextTest::RunTest(const FString& Parameters)
     Overdue.AppliedLagSeconds = 0.1;
     Overdue.TargetOverdueSeconds = 2.4;
     Overdue.Detail = TEXT("Offered reference handoff tx-1.");
-    TestEqual(TEXT("an overdue target makes the status lag"), Status(Overdue),
+    TestEqual(TEXT("an overdue target makes the status lag"), Status(Overdue, SequenceTime),
         FString(TEXT("镜头联动中 · Unreal 控制时间 · Maya 跟不上")));
     TestTrue(TEXT("an overdue target reports its wait"),
         FMtoULiveLinkActorDetails::FormatLinkageLag(Overdue).ToString().StartsWith(TEXT("Maya 跟不上，滞后 2.4 秒")));
@@ -748,6 +759,22 @@ bool FMtoUDetailsLinkageStatusTextTest::RunTest(const FString& Parameters)
     }
     TestTrue(TEXT("diagnostics keep the restore residual"),
         FMtoULiveLinkActorDetails::FormatLinkageDiagnostics(Residual).ToString().Contains(Residual.RecoveryResidual));
+
+    // 进入联动 is available only while Maya drives time and no transition waits.
+    FMtoULinkageView Paired;
+    Paired.bPaired = true;
+    TestTrue(TEXT("a paired target can enter from realtime"),
+        FMtoULiveLinkActorDetails::CanEnterLinkage(Paired, MayaTime));
+    TestTrue(TEXT("a held takeover can enter again"),
+        FMtoULiveLinkActorDetails::CanEnterLinkage(Paired, HeldTime));
+    TestFalse(TEXT("Cached Playback disables the entry"),
+        FMtoULiveLinkActorDetails::CanEnterLinkage(Paired, CacheTime));
+    TestFalse(TEXT("an active linkage disables the entry"),
+        FMtoULiveLinkActorDetails::CanEnterLinkage(Paired, SequenceTime));
+    TestFalse(TEXT("a waiting transition disables the entry"),
+        FMtoULiveLinkActorDetails::CanEnterLinkage(Paired, TransitionTime));
+    TestFalse(TEXT("an unpaired target cannot enter"),
+        FMtoULiveLinkActorDetails::CanEnterLinkage(Idle, MayaTime));
     return true;
 }
 

@@ -1344,6 +1344,15 @@ bool FMtoULinkageSession::BeginTakeover(
         PublishView();
         return false;
     };
+    if (EntryGuard)
+    {
+        FString GuardCode;
+        FString GuardError;
+        if (!EntryGuard(GuardCode, GuardError))
+        {
+            return Refuse(*GuardCode, GuardError);
+        }
+    }
     if (!PendingRemovalObjectId.IsEmpty())
     {
         return Refuse(TEXT("MODE_CONFLICT"),
@@ -1716,6 +1725,15 @@ FMtoULinkageView MtoUGetLinkageView()
     return FMtoULinkageView();
 }
 
+FMtoUTimeControlView MtoUGetTimeControlView()
+{
+    if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
+    {
+        return Source->GetTimeControlView();
+    }
+    return FMtoUTimeControlView();
+}
+
 FMtoULinkageScheduleStats MtoUGetLinkageScheduleStats()
 {
     if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
@@ -1740,8 +1758,7 @@ bool MtoURequestLinkageEnter(int32 ModeRevision, FString& OutError)
 {
     if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
     {
-        FString ErrorCode;
-        return Source->GetLinkageSession().RequestEnter(ModeRevision, OutError, ErrorCode);
+        return Source->RequestLinkageEnter(ModeRevision, OutError);
     }
     OutError = TEXT("The MtoU_LiveLink listener is unavailable.");
     return false;

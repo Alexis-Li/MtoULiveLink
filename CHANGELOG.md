@@ -18,9 +18,11 @@ repository's issues.
 - **结束预览** during Cached Playback no longer freezes Unreal: the cache keeps the
   connection until **实时**, which then clears it and resumes the live pose. **进入联动**
   stays unavailable until Unreal confirms that clear. (#9)
-- During Cached Playback, a **进入联动** started in Unreal is refused at once instead of
-  after a 5-second wait, and scene-reference offers and second-object removals from
-  Unreal still reach Maya. (#9)
+- During Cached Playback, Unreal's **进入联动** is disabled and the 镜头联动 status reads
+  缓存播放中; an entry from either host is refused before any Sequencer track is muted,
+  so the cache upload is not interrupted. (#9)
+- During Cached Playback, scene-reference offers and second-object removals from Unreal
+  still reach Maya. (#9)
 - An Unreal error is shown once and the same way whatever modes the connection used.
   When Unreal then closes the connection, the Maya panel shows that reason, also during
   Cached Playback and linkage, instead of a generic disconnect; an error that only

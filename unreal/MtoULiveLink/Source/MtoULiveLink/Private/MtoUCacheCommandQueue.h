@@ -29,7 +29,10 @@ public:
     bool Produce(FMtoUCacheCommand Command, const TFunctionRef<bool()> ShouldAbort);
 
     // Consumer (Game Thread) side. Returns false when nothing is queued.
-    bool TryConsume(FMtoUCacheCommand& OutCommand);
+    // The order limit is checked under the same lock as removal, so producer
+    // cancellation cannot expose a later command across the consumer's bound.
+    bool TryConsume(FMtoUCacheCommand& OutCommand, uint64 MaxOrder = MAX_uint64);
+    bool PeekOrder(uint64& OutOrder) const;
 
     // Drops every pending command of one streaming session.
     int32 CancelSession(uint64 SessionId);
@@ -40,9 +43,9 @@ public:
 
     int32 GetPendingFrameCount() const;
     int64 GetPendingBytes() const;
-    // Total queued commands (frames plus control messages) for deterministic
+    // Queued commands through MaxOrder (frames plus controls) for deterministic
     // automation intake coordination. Never a production admission input.
-    int32 GetPendingCommandCount() const;
+    int32 GetPendingCommandCount(uint64 MaxOrder = MAX_uint64) const;
 
 private:
     void ReleaseOwnership(const FMtoUCacheCommand& Command);

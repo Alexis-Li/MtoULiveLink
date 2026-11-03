@@ -29,7 +29,12 @@ public:
     static FText CompactLinkageText(const FText& Text);
 
     /** The 镜头联动 group's one status line: who controls time and whether Maya keeps up. */
-    static FText FormatLinkageStatus(const struct FMtoULinkageView& View);
+    static FText FormatLinkageStatus(
+        const struct FMtoULinkageView& View, const struct FMtoUTimeControlView& Time);
+
+    /** 进入联动 is available: the target is paired and Maya drives time, no transition waits. */
+    static bool CanEnterLinkage(
+        const struct FMtoULinkageView& View, const struct FMtoUTimeControlView& Time);
 
     /** The lag row; empty while Maya keeps up, so the row is hidden. */
     static FText FormatLinkageLag(const struct FMtoULinkageView& View);

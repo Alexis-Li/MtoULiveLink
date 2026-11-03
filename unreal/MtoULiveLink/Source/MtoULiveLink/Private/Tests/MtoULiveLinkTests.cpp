@@ -2831,6 +2831,23 @@ bool FMtoUCacheQueueAdmissionTest::RunTest(const FString& Parameters)
         Queue.TryConsume(Consumed));
     TestEqual(TEXT("surviving frame belongs to the newer upload"),
         Consumed.UploadId, 6);
+    // Cancellation between merge-peek and consume must not cross the next
+    // linkage control's receive order, or release the later frame's budget.
+    FMtoUCacheCommand First = FrameCommand(0, 7, PerFrame);
+    First.IntakeOrder = 1;
+    FMtoUCacheCommand Later = FrameCommand(0, 8, PerFrame);
+    Later.IntakeOrder = 3;
+    Queue.Produce(First, Never);
+    Queue.Produce(Later, Never);
+    uint64 Order = 0;
+    TestTrue(TEXT("the ordered head is visible"), Queue.PeekOrder(Order));
+    TestEqual(TEXT("the first receive order is at the head"), Order, uint64(1));
+    Queue.CancelUpload(1, 7);
+    TestFalse(TEXT("cancellation cannot consume past the linkage boundary"), Queue.TryConsume(Consumed, 2));
+    TestEqual(TEXT("the later frame still owns its queue budget"), Queue.GetPendingFrameCount(), 1);
+    TestTrue(TEXT("the later frame is consumable at its own order"), Queue.TryConsume(Consumed, 3));
+    TestEqual(TEXT("the later upload survives cancellation"), Consumed.UploadId, 8);
+    TestEqual(TEXT("its consumed budget is released"), Queue.GetPendingFrameCount(), 0);
     return true;
 }
 
@@ -13688,6 +13705,361 @@ bool FMtoULinkageModeTransitionTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoULinkageCacheEntryGuardTest,
+    "MtoULiveLink.Linkage.CacheEntryGuard",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoULinkageCacheEntryGuardTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+
+    ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+    TestNotNull(TEXT("platform socket subsystem is available"), SocketSubsystem);
+    if (!SocketSubsystem)
+    {
+        return false;
+    }
+    IModularFeatures& Features = IModularFeatures::Get();
+    if (!Features.IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName))
+    {
+        AddError(TEXT("Live Link client feature is unavailable."));
+        return false;
+    }
+    ILiveLinkClient& LiveLinkClient =
+        Features.GetModularFeature<ILiveLinkClient>(ILiveLinkClient::ModularFeatureName);
+
+    FSocket* Reservation = BindLoopback(*SocketSubsystem, 0, true);
+    TestNotNull(TEXT("test port can be reserved"), Reservation);
+    if (!Reservation)
+    {
+        return false;
+    }
+    TSharedRef<FInternetAddr> ReservedAddress = SocketSubsystem->CreateInternetAddr();
+    Reservation->GetAddress(*ReservedAddress);
+    const uint16 Port = static_cast<uint16>(ReservedAddress->GetPort());
+    DestroySocket(*SocketSubsystem, Reservation);
+
+    UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false);
+    TestNotNull(TEXT("editor world is created"), World);
+    if (!World || !GEngine)
+    {
+        return false;
+    }
+    FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Editor);
+    WorldContext.SetCurrentWorld(World);
+    World->InitializeActorsForPlay(FURL());
+    AMtoULiveLinkActor* Actor = AddBoundActor(*World);
+    TestNotNull(TEXT("placed binding actor is created"), Actor);
+    if (!Actor)
+    {
+        World->DestroyWorld(false);
+        GEngine->DestroyWorldContext(World);
+        return false;
+    }
+    Actor->PostRegisterAllComponents();
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    TestTrue(TEXT("the actor is paired with the Maya object"), PairLinkageTarget(Actor));
+
+    TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
+    LiveLinkClient.AddSource(Source);
+    TestTrue(TEXT("source reaches listening state"), WaitForStatus(Source, TEXT("Listening on")));
+    const USkeletalMesh* Mesh = Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset();
+    const FReferenceSkeleton* Skeleton = Mesh ? &Mesh->GetRefSkeleton() : nullptr;
+    FSocket* Client = Skeleton ? ConnectLoopback(*SocketSubsystem, Port) : nullptr;
+    TestNotNull(TEXT("Maya client connects"), Client);
+    if (!Client)
+    {
+        MtoUClearLinkageTarget(*Actor);
+        Source->StopListener();
+        LiveLinkClient.RemoveSource(Source);
+        World->DestroyWorld(false);
+        GEngine->DestroyWorldContext(World);
+        return false;
+    }
+    FMtoULinkageReplyReader Reader;
+    const auto Pump = [&]() { Source->Update(); LiveLinkClient.ForceTick(); };
+    const auto Send = [&](const FString& Text)
+    {
+        const TArray<uint8> Bytes = Packet(Text);
+        return SendBytes(*Client, Bytes.GetData(), Bytes.Num());
+    };
+
+    const TArray<uint8> Hello = LinkageHelloPacket();
+    TestTrue(TEXT("greeting is sent"), SendBytes(*Client, Hello.GetData(), Hello.Num()));
+    TArray<uint8> Payload;
+    TestTrue(TEXT("the greeting is answered"), Reader.Next(*Client, TEXT("hello_ack"), Payload, Pump));
+    TestTrue(TEXT("init is sent"), Send(FString::Printf(
+        TEXT("{\"type\":\"init\",\"revision\":9,\"version\":11,\"object_id\":\"character\","
+             "\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"animation\","
+             "\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
+        *ReferenceSkeletonBonesJson(*Skeleton))));
+    TestTrue(TEXT("negotiation reaches ready"), Reader.Next(*Client, TEXT("ready"), Payload, Pump));
+
+    const TSharedPtr<FMtoULiveLinkSource> PreviousSource = MtoUSetActiveSource(Source);
+    FMtoULinkageTestHooks Hooks;
+    Hooks.Install();
+    MtoUSetLinkageHooks(Hooks.Hooks);
+    TestTrue(TEXT("Maya drives time once the set is ready"),
+        MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Maya);
+
+    // ---- cache_enter received before the next game-thread update ----------
+    TestTrue(TEXT("Maya enters Cached Playback"), Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the worker queues cache_enter without a game-thread update"), PollUntil([&]()
+    {
+        return Source->GetPendingCacheCommandCount() == 1;
+    }));
+    TestTrue(TEXT("the queued entry has not yet changed the cache state"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+    FString Error;
+    TestFalse(TEXT("an editor entry refuses a cache_enter waiting for the game thread"),
+        MtoURequestLinkageEnter(1, Error));
+    TestEqual(TEXT("the pending cache entry refusal names the contract code"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("a pending cache entry borrows no writer"), Hooks.TakeOverCalls, 0);
+    TestFalse(TEXT("the pending cache entry leaves the takeover unheld"),
+        MtoUGetTimeControlView().bTakeoverHeld);
+
+    // ---- Cached Playback holds the connection ----------------------------
+    TestTrue(TEXT("the cache holds the connection"), PollUntil([&]()
+    {
+        Pump();
+        return Source->GetCacheSessionState() == EMtoUCacheState::Entered;
+    }));
+    TestTrue(TEXT("the time-control view names the cache"),
+        MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Cache);
+
+    TestFalse(TEXT("the update never leaves cache and linkage active together"),
+        MtoUGetLinkageView().Mode == TEXT("linkage"));
+    TestFalse(TEXT("an editor entry is refused while the cache holds the connection"),
+        MtoURequestLinkageEnter(1, Error));
+    TestEqual(TEXT("the editor refusal names the contract code"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("no writer was taken over for the editor entry"), Hooks.TakeOverCalls, 0);
+    TestTrue(TEXT("the refused editor entry leaves the cache as it was"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Entered);
+
+    TestTrue(TEXT("Maya's entry is sent"), Send(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":1,\"mode\":\"linkage\","
+        "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}")));
+    TestTrue(TEXT("Maya hears the refusal at once"),
+        Reader.Next(*Client, TEXT("mode_state"), Payload, Pump));
+    TSharedPtr<FJsonObject> Refusal;
+    if (JsonObjectFromBytes(Payload, Refusal))
+    {
+        TestEqual(TEXT("the refusal keeps realtime"),
+            Refusal->GetStringField(TEXT("mode")), FString(TEXT("realtime")));
+    }
+    TestEqual(TEXT("Maya's refused entry names the contract code"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("no writer was taken over for Maya's entry"), Hooks.TakeOverCalls, 0);
+    TestTrue(TEXT("the refused Maya entry leaves the cache as it was"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Entered);
+
+    // ---- an editor entry applies a clear that is still waiting ------------
+    TestTrue(TEXT("Maya clears the cache"),
+        Send(TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}")));
+    TestTrue(TEXT("the clear waits for the game thread"), PollUntil([&]()
+    {
+        return Source->GetPendingCacheCommandCount() == 1;
+    }));
+    TestTrue(TEXT("the editor entry after the queued clear succeeds"),
+        MtoURequestLinkageEnter(2, Error));
+    TestTrue(TEXT("the entry applies the clear before borrowing writers"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+    TestTrue(TEXT("the editor entry gives time to the sequence"),
+        MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Sequence);
+    TestEqual(TEXT("the editor borrows the writers once"), Hooks.TakeOverCalls, 1);
+
+    // The worker still sees its pre-Update realtime mirror. Cache intake in
+    // this reverse scheduling window must not acquire ownership at Update.
+    TestTrue(TEXT("cache_enter is sent after the editor takeover, before Update"),
+        Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the worker queues the competing cache entry"), PollUntil([&]()
+    {
+        return Source->GetPendingCacheCommandCount() == 1;
+    }));
+    TestTrue(TEXT("Unreal confirms the queued clear"),
+        Reader.Next(*Client, TEXT("cache_cleared"), Payload, Pump));
+    TSharedPtr<FJsonObject> Cleared;
+    if (JsonObjectFromBytes(Payload, Cleared))
+    {
+        TestEqual(TEXT("the clear acknowledgement keeps its identity"),
+            static_cast<int32>(Cleared->GetNumberField(TEXT("clear_id"))), 1);
+    }
+    TestTrue(TEXT("the competing cache entry is refused without closing the connection"),
+        Reader.Next(*Client, TEXT("error"), Payload, Pump));
+    TSharedPtr<FJsonObject> Conflict;
+    if (JsonObjectFromBytes(Payload, Conflict))
+    {
+        TestEqual(TEXT("the competing cache entry names the mode conflict"),
+            Conflict->GetStringField(TEXT("code")), FString(TEXT("MODE_CONFLICT")));
+    }
+    TestTrue(TEXT("the rejected cache entry leaves the cache idle"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+    TestTrue(TEXT("the sequence remains the only time authority"),
+        MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Sequence);
+    TestTrue(TEXT("the cache refusal preserves the takeover"),
+        MtoUGetTimeControlView().bTakeoverHeld);
+
+    // ---- return to realtime and retain Maya's clear-then-enter path -------
+    TestTrue(TEXT("Maya returns to realtime"), Send(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":3,\"mode\":\"realtime\","
+        "\"control\":\"maya\",\"transition\":\"ready\",\"detail\":\"\"}")));
+    TestTrue(TEXT("realtime releases the time authority"), PollUntil([&]()
+    {
+        Pump();
+        return MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Maya;
+    }));
+    TestTrue(TEXT("Maya can still enter Cached Playback after the refusal"),
+        Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the same connection accepts cache ownership again"), PollUntil([&]()
+    {
+        Pump();
+        return Source->GetCacheSessionState() == EMtoUCacheState::Entered;
+    }));
+    TestTrue(TEXT("the clear and the entry are sent back to back"), Send(TEXT(
+        "{\"type\":\"cache_clear\",\"clear_id\":2}")) && Send(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":4,\"mode\":\"linkage\","
+        "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}")));
+    TestTrue(TEXT("Unreal confirms the clear"), Reader.Next(*Client, TEXT("cache_cleared"), Payload, Pump));
+    TestTrue(TEXT("the entry after the clear is taken over"), PollUntil([&]()
+    {
+        Pump();
+        return MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Sequence;
+    }));
+    TestEqual(TEXT("the writers were taken over once per accepted entry"), Hooks.TakeOverCalls, 2);
+    TestTrue(TEXT("the cache is idle"), Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+    TestTrue(TEXT("the time-control view reports the held takeover"),
+        MtoUGetTimeControlView().bTakeoverHeld);
+
+    // ---- one intake batch must preserve leave -> cache order --------------
+    TestTrue(TEXT("the preceding preview ends"), MtoURequestLinkageLeave(TEXT("end"), 5, Error));
+    Pump();
+    struct FLeaveCacheCase
+    {
+        const TCHAR* Target;
+        bool bStale;
+        bool bOtherSession;
+        bool bCacheFirst;
+    };
+    const FLeaveCacheCase Cases[] = {
+        {TEXT("realtime"), false, false, false},
+        {TEXT("end"), false, false, false},
+        {TEXT("realtime"), true, false, false},
+        {TEXT("realtime"), false, true, false},
+        {TEXT("realtime"), false, false, true},
+    };
+    int32 Revision = 6;
+    int32 ClearId = 3;
+    for (const FLeaveCacheCase& Case : Cases)
+    {
+        const bool bValidLeave = !Case.bStale && !Case.bOtherSession;
+        const bool bCacheAccepted = bValidLeave && !Case.bCacheFirst;
+        TestTrue(TEXT("the editor enters between Updates"), MtoURequestLinkageEnter(Revision, Error));
+        const auto NoPump = []() {};
+        TestTrue(TEXT("Maya receives an entry statement without Update"),
+            Reader.Next(*Client, TEXT("mode_state"), Payload, NoPump));
+        const int32 RepliesBefore = Reader.OtherPayloads.Num();
+        const uint64 ReceivedBefore = Source->GetReceivedTimeControlOrder();
+        TestTrue(TEXT("Maya confirms entry"), Send(FString::Printf(TEXT(
+            "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":%d,\"mode\":\"linkage\","
+            "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}"), Revision)));
+        if (Case.bCacheFirst)
+        {
+            TestTrue(TEXT("cache entry precedes the exit"), Send(TEXT("{\"type\":\"cache_enter\"}")));
+        }
+        TestTrue(TEXT("Maya sends its exit"), Send(FString::Printf(TEXT(
+            "{\"type\":\"leave_linkage\",\"session_id\":%d,\"mode_revision\":%d,\"target\":\"%s\",\"detail\":\"\"}"),
+            Case.bOtherSession ? 999 : 1, Case.bStale ? Revision : Revision + 1, Case.Target)));
+        if (!Case.bCacheFirst)
+        {
+            TestTrue(TEXT("cache entry follows the exit"), Send(TEXT("{\"type\":\"cache_enter\"}")));
+        }
+        TestTrue(TEXT("the whole batch reaches intake before Update"), PollUntil([&]()
+        {
+            return Source->GetQueuedControlMessageCount() == 2 && Source->GetPendingCacheCommandCount() == 1
+                && Source->GetReceivedTimeControlOrder() == ReceivedBefore + 3;
+        }));
+        Pump();
+        TestTrue(TEXT("only a valid earlier exit lets the cache enter"), Source->GetCacheSessionState()
+            == (bCacheAccepted ? EMtoUCacheState::Entered : EMtoUCacheState::Idle));
+        TestTrue(TEXT("the time authority follows the received order"), MtoUGetTimeControlView().Authority
+            == (bCacheAccepted ? EMtoUTimeAuthority::Cache
+                : bValidLeave ? EMtoUTimeAuthority::Maya : EMtoUTimeAuthority::Sequence));
+        TestEqual(TEXT("invalid exits keep linkage active"),
+            MtoUGetLinkageView().Mode, FString(bValidLeave ? TEXT("realtime") : TEXT("linkage")));
+        if (!bCacheAccepted)
+        {
+            TestTrue(TEXT("a competing cache request is reported"), Reader.Next(*Client, TEXT("error"), Payload, Pump));
+        }
+        if (MtoUGetTimeControlView().bTakeoverHeld)
+        {
+            TestTrue(TEXT("each case returns its remaining writers"),
+                MtoURequestLinkageLeave(TEXT("end"), Revision + 2, Error));
+        }
+        TestFalse(TEXT("each case leaves no writer borrowed"), MtoUGetTimeControlView().bTakeoverHeld);
+        Pump();
+        TestTrue(TEXT("the connection can still clear its cache"), Send(FString::Printf(
+            TEXT("{\"type\":\"cache_clear\",\"clear_id\":%d}"), ClearId++)));
+        TestTrue(TEXT("the clear reply forms an ordered reply barrier"),
+            Reader.Next(*Client, TEXT("cache_cleared"), Payload, Pump));
+        if (bCacheAccepted)
+        {
+            for (int32 Index = RepliesBefore; Index < Reader.OtherPayloads.Num(); ++Index)
+            {
+                TSharedPtr<FJsonObject> Reply;
+                if (JsonObjectFromBytes(Reader.OtherPayloads[Index], Reply))
+                {
+                    TestFalse(TEXT("valid leave then cache is never refused"),
+                        Reply->GetStringField(TEXT("type")) == TEXT("error"));
+                }
+            }
+        }
+        TestTrue(TEXT("clearing leaves the cache idle"), Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+        Revision += 3;
+    }
+
+    // Editor validation must follow queued peer transitions, without a guard
+    // recursively entering a second takeover or forgetting consumed leaves.
+    const int32 TakesBefore = Hooks.TakeOverCalls;
+    const uint64 BeforePeerEntry = Source->GetReceivedTimeControlOrder();
+    TestTrue(TEXT("Maya queues entry before the editor click"), Send(FString::Printf(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":%d,\"mode\":\"linkage\","
+        "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}"), Revision)));
+    TestTrue(TEXT("the peer entry is completely received"), PollUntil([&]()
+    {
+        return Source->GetReceivedTimeControlOrder() == BeforePeerEntry + 1;
+    }));
+    TestFalse(TEXT("editor revalidates after the queued peer entry"), MtoURequestLinkageEnter(Revision, Error));
+    TestEqual(TEXT("only the peer entry borrowed writers"), Hooks.TakeOverCalls, TakesBefore + 1);
+    const uint64 BeforePeerExit = Source->GetReceivedTimeControlOrder();
+    TestTrue(TEXT("Maya queues exit followed by cache"), Send(FString::Printf(TEXT(
+        "{\"type\":\"leave_linkage\",\"session_id\":1,\"mode_revision\":%d,\"target\":\"realtime\",\"detail\":\"\"}"),
+        Revision + 1)) && Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the peer exit and cache are completely received"), PollUntil([&]()
+    {
+        return Source->GetReceivedTimeControlOrder() == BeforePeerExit + 2;
+    }));
+    TestFalse(TEXT("the editor observes the cache acquired after exit"), MtoURequestLinkageEnter(Revision + 2, Error));
+    TestEqual(TEXT("the editor refusal still names cache ownership"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("the consumed leave waits for the mirror update"), Source->GetPendingLeaveCount(), 1);
+    Pump();
+    TestEqual(TEXT("Update accounts for the leave consumed by editor entry"), Source->GetPendingLeaveCount(), 0);
+    TestTrue(TEXT("ending the preview returns the retained writer"), MtoURequestLinkageLeave(TEXT("end"), Revision + 3, Error));
+
+    MtoUSetLinkageHooks(FMtoULinkageHooks());
+    MtoUSetActiveSource(PreviousSource);
+    MtoUClearLinkageTarget(*Actor);
+    DestroySocket(*SocketSubsystem, Client);
+    Source->StopListener();
+    LiveLinkClient.RemoveSource(Source);
+    World->DestroyWorld(false);
+    GEngine->DestroyWorldContext(World);
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoULinkageMayaLeaveFramesTest,
     "MtoULiveLink.Linkage.MayaLeaveFrames",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -14669,6 +15041,13 @@ bool FMtoULinkageObjectSetTest::RunTest(const FString& Parameters)
              "\"set_revision\":2,\"detail\":\"pairing window\"}"), SessionId));
     const int32 SkippedBeforeRemoval = Reader.OtherPayloads.Num();
     SendBytes(*Client, Remove.GetData(), Remove.Num());
+    // The fake editor offers only one new target. Let removal reach intake
+    // before pumping, or the old set can consume that offer while the worker
+    // is still reading the request, leaving the new set no target to sample.
+    TestTrue(TEXT("the removal is queued before the next synthetic target is sampled"), PollUntil([&]()
+    {
+        return Source->GetQueuedControlMessageCount() == 1;
+    }));
     TestTrue(TEXT("the removal is confirmed"), Reader.Next(*Client, TEXT("object_removed"), Payload, Pump));
     TSharedPtr<FJsonObject> Removed;
     if (JsonObjectFromBytes(Payload, Removed))

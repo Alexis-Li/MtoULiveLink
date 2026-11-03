@@ -200,6 +200,14 @@ public:
     TFunction<void(TArray<uint8>&&, bool bControl)> SendReply;
 
     /**
+     * Asked before an entry borrows any writer, whether the editor or Maya
+     * started it; false refuses the entry with the code and reason it names.
+     * The owning source installs it: Cached Playback that still holds the
+     * connection refuses linkage with CACHE_NOT_CLEARED.
+     */
+    TFunction<bool(FString& OutCode, FString& OutError)> EntryGuard;
+
+    /**
      * True once a failed restore ended the session; the source consumes the
      * request and closes the connection through the shared termination
      * boundary. Consuming never loses a second request.

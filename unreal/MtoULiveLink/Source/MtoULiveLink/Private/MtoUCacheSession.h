@@ -40,6 +40,8 @@ struct FMtoUCacheCommand
 
     // Transport identity: commands from older streaming sessions are ignored.
     uint64 SessionId = 0;
+    // Source-local receive order shared with linkage controls; never on wire.
+    uint64 IntakeOrder = 0;
     EKind Kind = EKind::Enter;
     int32 Index = 0;
     int32 PlayId = 0;
