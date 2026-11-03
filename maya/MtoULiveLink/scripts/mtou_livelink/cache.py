@@ -1982,7 +1982,11 @@ class CachedPlayback(object):
             self._remove_playback_poller()
             self._discard_upload()
             self._restore_capture_frame()
-            self._resume_streaming(self._send_clear_best_effort())
+            # Every release of the lease already sent its own clear; without
+            # the lease Unreal holds no cache of this connection, and during
+            # linkage it would refuse the clear.
+            self._resume_streaming(
+                self._send_clear_best_effort() if self._paused_streaming else None)
         for cache in (self._capture_cache, self._cache):
             if cache is not None:
                 cache.delete()

@@ -1781,7 +1781,7 @@ class Controller(object):
         elif kind == "object_removed":
             self._on_object_removed(reply, holder)
         elif kind == "error":
-            return self._report_runtime_error(reply)
+            return self._report_runtime_error(reply, holder)
         return None
 
     def _on_linkage_reply_error(self, error):
@@ -1792,12 +1792,16 @@ class Controller(object):
         self._defer_ui(lambda error=error: self._report_linkage_failure(
             make_diagnostic("INVALID_MESSAGE", str(error), details=str(error))))
 
-    def _report_runtime_error(self, reply):
+    def _report_runtime_error(self, reply, holder=None):
         """Report one Unreal error that belongs to no cache operation.
 
         Returns False when it is a refusal linkage scheduling expects, which is
-        counted instead. The connection stays unless Unreal closes it.
+        counted instead. The connection stays unless Unreal closes it. An error
+        still in flight when Maya ended the connection is not reported.
         """
+        holder = holder if holder is not None else {}
+        if _stopped_by_maya(holder.get("session")):
+            return False
         code = reply.get("code") or "STREAM_INTERRUPTED"
         linkage = self._linkage
         if linkage is not None and (
@@ -1814,8 +1818,13 @@ class Controller(object):
         diagnostic = error_reply_diagnostic(reply)
         self._last_diagnostic = diagnostic
         self._reported_errors.add(_error_signature(diagnostic))
-        self._defer_ui(lambda: self._show_error(diagnostic))
+        self._defer_ui(lambda: self._show_runtime_error(diagnostic, holder.get("session")))
         return True
+
+    def _show_runtime_error(self, diagnostic, session):
+        if _stopped_by_maya(session):
+            return  # Maya ended this connection before the dialog's turn came
+        self._show_error(diagnostic)
 
     def _on_linkage_event(self, event):
         """Keep the state machine's last event; its diagnostic is the reason."""
@@ -2778,6 +2787,11 @@ def _linkage_status_labels(mode, control, status, recovery, overdue, active):
 def _error_signature(diagnostic):
     """What makes two reports of an Unreal error the same one."""
     return (diagnostic.get("code"), diagnostic.get("details"))
+
+
+def _stopped_by_maya(session):
+    """True when Maya itself ended ``session``; doubles without it never are."""
+    return getattr(session, "stopped", False) is True
 
 
 def _enter_linkage_reason(ready, cached_owner, active, mode=REALTIME_MODE):

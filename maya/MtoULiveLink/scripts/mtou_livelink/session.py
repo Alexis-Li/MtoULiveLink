@@ -729,6 +729,11 @@ class StreamingSession(object):
         return self._blendshapes_enabled
 
     @property
+    def stopped(self):
+        """True once Maya itself ended the session (disconnect, scene change)."""
+        return self._outcome == "stopped"
+
+    @property
     def is_ready(self):
         if self._outcome is not None or self._worker is None:
             return False
