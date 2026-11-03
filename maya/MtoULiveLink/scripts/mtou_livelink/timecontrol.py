@@ -14,7 +14,10 @@ Whether an entry is allowed is decided here and nowhere else:
 - Cached Playback is refused with ``MODE_CONFLICT`` during linkage.
 
 Unreal answers every increasing clear id, and the connection's end resets this
-state with it, so the wait for the confirmation has no timeout.
+state with it, so the wait for the confirmation has no timeout. The clear is
+queued before the lease is released, so its confirmation can arrive first; the
+newest confirmed id is kept, and a release whose clear it covers waits for
+nothing.
 
 A lease also names where the results of its state go: the connection routes
 cache outcomes to the Cached Playback lease and linkage targets and receipts
@@ -95,6 +98,7 @@ class TimeControl(object):
         self._lock = threading.Lock()
         self._lease = None
         self._pending_clear = None
+        self._cleared_through = 0
         self._revision = 0
         self._terminated = False
 
@@ -180,7 +184,8 @@ class TimeControl(object):
             if lease is None or lease is not self._lease:
                 return False
             self._lease = None
-            if lease.state == CACHED_MODE and clear_id is not None:
+            if (lease.state == CACHED_MODE and clear_id is not None
+                    and clear_id > self._cleared_through):
                 self._pending_clear = clear_id
         if self._resume is not None:
             self._resume()
@@ -190,9 +195,11 @@ class TimeControl(object):
     def cache_cleared(self, clear_id):
         """Unreal confirmed ``clear_id``; any thread. True when it ended the wait."""
         with self._lock:
+            if not isinstance(clear_id, int) or isinstance(clear_id, bool):
+                return False
+            self._cleared_through = max(self._cleared_through, clear_id)
             pending = self._pending_clear
-            if (pending is None or not isinstance(clear_id, int)
-                    or isinstance(clear_id, bool) or clear_id < pending):
+            if pending is None or clear_id < pending:
                 return False
             self._pending_clear = None
         self._notify()
