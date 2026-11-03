@@ -277,6 +277,8 @@ issue. These actions include the following unless explicitly narrowed:
    the other comments by exact ID. Remove task-owned scratch once needed evidence
    has reached its owner, including helpers, drafts, payloads and results.
    Validate resolved paths before deletion and preserve shared or uncertain files.
+   Opt-in acceptance fixtures in `<fixtures>` are shared inputs: keep them, and
+   make sure their placeholder templates in `docs/acceptance-fixtures/` are current.
 5. **Verify.** Paginate comments to confirm that one status comment remains;
    check evidence links, publication state and scratch after the last helper run.
    Report any incomplete cleanup with its reason and next action. Close without

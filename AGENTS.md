@@ -59,6 +59,13 @@ pinned commit. Do not change sibling projects.
 - Keep scratch under the actual Git root's parent `.tmp/`; fall back to the
   ignored `.tmp/` inside this repository. Remove task-owned scratch when it is
   no longer needed.
+- Opt-in acceptance fixtures (the JSON files the `MtoUOptIn.*` tests take, the
+  Maya preference templates and their README) are shared test inputs, not
+  scratch. Keep them in `<fixtures>`, the parent's `.tmp/mtou-acceptance-fixtures/`,
+  and never remove them with task scratch or on issue closure. Each fixture
+  has a template in `docs/acceptance-fixtures/` with every machine path and
+  private asset replaced by a placeholder; update it when the fixture's
+  fields change.
 
 Commands run from the repository root. `<mayapy>` is Maya 2024
 `bin/mayapy.exe`; also use Maya 2022.4 when a change touches Maya API usage or
