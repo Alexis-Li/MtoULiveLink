@@ -26,7 +26,7 @@ from .config import (
     WORKFLOW_MODEL,
     WORKFLOWS,
 )
-from .diagnostics import DIAGNOSTICS, make_diagnostic
+from .diagnostics import DIAGNOSTICS, error_reply_diagnostic, make_diagnostic
 from .legal import LEGAL_TEXT, LEGAL_TITLE
 from .linkage import LinkageError, LinkageSession, is_scheduling_conflict
 from .mayaapi import cmds, om, omui
@@ -138,9 +138,9 @@ class Controller(object):
         self._linkage_last_recovery = []
         self._linkage_event = None
         self._reported_linkage_failure = None
-        # Cached Playback's reply queue once it owned the connection; replies
-        # linkage does not handle keep reaching it as before.
-        self._cached_reply_sink = None
+        # Unreal errors this connection already reported in a dialog; the
+        # same error ending the connection does not open a second one.
+        self._reported_errors = set()
         self._reference_offer = None
         self._reference_report = {"action": None, "report": None}
         self._reference_window = None
@@ -677,7 +677,6 @@ class Controller(object):
                 # linkage drives time.
                 cached = self._ensure_cached_playback()
                 cached.enter()
-                self._cached_reply_sink = cached.reply_sink()
                 self._set_connected(
                     True,
                     "缓存播放：实时采样已暂停，点击“捕获并上传”")
@@ -696,8 +695,6 @@ class Controller(object):
         else:
             if self._cached_playback is not None:
                 self._cached_playback.leave()
-            if self._session is not None:
-                self._install_runtime_dispatcher(self._session)
             if self._session_ready():
                 self._set_connected(True, "已连接：UE 显示实时姿势")
             else:
@@ -829,8 +826,6 @@ class Controller(object):
             # workflow available.
             diagnostic = view.diagnostic
             self._last_diagnostic = diagnostic
-            if self._session is not None:
-                self._install_runtime_dispatcher(self._session)
             self._update_mode_selection()
             self._set_connected(
                 self._session_ready(),
@@ -1106,17 +1101,23 @@ class Controller(object):
         self._shown_warning_signatures = set()
         self._object_set_detail = ""
         self._set_connected(False, "正在连接 Unreal…")
+        self._reported_errors = set()
         holder = {}
 
         def on_event(event):
             self._on_streaming_session_event(holder.get("session"), event)
 
+        def on_statement(reply):
+            return self._on_session_statement(holder, reply)
+
         try:
+            # Unreal's statements reach the panel from the first one on,
+            # whatever drives time on the connection.
             session = StreamingSession.start(
                 self._scene, fps, on_event, playback_cap=self._playback_cap,
                 workflow=self._workflow,
                 blendshapes_enabled=self._blendshapes_enabled,
-                secondary_scene=secondary)
+                secondary_scene=secondary, on_statement=on_statement)
         except StreamingSessionError as error:
             diagnostic = make_diagnostic(
                 error.code if error.code in DIAGNOSTICS else "INTERNAL_ERROR",
@@ -1139,7 +1140,6 @@ class Controller(object):
             self._update_mode_controls()
             return
         if event.kind == "ready":
-            self._cached_reply_sink = None
             # Cached Playback keeps the single-character contract; a two-object
             # set streams realtime and linkage only.
             if self._workflow == WORKFLOW_ANIMATION and not self._session_has_secondary():
@@ -1159,9 +1159,6 @@ class Controller(object):
                 self._cached_retention = None
                 self._cached_playback = cached_playback
                 self._on_cached_playback_view(cached_playback.view)
-            # Unreal may start linkage or offer a reference while Maya
-            # streams realtime, so its statements reach the panel from now on.
-            self._install_runtime_dispatcher(session)
             warning = event.warning or {
                 "missing_in_unreal": [], "missing_in_maya": [],
                 "bone_name_remaps": [], "has_warning": False}
@@ -1195,7 +1192,9 @@ class Controller(object):
             if event.recapture_scene:
                 self._clear_scene(keep_capture=True)
             self._set_connected(False, diagnostic["summary"])
-            self._show_error(diagnostic)
+            if _error_signature(diagnostic) not in self._reported_errors:
+                # Unreal closing after an error it reported shows that one dialog.
+                self._show_error(diagnostic)
             return
         if event.kind == "stopped":
             status = self._pending_stop_status or "已断开连接"
@@ -1531,14 +1530,13 @@ class Controller(object):
             host, session, on_event=self._on_linkage_event,
             object_id=object_id, set_revision=set_revision,
             space_revision=space_revision, mode_revision=floor,
-            object_ids=object_ids)
+            object_ids=object_ids, on_reply_error=self._on_linkage_reply_error)
         revision = remote_revision if remote else floor + 1
         try:
             linkage.set_session_id(session_id)
             # The linkage session takes the time-control lease, or refuses
             # with the reason, before Maya changes anything.
             linkage.enter(revision, remote=remote, anchor=remote_anchor)
-            self._install_runtime_dispatcher(session)
         except StreamingSessionError as error:
             linkage.close()
             refuse(make_diagnostic(
@@ -1684,7 +1682,6 @@ class Controller(object):
         except (RuntimeError, ValueError, TypeError):
             pass
         self._linkage_last_recovery = list(linkage.recovery_records())
-        self._release_reply_listener(self._session)
 
     def _linkage_active(self):
         linkage = self._linkage
@@ -1768,72 +1765,39 @@ class Controller(object):
                 repeat=True)
         self._update_linkage_status()
 
-    def _on_runtime_reply(self, reply):
-        """Route one post-ready Unreal reply while linkage owns the session.
+    def _on_session_statement(self, holder, reply):
+        """One connection-level Unreal statement, in any mode (sender thread).
 
-        Runs on the sender thread: the linkage state machine is thread-safe and
-        never touches Maya here, and every panel update is deferred to Maya's
-        main thread so a refusal can never kill the sender.
+        Statements that touch Maya are followed on the main thread, in arrival
+        order; the connection they belong to is resolved there. Returns False
+        for an error that is routine scheduling rather than a reason.
         """
-        if not isinstance(reply, dict):
-            return True
         kind = reply.get("type")
-        try:
-            if kind == "camera_time":
-                if self._linkage_active():
-                    self._linkage.offer_target(reply)
-                return True
-            if kind == "applied":
-                if self._linkage_active():
-                    self._linkage.note_applied(reply)
-                return True
-            if kind == "mode_state":
-                # Entering and leaving touch Maya, so the statement is
-                # followed on the main thread, in arrival order.
-                session = self._session
-                if exact_int(reply.get("session_id")) != self._session_id_of(session):
-                    # A statement for another connection changes nothing.
-                    return True
-                self._defer_ui(lambda reply=dict(reply), session=session:
-                               self._on_remote_mode_state(reply, session))
-                return True
-            if kind == "reference_offer":
-                self.offer_reference(reply)
-                return True
-            if kind == "object_removed":
-                self._on_object_removed(reply)
-                return True
-            if self._linkage is not None:
-                if kind == "error":
-                    self._report_runtime_error(reply)
-                return True
-            sink = self._cached_reply_sink
-            if sink is not None:
-                # Cached Playback owned this connection before: the replies it
-                # received through its own queue keep going there.
-                sink(reply)
-                return True
-            # Before any linkage the session keeps its own handling, so an
-            # Unreal error still ends the realtime connection as in v9.
-            return False
-        except LinkageError as error:
-            self._defer_ui(lambda error=error: self._report_linkage_refusal(error))
-        except Exception as error:  # never crash the sender thread
-            self._defer_ui(lambda error=error: self._report_linkage_failure(
-                make_diagnostic("INVALID_MESSAGE", str(error), details=str(error))))
-        return True
+        if kind == "mode_state":
+            self._defer_ui(lambda reply=dict(reply):
+                           self._on_remote_mode_state(reply, holder.get("session")))
+        elif kind == "reference_offer":
+            self.offer_reference(reply)
+        elif kind == "object_removed":
+            self._on_object_removed(reply, holder)
+        elif kind == "error":
+            return self._report_runtime_error(reply)
+        return None
 
-    def _install_runtime_dispatcher(self, session):
-        """Route Unreal's linkage statements to the panel for this session."""
-        install = getattr(session, "set_cached_reply_listener", None)
-        if callable(install):
-            try:
-                install(self._on_runtime_reply)
-            except (AttributeError, RuntimeError, TypeError):
-                pass
+    def _on_linkage_reply_error(self, error):
+        """A target or receipt the linkage session refused (sender thread)."""
+        if isinstance(error, LinkageError):
+            self._defer_ui(lambda error=error: self._report_linkage_refusal(error))
+            return
+        self._defer_ui(lambda error=error: self._report_linkage_failure(
+            make_diagnostic("INVALID_MESSAGE", str(error), details=str(error))))
 
     def _report_runtime_error(self, reply):
-        """The panel's existing diagnostic path for one Unreal error reply."""
+        """Report one Unreal error that belongs to no cache operation.
+
+        Returns False when it is a refusal linkage scheduling expects, which is
+        counted instead. The connection stays unless Unreal closes it.
+        """
         code = reply.get("code") or "STREAM_INTERRUPTED"
         linkage = self._linkage
         if linkage is not None and (
@@ -1846,14 +1810,12 @@ class Controller(object):
             # during the transition); that is normal scheduling, counted, not
             # a dialog. Every other MODE_CONFLICT is still reported.
             linkage.note_refused(reply.get("details") or reply.get("message") or "")
-            return
-        message = reply.get("message") or "Unreal 报告了一个错误。"
-        details = reply.get("details") or reply.get("message") or ""
-        diagnostic = make_diagnostic(
-            code if code in DIAGNOSTICS else "INTERNAL_ERROR", message,
-            details=details)
+            return False
+        diagnostic = error_reply_diagnostic(reply)
         self._last_diagnostic = diagnostic
+        self._reported_errors.add(_error_signature(diagnostic))
         self._defer_ui(lambda: self._show_error(diagnostic))
+        return True
 
     def _on_linkage_event(self, event):
         """Keep the state machine's last event; its diagnostic is the reason."""
@@ -1907,20 +1869,6 @@ class Controller(object):
             mayaapi.run_deferred(action, cmds.evalDeferred)
         except (AttributeError, RuntimeError, TypeError):
             action()
-
-    def _release_reply_listener(self, session):
-        """Stop routing Unreal's post-ready replies to the linkage dispatcher.
-
-        The session exposes no linkage-specific uninstall, and its public
-        setter owns that route: leaving this dispatcher installed would swallow
-        the error replies the streaming session itself must fail on.
-        """
-        release = getattr(session, "set_cached_reply_listener", None)
-        if callable(release):
-            try:
-                release(None)
-            except (AttributeError, RuntimeError, TypeError):
-                pass
 
     def _session_id_of(self, session):
         """Unreal's session id for this connection, from the hello reply."""
@@ -2154,12 +2102,13 @@ class Controller(object):
         self._set_connected(True, "正在移除副对象，等待 Unreal 恢复它原来的状态…")
         self._refresh_objects_window()
 
-    def _on_object_removed(self, reply):
+    def _on_object_removed(self, reply, holder):
         """Unreal confirmed a removal (Maya's or its own user's); sender thread.
 
         The linkage state adopts the new set at once, so the next target is
         answered by the new set; the scene and panel follow on Maya's main
-        thread.
+        thread, against the connection ``holder`` names by then. The
+        confirmation can arrive before ``StreamingSession.start`` returned.
         """
         try:
             validate_reply(reply)
@@ -2167,15 +2116,14 @@ class Controller(object):
             self._defer_ui(lambda error=error: self._report_linkage_failure(
                 make_diagnostic("INVALID_MESSAGE", str(error), details=str(error))))
             return
-        session = self._session
         linkage = self._linkage
         if linkage is not None and reply.get("object_id") == SECONDARY_OBJECT_ID:
             try:
                 linkage.adopt_set(reply.get("set_revision"), [CHARACTER_OBJECT_ID])
             except LinkageError as error:
                 self._defer_ui(lambda error=error: self._report_linkage_failure(error))
-        self._defer_ui(lambda reply=dict(reply), session=session:
-                       self._finish_object_removal(reply, session))
+        self._defer_ui(lambda reply=dict(reply):
+                       self._finish_object_removal(reply, holder.get("session")))
 
     def _finish_object_removal(self, reply, session):
         if session is None or session is not self._session:
@@ -2825,6 +2773,11 @@ def _linkage_status_labels(mode, control, status, recovery, overdue, active):
         "recovery": "恢复结果：{0}".format(
             "无" if not recovery else "；".join(recovery)),
     }
+
+
+def _error_signature(diagnostic):
+    """What makes two reports of an Unreal error the same one."""
+    return (diagnostic.get("code"), diagnostic.get("details"))
 
 
 def _enter_linkage_reason(ready, cached_owner, active, mode=REALTIME_MODE):

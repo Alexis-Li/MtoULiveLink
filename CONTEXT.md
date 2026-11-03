@@ -225,6 +225,14 @@ name Maya and the Unreal cache clock; linkage names Unreal. The authority is
 stated by both adapters and refuses work that contradicts it.
 _Avoid_: Time owner, clock owner, master
 
+**Time-control lease**:
+On the Maya side, the claim Cached Playback or linkage holds on one connection's
+time control. While it is held, live sampling pauses, delivery is ordered and
+the results of that state reach the holder; only the holder's release returns
+to realtime. Linkage is refused while the cache holds the connection, which
+lasts until Unreal confirms the clear that released the cache's lease.
+_Avoid_: Mode flag, pause token
+
 **Camera/time target**:
 One evaluated request from Unreal: the sequence time, the cut, the evaluated
 camera and the output gate, identified by an evaluation identity that changes

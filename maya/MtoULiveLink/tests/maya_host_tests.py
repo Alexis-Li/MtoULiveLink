@@ -532,7 +532,7 @@ class MayaHostTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_messages, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_messages, hello_message=None, on_reply=None):
                 # One init per object of the set; this session has one object.
                 self.init_message = init_messages[0]
                 self.init_count = len(init_messages)
@@ -590,7 +590,7 @@ class MayaHostTests(unittest.TestCase):
         events = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 pass
 
             def start(self):
@@ -714,22 +714,17 @@ class MayaHostTests(unittest.TestCase):
 
                 def __init__(self):
                     self.resumed = 0
-                    self.reply_listener = None
                     self.time_control = timecontrol.TimeControl(
                         resume=self._resume)
 
                 def _resume(self):
                     self.resumed += 1
 
-                def set_cached_reply_listener(self, listener):
-                    self.reply_listener = listener
-
                 def submit_cached(self, message):
-                    if message["type"] == "cache_clear" and self.reply_listener:
-                        self.time_control.cache_cleared(message["clear_id"])
-                        self.reply_listener({"type": "cache_cleared",
-                                             "upload_id": 0, "play_id": 0,
-                                             "clear_id": message["clear_id"]})
+                    if message["type"] == "cache_clear":
+                        mtou_session.route_reply(
+                            {"type": "cache_cleared", "upload_id": 0, "play_id": 0,
+                             "clear_id": message["clear_id"]}, self.time_control)
 
             stream = FakeStream()
             progress = []

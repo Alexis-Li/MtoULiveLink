@@ -1037,10 +1037,6 @@ class CachedPlayback(object):
                 "streaming revision {0}, current revision {1}".format(expected, current))
         return expected if expected is not None else current
 
-    def reply_sink(self):
-        """Where Unreal's replies go while this playback owns the connection."""
-        return self._replies.put
-
     def _pause_streaming(self):
         if self._lease is not None:
             return
@@ -1048,10 +1044,11 @@ class CachedPlayback(object):
         if session is None:
             return
         try:
-            self._lease = session.time_control.acquire(CACHED_MODE, self)
+            # The connection delivers cache outcomes to the lease holder.
+            self._lease = session.time_control.acquire(
+                CACHED_MODE, self, receive=self._replies.put)
         except TimeControlRefused as refusal:
             raise CachedPlaybackError(refusal.code, refusal.message, refusal.details)
-        session.set_cached_reply_listener(self._replies.put)
 
     def _resume_streaming(self, clear_id=None):
         """Release the lease; ``clear_id`` is the clear queued just before."""
@@ -1291,11 +1288,7 @@ class CachedPlayback(object):
         if transport_lost:
             self._phase = "transport_failed"
             self._publish(current=0, total=0, diagnostic=diagnostic)
-            if self._streaming_session is not None:
-                try:
-                    self._streaming_session.stop()
-                except (RuntimeError, TypeError):
-                    pass
+            self._end_with_connection()
             return error
         self._phase = "cancelled" if error.code == "CACHED_PLAYBACK_CANCELLED" else "failed"
         # A failed capture leaves Unreal owning cached entry state; drop it in
@@ -1908,11 +1901,13 @@ class CachedPlayback(object):
             "STREAM_INTERRUPTED", str(getattr(error, "message", error)),
             details=str(getattr(error, "details", error)))
         self._publish(diagnostic=diagnostic)
-        if self._streaming_session is not None:
-            try:
-                self._streaming_session.stop()
-            except (RuntimeError, TypeError):
-                pass
+        self._end_with_connection()
+
+    def _end_with_connection(self):
+        """The connection is unusable: let the session end it with its reason."""
+        session = self._streaming_session
+        if session is not None:
+            session.poll_connection()
 
     def upload_retained_cache(self):
         """Reupload a retained local cache after a new negotiated connection."""

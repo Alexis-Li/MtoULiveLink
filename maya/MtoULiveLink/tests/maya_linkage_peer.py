@@ -142,33 +142,16 @@ def main():
 
         events = []
         session_events = []
-        session = mtou_session.StreamingSession.start(
-            scene, fps, on_event=session_events.append, object_id=object_id,
-            set_revision=1, space_revision=1,
-            scene_units=(cmds.currentUnit(query=True, linear=True), unit_scale),
-            maya_version=cmds.about(version=True))
-        deadline = time.time() + float(fixture.get("timeout_seconds", 60.0))
-        while not session.is_ready and time.time() < deadline:
-            if any(event.kind == "failed" for event in session_events):
-                break
-            mtou_mayaapi.drain_deferred()  # mayapy has no idle loop
-            time.sleep(0.05)
-        if not session.is_ready:
-            result["errors"].append("streaming session did not become ready")
-            result["phase"] = "not-ready"
-            return finish(args.result, result, scene, session, cmds)
-
-        # The greeting is recorded once the handshake completed, not when the
-        # worker was merely started.
-        result["hello_reply"] = session.hello_reply
-        result["session_id"] = (session.hello_reply or {}).get("session_id")
-        time_before = float(cmds.currentTime(query=True))
-        result["time_before"] = time_before
-        host = mtou_link_host.MayaLinkageHost(scene, [object_id], fps)
+        peer = {}
         status = {"targets": 0, "applied": [], "groups": 0, "errors": []}
 
         def dispatch(reply):
+            # Statements reach it from the session; targets and receipts from
+            # the linkage lease. Nothing reaches the link before it exists.
+            link = peer.get("link")
             reply_type = reply.get("type")
+            if link is None and reply_type != "error":
+                return None
             try:
                 if reply_type == "camera_time":
                     status["targets"] += 1
@@ -192,9 +175,37 @@ def main():
             except Exception as exc:  # a refusal must never kill the worker
                 status["errors"].append("{0}: {1}".format(type(exc).__name__, exc))
 
-        link = mtou_linkage.LinkageSession(
+        session = mtou_session.StreamingSession.start(
+            scene, fps, on_event=session_events.append, object_id=object_id,
+            set_revision=1, space_revision=1,
+            scene_units=(cmds.currentUnit(query=True, linear=True), unit_scale),
+            maya_version=cmds.about(version=True), on_statement=dispatch)
+        deadline = time.time() + float(fixture.get("timeout_seconds", 60.0))
+        while not session.is_ready and time.time() < deadline:
+            if any(event.kind == "failed" for event in session_events):
+                break
+            mtou_mayaapi.drain_deferred()  # mayapy has no idle loop
+            time.sleep(0.05)
+        if not session.is_ready:
+            result["errors"].append("streaming session did not become ready")
+            result["phase"] = "not-ready"
+            return finish(args.result, result, scene, session, cmds)
+
+        # The greeting is recorded once the handshake completed, not when the
+        # worker was merely started.
+        result["hello_reply"] = session.hello_reply
+        result["session_id"] = (session.hello_reply or {}).get("session_id")
+        time_before = float(cmds.currentTime(query=True))
+        result["time_before"] = time_before
+        host = mtou_link_host.MayaLinkageHost(scene, [object_id], fps)
+
+        class RecordingLinkage(mtou_linkage.LinkageSession):
+            def receive(self, reply):
+                dispatch(reply)
+
+        link = RecordingLinkage(
             host, session, on_event=events.append, object_id=object_id)
-        session.set_cached_reply_listener(dispatch)
+        peer["link"] = link
         link.set_session_id((session.hello_reply or {}).get("session_id"))
         link.enter(1)
         result["phase"] = "linkage"

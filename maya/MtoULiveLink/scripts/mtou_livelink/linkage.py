@@ -213,10 +213,13 @@ class LinkageSession(object):
 
     def __init__(self, host, session, on_event=None, object_id=CHARACTER_OBJECT_ID,
                  space_revision=1, set_revision=1, clock=time.monotonic,
-                 mode_revision=0, object_ids=None):
+                 mode_revision=0, object_ids=None, on_reply_error=None):
         self._host = host
         self._session = session
         self._on_event = on_event
+        # Told, on the sender thread, of a target or receipt this session
+        # refused or could not read; it never touches Maya there.
+        self._on_reply_error = on_reply_error
         self._object_id = object_id
         # Every object of the current set, primary first; a group carries all.
         self._object_ids = tuple(object_ids or (object_id,))
@@ -417,7 +420,9 @@ class LinkageSession(object):
                 diagnostic=self._diagnostic("REFERENCE_STALE", problem)))
             raise LinkageError("REFERENCE_STALE", STALE_REFERENCE_MESSAGE, problem)
         try:
-            lease = self._session.time_control.acquire(LINKAGE_MODE, self)
+            # The connection delivers targets and receipts to the lease holder.
+            lease = self._session.time_control.acquire(
+                LINKAGE_MODE, self, receive=self.receive)
         except TimeControlRefused as refusal:
             # Cached Playback still holds the connection: nothing changed.
             if remote:
@@ -542,6 +547,19 @@ class LinkageSession(object):
         return list(residual)
 
     # ---------------------------------------------------------------- inbound
+    def receive(self, reply):
+        """One linkage result routed to this lease holder (sender thread)."""
+        try:
+            kind = reply.get("type")
+            if kind == "camera_time":
+                self.offer_target(reply)
+            elif kind == "applied":
+                self.note_applied(reply)
+        except Exception as error:  # never end the sender thread
+            listener = self._on_reply_error
+            if listener is not None:
+                listener(error)
+
     def offer_target(self, message):
         """Accept one `camera_time` target (worker thread); never blocks on Maya."""
         with self._lock:
