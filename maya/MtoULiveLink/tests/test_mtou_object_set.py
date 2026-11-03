@@ -26,6 +26,7 @@ from mtou_livelink import mayaapi as mtou_mayaapi
 from mtou_livelink import protocol as mtou_protocol
 from mtou_livelink import scene as mtou_scene
 from mtou_livelink import session as mtou_session
+from mtou_livelink import timecontrol as mtou_timecontrol
 from mtou_livelink.ui import objects_window as mtou_objects_window
 
 CHARACTER = mtou_config.CHARACTER_OBJECT_ID
@@ -274,7 +275,7 @@ class _FakeOpenMaya(object):
 class FakeWorker(object):
     """The sender worker surface a streaming session drives."""
 
-    def __init__(self, init_messages, hello_message=None):
+    def __init__(self, init_messages, hello_message=None, on_cache_cleared=None):
         self.init_messages = init_messages
         self.hello_message = hello_message
         self.frames = []
@@ -441,6 +442,7 @@ class SetHost(object):
 class SetLinkageSession(object):
     def __init__(self):
         self.messages = []
+        self.time_control = mtou_timecontrol.TimeControl()
 
     def submit_linkage(self, message):
         self.messages.append(message)

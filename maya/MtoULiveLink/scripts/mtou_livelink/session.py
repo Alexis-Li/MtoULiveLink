@@ -17,6 +17,7 @@ from . import config, mayaapi
 from .config import (
     CHARACTER_OBJECT_ID,
     DEFAULT_PLAYBACK_CAP,
+    REALTIME_MODE,
     SECONDARY_OBJECT_ID,
     WORKFLOW_ANIMATION,
     WORKFLOWS,
@@ -40,6 +41,7 @@ from .protocol import (
 )
 from .scene import CharacterSceneError
 from .space import validate_frame_rate
+from .timecontrol import TimeControl
 from .timeline import maya_is_playing, normalize_playback_cap, playback_cap_fps
 
 
@@ -97,7 +99,7 @@ def merge_object_warnings(warnings):
 
 
 class SenderWorker(threading.Thread):
-    def __init__(self, init_message, hello_message=None):
+    def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
         threading.Thread.__init__(self, name="MtoULiveLinkSender")
         self.daemon = True
         # One init per object of the set, primary first; a single dict is the
@@ -139,6 +141,9 @@ class SenderWorker(threading.Thread):
                          "has_warning": False}
         self._diagnostic = None
         self._reply_listener = None
+        # Told of every cache_cleared before any listener sees it, so the
+        # connection's time control knows the cache no longer holds it.
+        self._on_cache_cleared = on_cache_cleared
 
     def submit(self, frame_message):
         with self._lock:
@@ -483,6 +488,9 @@ class SenderWorker(threading.Thread):
                         self._set_status(
                             "error", diagnostic["summary"], diagnostic=diagnostic)
                         return
+                    if (reply.get("type") == "cache_cleared"
+                            and self._on_cache_cleared is not None):
+                        self._on_cache_cleared(exact_int(reply.get("clear_id")))
                     with self._lock:
                         # A listener installed since the top of this loop takes
                         # the held statements before this newer reply.
@@ -643,8 +651,12 @@ class StreamingSession(object):
         self._cleanup_pending = False
         self._cleaned = False
         self._cleanup_error = None
-        self._sampling_paused = False
         self._samples_held = 0
+        # Who drives time on this connection; Cached Playback and linkage
+        # take leases from it, which pause live sampling while they hold one.
+        self._time_control = TimeControl(
+            pause=self._pause_sampling, resume=self._resume_sampling,
+            on_change=self._on_time_control_changed)
 
     @property
     def object_id(self):
@@ -660,6 +672,14 @@ class StreamingSession(object):
     @property
     def secondary_scene(self):
         return self._secondary_scene
+
+    @property
+    def time_control(self):
+        return self._time_control
+
+    @property
+    def _sampling_paused(self):
+        return self._time_control.state != REALTIME_MODE
 
     @contextlib.contextmanager
     def holding_samples(self):
@@ -782,7 +802,9 @@ class StreamingSession(object):
         hello_message = make_hello_message(
             self._maya_version or "unknown",
             self._scene_units[0], self._scene_units[1], self._scene_fps)
-        self._worker = SenderWorker(init_messages, hello_message)
+        self._worker = SenderWorker(
+            init_messages, hello_message,
+            on_cache_cleared=self._time_control.cache_cleared)
         self._revision = snapshot.revision
         self._worker.start()
         self._worker_started = True
@@ -836,36 +858,36 @@ class StreamingSession(object):
         self._last_sample_time = None
         return True
 
-    def pause_for_cached(self, reply_listener=None):
-        """Suspend live sampling for Cached Playback."""
-        self._pause_sampling(
-            reply_listener, "CACHED_PLAYBACK_NOT_READY",
-            "Cached Playback requires a ready streaming session.")
-
-    def begin_linkage(self, reply_listener=None):
-        """Suspend live sampling so the linkage pump owns the pose instead."""
-        self._pause_sampling(
-            reply_listener, "STREAM_INTERRUPTED",
-            "镜头联动需要已连接的 Unreal 会话。")
-
-    def _pause_sampling(self, reply_listener=None, code="CACHED_PLAYBACK_NOT_READY",
-                        message="Cached Playback requires a ready streaming session."):
-        """Suspend live sampling, switch to ordered delivery, and route
-        Unreal's post-ready replies to ``reply_listener`` atomically, so no
-        submission can precede listener installation."""
-        if self._outcome is not None or self._worker is None or not self.is_ready:
-            raise StreamingSessionError(code, message)
-        if reply_listener is not None:
-            self._worker.set_reply_listener(reply_listener)
-        if self._sampling_paused:
-            return
-        self._sampling_paused = True
+    def _pause_sampling(self):
+        """Time-control hook: stop live sampling and deliver in order."""
         self._timer_generation += 1
         timer_id, self._timer_id = self._timer_id, None
         if timer_id is not None:
             self._remove_callback(timer_id)
-        self._worker.begin_ordered()
+        if self._worker is not None:
+            self._worker.begin_ordered()
         self._last_sample_time = None
+
+    def _resume_sampling(self):
+        """Time-control hook: queued ordered messages, then live samples."""
+        if self._worker is not None:
+            # Lossless: what the lease holder queued precedes the live frames.
+            self._worker.end_ordered(discard_pending=False)
+        if self._outcome is not None or self._worker is None:
+            return
+        self._timer_id = self._add_timer(self._effective_rate())
+        self._last_sample_time = None
+        self._sample_and_submit(force=True)
+
+    def _on_time_control_changed(self):
+        """Tell the panel, on Maya's main thread, that the time control changed."""
+        def notify():
+            self._emit(StreamingSessionEvent("time_control"))
+
+        if cmds is None:
+            notify()
+            return
+        mayaapi.run_deferred(notify, cmds.evalDeferred)
 
     def set_cached_reply_listener(self, listener):
         """Route Unreal's post-ready replies to the cached playback session."""
@@ -875,7 +897,7 @@ class StreamingSession(object):
     def cached_delivery_drained(self):
         """True once every ordered cached message has reached the socket.
 
-        Meaningful between pause_for_cached() and resume_from_cached().
+        Meaningful while Cached Playback holds its time-control lease.
         An empty backlog proves wire delivery, never Unreal-side parsing;
         only an identity-matched cache_ready outcome confirms acceptance.
         Terminal or unstarted sessions are vacuously drained so a drain
@@ -949,29 +971,6 @@ class StreamingSession(object):
         if not self._sampling_paused:
             self._sample_and_submit(force=True)
         return removed
-
-    def end_cached_replay(self, discard_pending=False):
-        if self._worker is None:
-            return
-        self._worker.end_ordered(discard_pending=discard_pending)
-
-    def resume_from_cached(self):
-        self._resume_sampling()
-
-    def resume_after_linkage(self):
-        """Return the live sampling path after linkage leaves the mode."""
-        self._resume_sampling()
-
-    def _resume_sampling(self):
-        if not self._sampling_paused:
-            return
-        self.end_cached_replay()
-        self._sampling_paused = False
-        if self._outcome is not None or self._worker is None:
-            return
-        self._timer_id = self._add_timer(self._effective_rate())
-        self._last_sample_time = None
-        self._sample_and_submit(force=True)
 
     def change_rate(self, fps):
         if self._outcome is not None:
@@ -1182,8 +1181,9 @@ class StreamingSession(object):
         if self._cleaned:
             return
         self._timer_generation += 1
-        self.end_cached_replay(discard_pending=True)
-        self._sampling_paused = False
+        self._time_control.terminate()
+        if self._worker is not None:
+            self._worker.end_ordered(discard_pending=True)
         callback_ids, self._callback_ids = self._callback_ids, []
         timer_id, self._timer_id = self._timer_id, None
         for callback_id in callback_ids:

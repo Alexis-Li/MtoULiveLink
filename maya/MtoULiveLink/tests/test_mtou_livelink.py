@@ -52,6 +52,9 @@ from mtou_livelink import (
 from mtou_livelink import (
     timeline as mtou_timeline,
 )
+from mtou_livelink import (
+    timecontrol as mtou_timecontrol,
+)
 
 # Every module that binds a Maya or late-bound global; `patch_global` patches
 # the name on all of them so a test keeps the single-file patch behaviour.
@@ -101,6 +104,15 @@ class _GlobalPatcher(object):
     def __exit__(self, *exc_info):
         self.stop()
         return False
+
+
+def cached_session(**fields):
+    """A session double whose time control Cached Playback already holds."""
+    control = mtou_timecontrol.TimeControl()
+    lease = control.acquire(mtou_config.CACHED_MODE, object())
+    session = mock.Mock(**fields)
+    session.time_control = control
+    return session, lease
 
 
 def patch_global(name, value=mock.DEFAULT, **kwargs):
@@ -628,7 +640,7 @@ class StreamingSessionTests(unittest.TestCase):
         registered = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
                 self.init_message = init_message
                 self.hello_message = hello_message
                 self.started = False
@@ -708,7 +720,7 @@ class StreamingSessionTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
                 del init_message
                 self.hello_message = hello_message
                 self.submitted = []
@@ -789,7 +801,7 @@ class StreamingSessionTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
                 del init_message
                 self.hello_message = hello_message
                 self.submitted = []
@@ -922,7 +934,7 @@ class StreamingSessionTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
                 del init_message
                 self.hello_message = hello_message
                 self.stop_count = 0
@@ -1004,7 +1016,7 @@ class StreamingSessionTests(unittest.TestCase):
         timer_callbacks = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1082,7 +1094,7 @@ class StreamingSessionTests(unittest.TestCase):
         removed = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1198,7 +1210,7 @@ class StreamingSessionTests(unittest.TestCase):
         timers = []
 
         class DisconnectedWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1250,7 +1262,7 @@ class StreamingSessionTests(unittest.TestCase):
         state = {"value": "ready"}
 
         class Worker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_cache_cleared=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1291,14 +1303,15 @@ class StreamingSessionTests(unittest.TestCase):
              patch_global("SenderWorker", Worker):
             session = mtou_session.StreamingSession.start(scene, 24.0, events.append)
             timers[0](0.0, 0.0, None)
-            session.begin_linkage()
+            session.time_control.acquire(mtou_config.LINKAGE_MODE, object())
             self.assertTrue(session.poll_connection())
             state["value"] = "disconnected"
             self.assertFalse(session.poll_connection())
             for action in list(deferred):
                 action()
 
-        self.assertEqual(["ready", "failed"], [event.kind for event in events])
+        self.assertEqual(["ready", "failed"], [event.kind for event in events
+                                               if event.kind != "time_control"])
         self.assertEqual("STREAM_INTERRUPTED", events[-1].diagnostic["code"])
 
     def test_timer_start_failure_rolls_back_worker_and_callbacks(self):
@@ -2428,14 +2441,18 @@ class CachedPlaybackTests(unittest.TestCase):
             self.drained = True
             self.upload_id = 0
             self.play_id = 0
+            self.time_control = mtou_timecontrol.TimeControl(
+                pause=self._pause, resume=self._resume)
 
-        def pause_for_cached(self, listener=None):
-            self.listener = listener
+        def _pause(self):
             self.paused += 1
 
-        def resume_from_cached(self):
+        def _resume(self):
             self.resumed += 1
             self.actions.append("resume")
+
+        def set_cached_reply_listener(self, listener):
+            self.listener = listener
 
         def submit_cached(self, message):
             self.submitted.append(message)
@@ -2463,6 +2480,9 @@ class CachedPlaybackTests(unittest.TestCase):
                 raise AssertionError("Cached Playback did not attach a reply listener")
             if message["type"] == "cache_playing":
                 self.play_id = message["play_id"]
+            if message["type"] == "cache_cleared":
+                # The sender reports every clear to the time control first.
+                self.time_control.cache_cleared(message["clear_id"])
             self.listener(message)
 
     def setUp(self):
@@ -3838,6 +3858,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller = mtou_controller.Controller()
         controller._playback_cap_menu = "capMenu"
         controller._session = mock.Mock()
+        controller._session.time_control = mtou_timecontrol.TimeControl()
 
         with patch_global("cmds", fake_cmds):
             controller._on_playback_cap_changed("30 fps")
@@ -3929,10 +3950,8 @@ class ControllerLifecycleTests(unittest.TestCase):
         fake_cmds = mock.MagicMock()
         fake_cmds.control.return_value = True
         controller = mtou_controller.Controller()
-        session = mock.Mock()
-        session.is_ready = True
+        session, lease = cached_session(is_ready=True)
         controller._session = session
-        controller._mode = mtou_config.CACHED_MODE
         controller._cache_text = "cacheText"
         controller._light = "light"
         controller._status_text = "statusText"
@@ -3940,6 +3959,7 @@ class ControllerLifecycleTests(unittest.TestCase):
             # A recoverable capture failure that already resumed Real-time
             # Preview publishes a REALTIME view with the truthful diagnostic;
             # the controller completes the same transition in the UI.
+            lease.release()
             controller._on_cached_playback_view(mtou_cache.CachedPlaybackView(
                 mtou_cache.CachedPlayback.REALTIME,
                 diagnostic=mtou_diagnostics.make_diagnostic("CACHED_PLAYBACK_CANCELLED")))
@@ -3983,7 +4003,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         fake_cmds = mock.MagicMock()
         fake_cmds.control.return_value = True
         controller = mtou_controller.Controller()
-        controller._mode = mtou_config.CACHED_MODE
+        controller._session = cached_session(is_ready=True)[0]
         controller._status_text = "statusText"
         with patch_global("cmds", fake_cmds):
             for view, expected in views:
@@ -3997,8 +4017,13 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_switching_cached_mode_pauses_and_resumes_the_same_connection(self):
         class ReadySession(object):
             is_ready = True
+            time_control = mtou_timecontrol.TimeControl()
 
         cached = mock.Mock()
+        leases = []
+        cached.enter.side_effect = lambda: leases.append(
+            ReadySession.time_control.acquire(mtou_config.CACHED_MODE, cached))
+        cached.leave.side_effect = lambda: leases.pop().release()
         controller = mtou_controller.Controller()
         controller._session = ReadySession()
         controller._cached_playback = cached
@@ -4017,7 +4042,7 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_controller_forwards_capture_and_uses_view_capabilities(self):
         cached = mock.Mock()
         controller = mtou_controller.Controller()
-        controller._mode = mtou_config.CACHED_MODE
+        controller._session = cached_session(is_ready=True)[0]
         controller._cached_playback = cached
         controller._ensure_cached_playback = mock.Mock(return_value=cached)
         controller._refresh_fps = mock.Mock(return_value=24.0)
@@ -4032,7 +4057,6 @@ class ControllerLifecycleTests(unittest.TestCase):
 
         controller._set_enabled = mock.Mock()
         controller._set_tooltip = mock.Mock()
-        controller._mode = mtou_config.CACHED_MODE
         controller._capture_button = "capture"
         controller._upload_button = "upload"
         controller._cancel_capture_button = "cancel"
@@ -4388,11 +4412,11 @@ class WorkflowTests(unittest.TestCase):
 
     def test_switching_workflow_disconnects_and_clears_cached_playback(self):
         controller = mtou_controller.Controller()
-        session = mock.Mock()
+        session, lease = cached_session()
         cached = mock.Mock()
+        cached.discard.side_effect = lease.release
         controller._session = session
         controller._cached_playback = cached
-        controller._mode = mtou_config.CACHED_MODE
         snapshot = character_snapshot(
             3, "|Group|root", "Clothes01", [("root", -1)], ["Smile"])
         scene = mock.Mock()
@@ -4489,7 +4513,7 @@ class WorkflowTests(unittest.TestCase):
         worker = mock.Mock()
         worker.status.return_value = ("connecting", "Connecting", None, None)
 
-        def worker_factory(init_messages, hello_message=None):
+        def worker_factory(init_messages, hello_message=None, on_cache_cleared=None):
             # One init per object of the set; a one-character set sends one.
             self.assertEqual(1, len(init_messages))
             captured["init"] = init_messages[0]
@@ -4629,6 +4653,7 @@ class _LinkageMessageStream(object):
 
     def __init__(self):
         self.ordered = []
+        self.time_control = mtou_timecontrol.TimeControl()
 
     def submit_linkage(self, message):
         self.ordered.append(message)
