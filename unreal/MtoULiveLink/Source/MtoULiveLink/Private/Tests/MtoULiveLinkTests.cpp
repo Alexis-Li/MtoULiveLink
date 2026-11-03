@@ -13786,8 +13786,24 @@ bool FMtoULinkageCacheEntryGuardTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Maya drives time once the set is ready"),
         MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Maya);
 
-    // ---- Cached Playback holds the connection ----------------------------
+    // ---- cache_enter received before the next game-thread update ----------
     TestTrue(TEXT("Maya enters Cached Playback"), Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the worker queues cache_enter without a game-thread update"), PollUntil([&]()
+    {
+        return Source->GetPendingCacheCommandCount() == 1;
+    }));
+    TestTrue(TEXT("the queued entry has not yet changed the cache state"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+    FString Error;
+    TestFalse(TEXT("an editor entry refuses a cache_enter waiting for the game thread"),
+        MtoURequestLinkageEnter(1, Error));
+    TestEqual(TEXT("the pending cache entry refusal names the contract code"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("a pending cache entry borrows no writer"), Hooks.TakeOverCalls, 0);
+    TestFalse(TEXT("the pending cache entry leaves the takeover unheld"),
+        MtoUGetTimeControlView().bTakeoverHeld);
+
+    // ---- Cached Playback holds the connection ----------------------------
     TestTrue(TEXT("the cache holds the connection"), PollUntil([&]()
     {
         Pump();
@@ -13796,7 +13812,8 @@ bool FMtoULinkageCacheEntryGuardTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("the time-control view names the cache"),
         MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Cache);
 
-    FString Error;
+    TestFalse(TEXT("the update never leaves cache and linkage active together"),
+        MtoUGetLinkageView().Mode == TEXT("linkage"));
     TestFalse(TEXT("an editor entry is refused while the cache holds the connection"),
         MtoURequestLinkageEnter(1, Error));
     TestEqual(TEXT("the editor refusal names the contract code"),
@@ -13822,10 +13839,71 @@ bool FMtoULinkageCacheEntryGuardTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("the refused Maya entry leaves the cache as it was"),
         Source->GetCacheSessionState() == EMtoUCacheState::Entered);
 
-    // ---- an entry right behind the clear on the wire ---------------------
+    // ---- an editor entry applies a clear that is still waiting ------------
+    TestTrue(TEXT("Maya clears the cache"),
+        Send(TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}")));
+    TestTrue(TEXT("the clear waits for the game thread"), PollUntil([&]()
+    {
+        return Source->GetPendingCacheCommandCount() == 1;
+    }));
+    TestTrue(TEXT("the editor entry after the queued clear succeeds"),
+        MtoURequestLinkageEnter(2, Error));
+    TestTrue(TEXT("the entry applies the clear before borrowing writers"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+    TestTrue(TEXT("the editor entry gives time to the sequence"),
+        MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Sequence);
+    TestEqual(TEXT("the editor borrows the writers once"), Hooks.TakeOverCalls, 1);
+
+    // The worker still sees its pre-Update realtime mirror. Cache intake in
+    // this reverse scheduling window must not acquire ownership at Update.
+    TestTrue(TEXT("cache_enter is sent after the editor takeover, before Update"),
+        Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the worker queues the competing cache entry"), PollUntil([&]()
+    {
+        return Source->GetPendingCacheCommandCount() == 1;
+    }));
+    TestTrue(TEXT("Unreal confirms the queued clear"),
+        Reader.Next(*Client, TEXT("cache_cleared"), Payload, Pump));
+    TSharedPtr<FJsonObject> Cleared;
+    if (JsonObjectFromBytes(Payload, Cleared))
+    {
+        TestEqual(TEXT("the clear acknowledgement keeps its identity"),
+            static_cast<int32>(Cleared->GetNumberField(TEXT("clear_id"))), 1);
+    }
+    TestTrue(TEXT("the competing cache entry is refused without closing the connection"),
+        Reader.Next(*Client, TEXT("error"), Payload, Pump));
+    TSharedPtr<FJsonObject> Conflict;
+    if (JsonObjectFromBytes(Payload, Conflict))
+    {
+        TestEqual(TEXT("the competing cache entry names the mode conflict"),
+            Conflict->GetStringField(TEXT("code")), FString(TEXT("MODE_CONFLICT")));
+    }
+    TestTrue(TEXT("the rejected cache entry leaves the cache idle"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+    TestTrue(TEXT("the sequence remains the only time authority"),
+        MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Sequence);
+    TestTrue(TEXT("the cache refusal preserves the takeover"),
+        MtoUGetTimeControlView().bTakeoverHeld);
+
+    // ---- return to realtime and retain Maya's clear-then-enter path -------
+    TestTrue(TEXT("Maya returns to realtime"), Send(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":3,\"mode\":\"realtime\","
+        "\"control\":\"maya\",\"transition\":\"ready\",\"detail\":\"\"}")));
+    TestTrue(TEXT("realtime releases the time authority"), PollUntil([&]()
+    {
+        Pump();
+        return MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Maya;
+    }));
+    TestTrue(TEXT("Maya can still enter Cached Playback after the refusal"),
+        Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the same connection accepts cache ownership again"), PollUntil([&]()
+    {
+        Pump();
+        return Source->GetCacheSessionState() == EMtoUCacheState::Entered;
+    }));
     TestTrue(TEXT("the clear and the entry are sent back to back"), Send(TEXT(
-        "{\"type\":\"cache_clear\",\"clear_id\":1}")) && Send(TEXT(
-        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":2,\"mode\":\"linkage\","
+        "{\"type\":\"cache_clear\",\"clear_id\":2}")) && Send(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":4,\"mode\":\"linkage\","
         "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}")));
     TestTrue(TEXT("Unreal confirms the clear"), Reader.Next(*Client, TEXT("cache_cleared"), Payload, Pump));
     TestTrue(TEXT("the entry after the clear is taken over"), PollUntil([&]()
@@ -13833,7 +13911,7 @@ bool FMtoULinkageCacheEntryGuardTest::RunTest(const FString& Parameters)
         Pump();
         return MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Sequence;
     }));
-    TestEqual(TEXT("the writers were taken over once"), Hooks.TakeOverCalls, 1);
+    TestEqual(TEXT("the writers were taken over once per accepted entry"), Hooks.TakeOverCalls, 2);
     TestTrue(TEXT("the cache is idle"), Source->GetCacheSessionState() == EMtoUCacheState::Idle);
     TestTrue(TEXT("the time-control view reports the held takeover"),
         MtoUGetTimeControlView().bTakeoverHeld);
@@ -14830,6 +14908,13 @@ bool FMtoULinkageObjectSetTest::RunTest(const FString& Parameters)
              "\"set_revision\":2,\"detail\":\"pairing window\"}"), SessionId));
     const int32 SkippedBeforeRemoval = Reader.OtherPayloads.Num();
     SendBytes(*Client, Remove.GetData(), Remove.Num());
+    // The fake editor offers only one new target. Let removal reach intake
+    // before pumping, or the old set can consume that offer while the worker
+    // is still reading the request, leaving the new set no target to sample.
+    TestTrue(TEXT("the removal is queued before the next synthetic target is sampled"), PollUntil([&]()
+    {
+        return Source->GetQueuedControlMessageCount() == 1;
+    }));
     TestTrue(TEXT("the removal is confirmed"), Reader.Next(*Client, TEXT("object_removed"), Payload, Pump));
     TSharedPtr<FJsonObject> Removed;
     if (JsonObjectFromBytes(Payload, Removed))

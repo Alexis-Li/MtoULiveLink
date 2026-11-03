@@ -299,11 +299,12 @@ FMtoULiveLinkSource::FMtoULiveLinkSource(uint16 InPort)
         SendLinkageControlPacketOnGameThread(MoveTemp(Packet), bControl);
     };
     // Every entry, from the editor or from Maya, is refused before any writer
-    // is borrowed while Cached Playback holds the connection. Each Update
-    // handles the cache commands before the linkage controls, so an entry
-    // that follows a clear on the wire finds the cache idle.
+    // is borrowed while Cached Playback holds the connection. The editor can
+    // enter between Updates, so apply received cache commands at this handoff
+    // too: a pending enter reserves the cache and a pending clear releases it.
     LinkageSession.EntryGuard = [this](FString& OutCode, FString& OutError)
     {
+        DrainCacheCommandsOnGameThread();
         if (CacheSession.GetState() == EMtoUCacheState::Idle)
         {
             return true;
@@ -3224,12 +3225,37 @@ bool FMtoULiveLinkSource::IsSessionActiveOnGameThread(uint64 SessionId) const
 void FMtoULiveLinkSource::HandleCacheCommandsOnGameThread()
 {
     check(IsInGameThread());
+    DrainCacheCommandsOnGameThread();
+
+    // Advance playback only once per Update, never from an entry guard.
+    // The synchronous epoch gate stays in the source: a replaced session
+    // neither advances cached replay nor applies a transition's side effects.
+    if (IsSessionPublishableOnGameThread(GameThreadSession))
+    {
+        ApplyCacheTransitionOnGameThread(GameThreadSession, CacheSession.Tick());
+    }
+}
+
+void FMtoULiveLinkSource::DrainCacheCommandsOnGameThread()
+{
+    check(IsInGameThread());
+    const bool bLinkageActive = LinkageSession.GetView().Mode == TEXT("linkage");
     FMtoUCacheCommand Command;
     while (CacheCommands.TryConsume(Command))
     {
         if (Command.SessionId != GameThreadSession || GameThreadSession == 0
             || !IsSessionPublishableOnGameThread(Command.SessionId))
         {
+            continue;
+        }
+        // A cache command can arrive after the entry guard drained the queue
+        // but before Update mirrors the takeover to the worker. Decide here,
+        // on the same thread as linkage entry, before it gains cache ownership.
+        if (bLinkageActive)
+        {
+            EnqueueReplyPacketOnGameThread(Command.SessionId,
+                FMtoUProtocol::EncodeError(TEXT("MODE_CONFLICT"),
+                    TEXT("Unreal owns the sequence time while linkage is active.")), false);
             continue;
         }
         if ((Command.Kind == FMtoUCacheCommand::EKind::Frame
@@ -3244,13 +3270,6 @@ void FMtoULiveLinkSource::HandleCacheCommandsOnGameThread()
         }
         ApplyCacheTransitionOnGameThread(
             Command.SessionId, CacheSession.HandleCommand(Command));
-    }
-
-    // The synchronous epoch gate stays in the source: a replaced session
-    // neither advances cached replay nor applies a transition's side effects.
-    if (IsSessionPublishableOnGameThread(GameThreadSession))
-    {
-        ApplyCacheTransitionOnGameThread(GameThreadSession, CacheSession.Tick());
     }
 }
 

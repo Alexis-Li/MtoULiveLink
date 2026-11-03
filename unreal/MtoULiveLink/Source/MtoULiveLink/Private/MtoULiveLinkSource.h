@@ -336,6 +336,9 @@ private:
     // the connection ends.
     bool HandleInitOnGameThread(FMtoUInitMessage&& Message);
     void HandleCacheCommandsOnGameThread();
+    // Serializes received cache commands with linkage entry without ticking
+    // playback; also used by the guard when the editor enters between Updates.
+    void DrainCacheCommandsOnGameThread();
     // Linkage intake and pump. The greeting is answered before any object is
     // negotiated; control messages and staged groups are applied on the game
     // thread and only then reported back to Maya.
