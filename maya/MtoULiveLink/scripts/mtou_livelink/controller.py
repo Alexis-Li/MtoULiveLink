@@ -1779,7 +1779,7 @@ class Controller(object):
         elif kind == "reference_offer":
             self.offer_reference(reply)
         elif kind == "object_removed":
-            self._on_object_removed(reply)
+            self._on_object_removed(reply, holder)
         elif kind == "error":
             return self._report_runtime_error(reply)
         return None
@@ -2102,12 +2102,13 @@ class Controller(object):
         self._set_connected(True, "正在移除副对象，等待 Unreal 恢复它原来的状态…")
         self._refresh_objects_window()
 
-    def _on_object_removed(self, reply):
+    def _on_object_removed(self, reply, holder):
         """Unreal confirmed a removal (Maya's or its own user's); sender thread.
 
         The linkage state adopts the new set at once, so the next target is
         answered by the new set; the scene and panel follow on Maya's main
-        thread.
+        thread, against the connection ``holder`` names by then. The
+        confirmation can arrive before ``StreamingSession.start`` returned.
         """
         try:
             validate_reply(reply)
@@ -2115,15 +2116,14 @@ class Controller(object):
             self._defer_ui(lambda error=error: self._report_linkage_failure(
                 make_diagnostic("INVALID_MESSAGE", str(error), details=str(error))))
             return
-        session = self._session
         linkage = self._linkage
         if linkage is not None and reply.get("object_id") == SECONDARY_OBJECT_ID:
             try:
                 linkage.adopt_set(reply.get("set_revision"), [CHARACTER_OBJECT_ID])
             except LinkageError as error:
                 self._defer_ui(lambda error=error: self._report_linkage_failure(error))
-        self._defer_ui(lambda reply=dict(reply), session=session:
-                       self._finish_object_removal(reply, session))
+        self._defer_ui(lambda reply=dict(reply):
+                       self._finish_object_removal(reply, holder.get("session")))
 
     def _finish_object_removal(self, reply, session):
         if session is None or session is not self._session:

@@ -712,6 +712,59 @@ class PanelObjectTests(unittest.TestCase):
         self.assertTrue(secondary.closed)
         self.assertIn("已移除副对象", self.controller._object_set_detail)
 
+    def connect_delivering(self, session, *early):
+        """connect() whose sender reports ``early`` before start() returns."""
+        handlers = []
+
+        def start(*args, **kwargs):
+            session.statement_handler = kwargs["on_statement"]
+            handlers.append(kwargs["on_statement"])
+            for reply in early:
+                session.route(reply)
+            return session
+
+        with mock.patch.object(mtou_controller.StreamingSession, "start",
+                               side_effect=start):
+            self.controller.connect()
+        return handlers[0]
+
+    def test_a_removal_confirmed_before_start_returns_is_adopted(self):
+        secondary = secondary_scene()
+        self.controller._secondary_scene = secondary
+        session = PanelSession(secondary)
+        reply = {"type": "object_removed", "session_id": 4242, "object_id": SECONDARY,
+                 "set_revision": 2, "restored": True, "detail": "restored"}
+
+        self.connect_delivering(session, reply)
+        with mock.patch.object(mtou_controller, "CachedPlayback"):
+            self.flush()
+
+        self.assertIs(session, self.controller._session)
+        self.assertEqual([reply], session.adopted)
+        self.assertEqual(2, session.set_revision)
+        self.assertIsNone(self.controller._secondary_scene)
+        self.assertTrue(secondary.closed)
+
+    def test_a_late_removal_of_an_ended_connection_is_dropped(self):
+        secondary = secondary_scene()
+        self.controller._secondary_scene = secondary
+        old = PanelSession(secondary)
+        old_handler = self.connect_delivering(old)
+        self.controller._session = None
+        current = PanelSession(secondary)
+        self.connect_delivering(current)
+
+        old_handler({"type": "object_removed", "session_id": 4242,
+                     "object_id": SECONDARY, "set_revision": 2,
+                     "restored": True, "detail": "restored"})
+        with mock.patch.object(mtou_controller, "CachedPlayback"):
+            self.flush()
+
+        self.assertEqual([], old.adopted)
+        self.assertEqual([], current.adopted)
+        self.assertIs(secondary, self.controller._secondary_scene)
+        self.assertFalse(secondary.closed)
+
     def test_removing_without_a_connection_only_forgets_the_object(self):
         secondary = secondary_scene()
         self.controller._secondary_scene = secondary
