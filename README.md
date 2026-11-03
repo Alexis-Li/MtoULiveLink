@@ -236,9 +236,10 @@ comparison work without it.
 While linkage is active, a camera edit, a pause, a cut or an explicit jump
 cancels the old target; a continuously moving camera never cancels the answer
 already on its way. Unreal refuses a target whose writers cannot be isolated
-safely, and names the reason, instead of pausing the whole sequence. Cached
-Playback must be cleared before entering linkage. A failed restore appears on
-both hosts only when it happens (恢复失败 in Maya, 恢复未完成 in Unreal):
+safely, and names the reason, instead of pausing the whole sequence. During
+Cached Playback **进入联动** is unavailable on both hosts: click **实时** in Maya,
+and it becomes available once Unreal confirms the cache was cleared. A failed
+restore appears on both hosts only when it happens (恢复失败 in Maya, 恢复未完成 in Unreal):
 open Maya's 诊断详情 or Unreal's **高级设置与诊断** for the resources that were
 not restored, restore them by hand (for example unlock the camera or reset the
 time range in Maya, or check the track in the Sequencer), or reopen the level.

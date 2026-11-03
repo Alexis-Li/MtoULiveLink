@@ -13,6 +13,12 @@ repository's issues.
   are shown under **关于** at the bottom right of the Maya panel and in Unreal's
   plugin entry. The license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
 
+### Fixed
+
+- During Cached Playback, Unreal's **进入联动** is disabled and the 镜头联动 status reads
+  缓存播放中; an entry from either host is refused before any Sequencer track is muted,
+  so the cache upload is not interrupted. (#9)
+
 ## 1.0.0 - 2026-10-30
 
 ### Upgrade notes

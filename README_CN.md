@@ -187,7 +187,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/build_mtou_topia
 
 联动期间，改动相机、暂停、cut 或明确跳转都会取消旧目标；相机随时间连续运动不会
 取消已经在路上的回传。若目标的 writer 无法安全隔离，Unreal 会在写入前拒绝并说明
-原因，而不是暂停整个 Sequence。进入联动前必须先清除缓存播放。恢复失败只在发生时
+原因，而不是暂停整个 Sequence。缓存播放期间两端的 **进入联动** 都不可用：在 Maya
+点击 **实时**，Unreal 确认清除缓存后即可进入。恢复失败只在发生时
 显示（Maya 显示“恢复失败”，Unreal 显示“恢复未完成”）：在 Maya 的诊断详情或 Unreal
 的 **高级设置与诊断** 中查看未恢复的资源，按记录手动恢复（例如在 Maya 中解锁相机、
 重设时间范围，或在 Sequencer 中检查对应轨道），也可以重新打开关卡。关闭或切换

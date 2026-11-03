@@ -46,6 +46,9 @@ MTOULIVELINK_API bool MtoURequestRemoveSecondaryObject(FString& OutError);
 /** Current status snapshot for the panel and the editor pump. */
 MTOULIVELINK_API FMtoULinkageView MtoUGetLinkageView();
 
+/** Who drives time on the active connection; Maya without one. */
+MTOULIVELINK_API FMtoUTimeControlView MtoUGetTimeControlView();
+
 /** Scheduling measurement of the active session (see FMtoULinkageScheduleStats). */
 MTOULIVELINK_API FMtoULinkageScheduleStats MtoUGetLinkageScheduleStats();
 

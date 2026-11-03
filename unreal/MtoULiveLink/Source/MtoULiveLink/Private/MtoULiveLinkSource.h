@@ -289,6 +289,11 @@ public:
     }
     const FMtoULinkageSession& GetLinkageSession() const { return LinkageSession; }
     /**
+     * Who drives time on this connection, merged from the cache session and
+     * the linkage session; Game Thread only.
+     */
+    FMtoUTimeControlView GetTimeControlView() const;
+    /**
      * The actor the connected session streams one object into, or null when
      * the session did not negotiate that object. Takeover and publishing use
      * this one identity.

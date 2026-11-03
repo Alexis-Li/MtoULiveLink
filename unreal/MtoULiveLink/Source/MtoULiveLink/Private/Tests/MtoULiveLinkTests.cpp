@@ -13688,6 +13688,167 @@ bool FMtoULinkageModeTransitionTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoULinkageCacheEntryGuardTest,
+    "MtoULiveLink.Linkage.CacheEntryGuard",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoULinkageCacheEntryGuardTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+
+    ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+    TestNotNull(TEXT("platform socket subsystem is available"), SocketSubsystem);
+    if (!SocketSubsystem)
+    {
+        return false;
+    }
+    IModularFeatures& Features = IModularFeatures::Get();
+    if (!Features.IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName))
+    {
+        AddError(TEXT("Live Link client feature is unavailable."));
+        return false;
+    }
+    ILiveLinkClient& LiveLinkClient =
+        Features.GetModularFeature<ILiveLinkClient>(ILiveLinkClient::ModularFeatureName);
+
+    FSocket* Reservation = BindLoopback(*SocketSubsystem, 0, true);
+    TestNotNull(TEXT("test port can be reserved"), Reservation);
+    if (!Reservation)
+    {
+        return false;
+    }
+    TSharedRef<FInternetAddr> ReservedAddress = SocketSubsystem->CreateInternetAddr();
+    Reservation->GetAddress(*ReservedAddress);
+    const uint16 Port = static_cast<uint16>(ReservedAddress->GetPort());
+    DestroySocket(*SocketSubsystem, Reservation);
+
+    UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false);
+    TestNotNull(TEXT("editor world is created"), World);
+    if (!World || !GEngine)
+    {
+        return false;
+    }
+    FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Editor);
+    WorldContext.SetCurrentWorld(World);
+    World->InitializeActorsForPlay(FURL());
+    AMtoULiveLinkActor* Actor = AddBoundActor(*World);
+    TestNotNull(TEXT("placed binding actor is created"), Actor);
+    if (!Actor)
+    {
+        World->DestroyWorld(false);
+        GEngine->DestroyWorldContext(World);
+        return false;
+    }
+    Actor->PostRegisterAllComponents();
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    TestTrue(TEXT("the actor is paired with the Maya object"), PairLinkageTarget(Actor));
+
+    TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
+    LiveLinkClient.AddSource(Source);
+    TestTrue(TEXT("source reaches listening state"), WaitForStatus(Source, TEXT("Listening on")));
+    const USkeletalMesh* Mesh = Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset();
+    const FReferenceSkeleton* Skeleton = Mesh ? &Mesh->GetRefSkeleton() : nullptr;
+    FSocket* Client = Skeleton ? ConnectLoopback(*SocketSubsystem, Port) : nullptr;
+    TestNotNull(TEXT("Maya client connects"), Client);
+    if (!Client)
+    {
+        MtoUClearLinkageTarget(*Actor);
+        Source->StopListener();
+        LiveLinkClient.RemoveSource(Source);
+        World->DestroyWorld(false);
+        GEngine->DestroyWorldContext(World);
+        return false;
+    }
+    FMtoULinkageReplyReader Reader;
+    const auto Pump = [&]() { Source->Update(); LiveLinkClient.ForceTick(); };
+    const auto Send = [&](const FString& Text)
+    {
+        const TArray<uint8> Bytes = Packet(Text);
+        return SendBytes(*Client, Bytes.GetData(), Bytes.Num());
+    };
+
+    const TArray<uint8> Hello = LinkageHelloPacket();
+    TestTrue(TEXT("greeting is sent"), SendBytes(*Client, Hello.GetData(), Hello.Num()));
+    TArray<uint8> Payload;
+    TestTrue(TEXT("the greeting is answered"), Reader.Next(*Client, TEXT("hello_ack"), Payload, Pump));
+    TestTrue(TEXT("init is sent"), Send(FString::Printf(
+        TEXT("{\"type\":\"init\",\"revision\":9,\"version\":11,\"object_id\":\"character\","
+             "\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"animation\","
+             "\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
+        *ReferenceSkeletonBonesJson(*Skeleton))));
+    TestTrue(TEXT("negotiation reaches ready"), Reader.Next(*Client, TEXT("ready"), Payload, Pump));
+
+    const TSharedPtr<FMtoULiveLinkSource> PreviousSource = MtoUSetActiveSource(Source);
+    FMtoULinkageTestHooks Hooks;
+    Hooks.Install();
+    MtoUSetLinkageHooks(Hooks.Hooks);
+    TestTrue(TEXT("Maya drives time once the set is ready"),
+        MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Maya);
+
+    // ---- Cached Playback holds the connection ----------------------------
+    TestTrue(TEXT("Maya enters Cached Playback"), Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the cache holds the connection"), PollUntil([&]()
+    {
+        Pump();
+        return Source->GetCacheSessionState() == EMtoUCacheState::Entered;
+    }));
+    TestTrue(TEXT("the time-control view names the cache"),
+        MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Cache);
+
+    FString Error;
+    TestFalse(TEXT("an editor entry is refused while the cache holds the connection"),
+        MtoURequestLinkageEnter(1, Error));
+    TestEqual(TEXT("the editor refusal names the contract code"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("no writer was taken over for the editor entry"), Hooks.TakeOverCalls, 0);
+    TestTrue(TEXT("the refused editor entry leaves the cache as it was"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Entered);
+
+    TestTrue(TEXT("Maya's entry is sent"), Send(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":1,\"mode\":\"linkage\","
+        "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}")));
+    TestTrue(TEXT("Maya hears the refusal at once"),
+        Reader.Next(*Client, TEXT("mode_state"), Payload, Pump));
+    TSharedPtr<FJsonObject> Refusal;
+    if (JsonObjectFromBytes(Payload, Refusal))
+    {
+        TestEqual(TEXT("the refusal keeps realtime"),
+            Refusal->GetStringField(TEXT("mode")), FString(TEXT("realtime")));
+    }
+    TestEqual(TEXT("Maya's refused entry names the contract code"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("no writer was taken over for Maya's entry"), Hooks.TakeOverCalls, 0);
+    TestTrue(TEXT("the refused Maya entry leaves the cache as it was"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Entered);
+
+    // ---- an entry right behind the clear on the wire ---------------------
+    TestTrue(TEXT("the clear and the entry are sent back to back"), Send(TEXT(
+        "{\"type\":\"cache_clear\",\"clear_id\":1}")) && Send(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":2,\"mode\":\"linkage\","
+        "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}")));
+    TestTrue(TEXT("Unreal confirms the clear"), Reader.Next(*Client, TEXT("cache_cleared"), Payload, Pump));
+    TestTrue(TEXT("the entry after the clear is taken over"), PollUntil([&]()
+    {
+        Pump();
+        return MtoUGetTimeControlView().Authority == EMtoUTimeAuthority::Sequence;
+    }));
+    TestEqual(TEXT("the writers were taken over once"), Hooks.TakeOverCalls, 1);
+    TestTrue(TEXT("the cache is idle"), Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+    TestTrue(TEXT("the time-control view reports the held takeover"),
+        MtoUGetTimeControlView().bTakeoverHeld);
+
+    MtoUSetLinkageHooks(FMtoULinkageHooks());
+    MtoUSetActiveSource(PreviousSource);
+    MtoUClearLinkageTarget(*Actor);
+    DestroySocket(*SocketSubsystem, Client);
+    Source->StopListener();
+    LiveLinkClient.RemoveSource(Source);
+    World->DestroyWorld(false);
+    GEngine->DestroyWorldContext(World);
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoULinkageMayaLeaveFramesTest,
     "MtoULiveLink.Linkage.MayaLeaveFrames",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

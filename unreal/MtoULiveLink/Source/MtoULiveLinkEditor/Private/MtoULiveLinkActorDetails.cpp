@@ -511,13 +511,13 @@ FText LinkageSecondsText(double Seconds)
     return FText::AsNumber(Seconds, &Options);
 }
 
-FText LinkageStatusText(const FMtoULinkageView& View)
+FText LinkageStatusText(const FMtoULinkageView& View, const FMtoUTimeControlView& Time)
 {
-    if (View.bTransitioning)
+    if (Time.bTransitioning)
     {
         return LOCTEXT("LinkageStatusTransitioning", "正在切换镜头联动，请稍候");
     }
-    if (View.Mode == TEXT("linkage"))
+    if (Time.Authority == EMtoUTimeAuthority::Sequence)
     {
         if (LinkageLagging(View))
         {
@@ -527,11 +527,11 @@ FText LinkageStatusText(const FMtoULinkageView& View)
             ? LOCTEXT("LinkageStatusSyncing", "镜头联动中 · Unreal 控制时间 · 正在同步")
             : LOCTEXT("LinkageStatusSynced", "镜头联动中 · Unreal 控制时间 · 同步正常");
     }
-    if (View.Mode == TEXT("cached"))
+    if (Time.Authority == EMtoUTimeAuthority::Cache)
     {
         return LOCTEXT("LinkageStatusCached", "未进入联动 · 缓存播放中");
     }
-    return View.bTakeoverHeld
+    return Time.bTakeoverHeld
         ? LOCTEXT("LinkageStatusHeld", "未进入联动 · 仍接管目标，点击“结束预览”交还原动画")
         : LOCTEXT("LinkageStatusIdle", "未进入联动");
 }
@@ -623,13 +623,14 @@ FText LinkageDiagnosticsText(const FMtoULinkageView& View)
     return FText::FromString(FString::Join(Lines, TEXT("\n")));
 }
 
-FText LinkageEnterTooltip(TWeakObjectPtr<AMtoULiveLinkActor> Actor, const FMtoULinkageView& View)
+FText LinkageEnterTooltip(TWeakObjectPtr<AMtoULiveLinkActor> Actor, const FMtoULinkageView& View,
+    const FMtoUTimeControlView& Time)
 {
     if (!Actor.IsValid())
     {
         return LOCTEXT("LinkageEnterNoActor", "选择绑定 Actor 后进入镜头联动。");
     }
-    if (View.bTransitioning)
+    if (Time.bTransitioning)
     {
         return LOCTEXT("LinkageEnterTransitioning", "正在切换镜头联动，请等待 Maya 确认。");
     }
@@ -637,11 +638,11 @@ FText LinkageEnterTooltip(TWeakObjectPtr<AMtoULiveLinkActor> Actor, const FMtoUL
     {
         return LOCTEXT("LinkageEnterUnpaired", "先点击“配对”，把这个角色与 Maya 配对。");
     }
-    if (View.Mode == TEXT("linkage"))
+    if (Time.Authority == EMtoUTimeAuthority::Sequence)
     {
         return LOCTEXT("LinkageEnterAlready", "已在镜头联动中：Level Sequence 控制时间和相机。");
     }
-    if (View.Mode == TEXT("cached"))
+    if (Time.Authority == EMtoUTimeAuthority::Cache)
     {
         return LOCTEXT("LinkageEnterCached", "缓存播放中：先在 Maya 返回实时预览，再进入镜头联动。");
     }
@@ -927,9 +928,16 @@ FText FMtoULiveLinkActorDetails::FormatCacheState(const FMtoUCachePlaybackView& 
     return CacheStateText(View);
 }
 
-FText FMtoULiveLinkActorDetails::FormatLinkageStatus(const FMtoULinkageView& View)
+FText FMtoULiveLinkActorDetails::FormatLinkageStatus(
+    const FMtoULinkageView& View, const FMtoUTimeControlView& Time)
 {
-    return LinkageStatusText(View);
+    return LinkageStatusText(View, Time);
+}
+
+bool FMtoULiveLinkActorDetails::CanEnterLinkage(
+    const FMtoULinkageView& View, const FMtoUTimeControlView& Time)
+{
+    return View.bPaired && !Time.bTransitioning && Time.Authority == EMtoUTimeAuthority::Maya;
 }
 
 FText FMtoULiveLinkActorDetails::FormatLinkageLag(const FMtoULinkageView& View)
@@ -1562,13 +1570,12 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
                 .Text(LOCTEXT("LinkageEnter", "进入联动"))
                 .ToolTipText_Lambda([Actor]()
                 {
-                    return LinkageEnterTooltip(Actor, MtoUGetLinkageView());
+                    return LinkageEnterTooltip(Actor, MtoUGetLinkageView(), MtoUGetTimeControlView());
                 })
                 .IsEnabled_Lambda([Actor]()
                 {
-                    const FMtoULinkageView View = MtoUGetLinkageView();
-                    return Actor.IsValid() && View.bPaired && !View.bTransitioning
-                        && View.Mode != TEXT("linkage") && View.Mode != TEXT("cached");
+                    return Actor.IsValid() && FMtoULiveLinkActorDetails::CanEnterLinkage(
+                        MtoUGetLinkageView(), MtoUGetTimeControlView());
                 })
                 .OnClicked_Lambda([Actor, LinkageMessage]()
                 {
@@ -1659,7 +1666,10 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
     AddLinkageRow(LOCTEXT("LinkageStatusRow", "联动状态"),
         SNew(STextBlock)
             .AutoWrapText(true)
-            .Text_Lambda([]() { return LinkageStatusText(MtoUGetLinkageView()); })
+            .Text_Lambda([]()
+            {
+                return LinkageStatusText(MtoUGetLinkageView(), MtoUGetTimeControlView());
+            })
         );
 
     AddLinkageRow(LOCTEXT("LinkageLagRow", "滞后"),

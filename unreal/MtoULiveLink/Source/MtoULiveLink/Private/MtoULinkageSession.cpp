@@ -1344,6 +1344,15 @@ bool FMtoULinkageSession::BeginTakeover(
         PublishView();
         return false;
     };
+    if (EntryGuard)
+    {
+        FString GuardCode;
+        FString GuardError;
+        if (!EntryGuard(GuardCode, GuardError))
+        {
+            return Refuse(*GuardCode, GuardError);
+        }
+    }
     if (!PendingRemovalObjectId.IsEmpty())
     {
         return Refuse(TEXT("MODE_CONFLICT"),
@@ -1714,6 +1723,15 @@ FMtoULinkageView MtoUGetLinkageView()
         return Source->GetLinkageSession().GetView();
     }
     return FMtoULinkageView();
+}
+
+FMtoUTimeControlView MtoUGetTimeControlView()
+{
+    if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
+    {
+        return Source->GetTimeControlView();
+    }
+    return FMtoUTimeControlView();
 }
 
 FMtoULinkageScheduleStats MtoUGetLinkageScheduleStats()

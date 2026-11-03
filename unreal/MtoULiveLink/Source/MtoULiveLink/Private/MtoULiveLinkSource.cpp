@@ -298,7 +298,39 @@ FMtoULiveLinkSource::FMtoULiveLinkSource(uint16 InPort)
     {
         SendLinkageControlPacketOnGameThread(MoveTemp(Packet), bControl);
     };
+    // Every entry, from the editor or from Maya, is refused before any writer
+    // is borrowed while Cached Playback holds the connection. Each Update
+    // handles the cache commands before the linkage controls, so an entry
+    // that follows a clear on the wire finds the cache idle.
+    LinkageSession.EntryGuard = [this](FString& OutCode, FString& OutError)
+    {
+        if (CacheSession.GetState() == EMtoUCacheState::Idle)
+        {
+            return true;
+        }
+        OutCode = TEXT("CACHE_NOT_CLEARED");
+        OutError = TEXT("Cached Playback holds the connection; return to realtime in Maya and wait for the cache to clear.");
+        return false;
+    };
     StartListener();
+}
+
+FMtoUTimeControlView FMtoULiveLinkSource::GetTimeControlView() const
+{
+    const FMtoULinkageView Linkage = LinkageSession.GetView();
+    FMtoUTimeControlView View;
+    View.bTransitioning = Linkage.bTransitioning;
+    View.bTakeoverHeld = Linkage.bTakeoverHeld;
+    View.ModeRevision = Linkage.Identity.ModeRevision;
+    if (CacheSession.GetState() != EMtoUCacheState::Idle)
+    {
+        View.Authority = EMtoUTimeAuthority::Cache;
+    }
+    else if (Linkage.Mode == TEXT("linkage"))
+    {
+        View.Authority = EMtoUTimeAuthority::Sequence;
+    }
+    return View;
 }
 
 FMtoULiveLinkSource::~FMtoULiveLinkSource()

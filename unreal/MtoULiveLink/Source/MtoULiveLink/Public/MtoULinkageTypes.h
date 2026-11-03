@@ -136,6 +136,33 @@ struct MTOULIVELINK_API FMtoULinkageView
     FString ErrorCode;
 };
 
+/** The clock that drives time on the connection (ADR 0014). */
+enum class EMtoUTimeAuthority : uint8
+{
+    /** Realtime preview: Maya's own time. */
+    Maya,
+    /** Cached Playback holds the connection, from `cache_enter` until its clear. */
+    Cache,
+    /** Linkage: the Level Sequence. */
+    Sequence,
+};
+
+/**
+ * The connection's time control, merged from the cache session and the
+ * linkage session the source owns, so a panel never combines the two itself.
+ * Who drives time and whether the takeover is still held are separate: after
+ * 返回实时 Maya drives time while the writers stay borrowed until 结束预览.
+ */
+struct MTOULIVELINK_API FMtoUTimeControlView
+{
+    EMtoUTimeAuthority Authority = EMtoUTimeAuthority::Maya;
+    /** A linkage transition waits for the other host. */
+    bool bTransitioning = false;
+    /** The paired targets' writers are still borrowed. */
+    bool bTakeoverHeld = false;
+    int32 ModeRevision = 0;
+};
+
 /** One issued linkage target and how it ended, on the game thread's monotonic clock. */
 struct MTOULIVELINK_API FMtoULinkageIssueRecord
 {
