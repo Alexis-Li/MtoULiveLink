@@ -141,14 +141,15 @@ def main():
         write_json(args.result, result)
 
         events = []
+        session_events = []
         session = mtou_session.StreamingSession.start(
-            scene, fps, on_event=events.append, object_id=object_id,
+            scene, fps, on_event=session_events.append, object_id=object_id,
             set_revision=1, space_revision=1,
             scene_units=(cmds.currentUnit(query=True, linear=True), unit_scale),
             maya_version=cmds.about(version=True))
         deadline = time.time() + float(fixture.get("timeout_seconds", 60.0))
         while not session.is_ready and time.time() < deadline:
-            if any(event.kind == "failed" for event in events):
+            if any(event.kind == "failed" for event in session_events):
                 break
             mtou_mayaapi.drain_deferred()  # mayapy has no idle loop
             time.sleep(0.05)
@@ -193,7 +194,7 @@ def main():
 
         link = mtou_linkage.LinkageSession(
             host, session, on_event=events.append, object_id=object_id)
-        session.begin_linkage(dispatch)
+        session.set_cached_reply_listener(dispatch)
         link.set_session_id((session.hello_reply or {}).get("session_id"))
         link.enter(1)
         result["phase"] = "linkage"
@@ -236,7 +237,6 @@ def main():
             raise ValueError("fixture exit must be 'realtime' or 'end'")
         result["exit"] = exit_target
         result["restore"] = list(link.leave(exit_target, 2))
-        session.resume_after_linkage()
         time.sleep(0.2)
         result["time_after"] = float(cmds.currentTime(query=True))
         result["camera_after"] = bool(cmds.objExists(mtou_config.LINK_CAMERA_NAME))

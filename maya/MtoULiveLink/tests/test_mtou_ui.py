@@ -30,6 +30,7 @@ from mtou_livelink import scene as mtou_scene  # noqa: E402
 from mtou_livelink import session as mtou_session  # noqa: E402
 from mtou_livelink import space as mtou_space  # noqa: E402
 from mtou_livelink import timeline as mtou_timeline  # noqa: E402
+from mtou_livelink import timecontrol as mtou_timecontrol  # noqa: E402
 from mtou_livelink.ui import reference_window as mtou_reference_window  # noqa: E402
 
 # Every module that binds a Maya global at import time; the detail windows read
@@ -158,9 +159,11 @@ class FakeStreamingSession(object):
         self._ready = ready
         self.hello = {"session_id": session_id, "version": 11}
         self.messages = []
-        self.begun = []
+        self.paused = 0
         self.resumed = 0
         self.listeners = []
+        self.time_control = mtou_timecontrol.TimeControl(
+            pause=self._pause, resume=self._resume)
         self.object_id = mtou_config.CHARACTER_OBJECT_ID
         self.set_revision = set_revision
         self.space_revision = space_revision
@@ -172,15 +175,14 @@ class FakeStreamingSession(object):
     def hello_reply(self):
         return dict(self.hello)
 
-    def begin_linkage(self, reply_listener=None):
-        self.begun.append(reply_listener)
-        self.listeners.append(reply_listener)
+    def _pause(self):
+        self.paused += 1
 
     def submit_linkage(self, message):
         self.messages.append(message)
         return True
 
-    def resume_after_linkage(self):
+    def _resume(self):
         self.resumed += 1
 
     def stop(self):
@@ -609,11 +611,11 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertIsNone(self.controller._linkage)
         self.assertEqual([], self.timers)
         self.assertEqual(0, self.host.captured)
-        self.assertEqual([], self.session.begun)
+        self.assertEqual(0, self.session.paused)
         self.assertEqual(mtou_config.REALTIME_MODE, self.controller._mode)
 
     def test_enter_linkage_refuses_while_cached_playback_owns_the_session(self):
-        self.controller._mode = mtou_config.CACHED_MODE
+        self.session.time_control.acquire(mtou_config.CACHED_MODE, object())
         self.controller._cached_view = mtou_cache.CachedPlaybackView(
             mtou_cache.CachedPlayback.REPLAYING)
         self.enter_linkage()
@@ -646,7 +648,8 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(mtou_config.LINKAGE_MODE, self.controller._mode)
         self.assertEqual(1, linkage.mode_revision())
         self.assertEqual(1, self.host.captured)
-        self.assertEqual([self.controller._on_runtime_reply], self.session.begun)
+        self.assertEqual(1, self.session.paused)
+        self.assertIn(self.controller._on_runtime_reply, self.session.listeners)
         self.assertEqual(7, linkage.status().session_id)
         self.assertEqual(1, len(self.timers))
         self.assertLessEqual(self.timers[0][0], 1.0 / 60.0)
@@ -1156,6 +1159,17 @@ class LinkagePanelTests(unittest.TestCase):
 
     def test_cached_mode_is_refused_while_linkage_holds_the_session(self):
         self.enter_linkage()
+        cached = mock.Mock()
+
+        def enter():
+            # Cached Playback takes its lease from the connection's time control.
+            try:
+                self.session.time_control.acquire(mtou_config.CACHED_MODE, cached)
+            except mtou_timecontrol.TimeControlRefused as refusal:
+                raise mtou_cache.CachedPlaybackError(refusal.code, refusal.message)
+
+        cached.enter.side_effect = enter
+        self.controller._cached_playback = cached
 
         with self.bindings:
             self.controller._on_mode_changed(mtou_config.CACHED_MODE)

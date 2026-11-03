@@ -13,6 +13,7 @@ if str(SCRIPTS) not in sys.path:
 from mtou_livelink import config as mtou_config  # noqa: E402
 from mtou_livelink import linkage as mtou_linkage  # noqa: E402
 from mtou_livelink import protocol as mtou_protocol  # noqa: E402
+from mtou_livelink import timecontrol as mtou_timecontrol  # noqa: E402
 
 
 def camera_time(eval_id="seq@10+0/cam#c1", eval_serial=1, transport_serial=1,
@@ -117,6 +118,7 @@ class FakeSession(object):
     def __init__(self):
         self.messages = []
         self.ready = True
+        self.time_control = mtou_timecontrol.TimeControl()
 
     def submit_linkage(self, message):
         self.messages.append(message)
