@@ -66,16 +66,27 @@ bool FMtoUCacheCommandQueue::Produce(
     }
 }
 
-bool FMtoUCacheCommandQueue::TryConsume(FMtoUCacheCommand& OutCommand)
+bool FMtoUCacheCommandQueue::TryConsume(FMtoUCacheCommand& OutCommand, uint64 MaxOrder)
 {
     FScopeLock Lock(&Mutex);
-    if (Pending.Num() == 0)
+    if (Pending.Num() == 0 || Pending[0].IntakeOrder > MaxOrder)
     {
         return false;
     }
     OutCommand = MoveTemp(Pending[0]);
     Pending.RemoveAt(0, 1, EAllowShrinking::No);
     ReleaseOwnership(OutCommand);
+    return true;
+}
+
+bool FMtoUCacheCommandQueue::PeekOrder(uint64& OutOrder) const
+{
+    FScopeLock Lock(&Mutex);
+    if (Pending.IsEmpty())
+    {
+        return false;
+    }
+    OutOrder = Pending[0].IntakeOrder;
     return true;
 }
 
@@ -129,10 +140,18 @@ int64 FMtoUCacheCommandQueue::GetPendingBytes() const
     return PendingBytes;
 }
 
-int32 FMtoUCacheCommandQueue::GetPendingCommandCount() const
+int32 FMtoUCacheCommandQueue::GetPendingCommandCount(uint64 MaxOrder) const
 {
     FScopeLock Lock(&Mutex);
-    return Pending.Num();
+    int32 Count = 0;
+    for (const FMtoUCacheCommand& Command : Pending)
+    {
+        if (Command.IntakeOrder <= MaxOrder)
+        {
+            ++Count;
+        }
+    }
+    return Count;
 }
 
 void FMtoUCacheCommandQueue::ReleaseOwnership(const FMtoUCacheCommand& Command)

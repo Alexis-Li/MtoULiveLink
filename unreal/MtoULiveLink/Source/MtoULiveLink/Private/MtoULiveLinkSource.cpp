@@ -299,12 +299,10 @@ FMtoULiveLinkSource::FMtoULiveLinkSource(uint16 InPort)
         SendLinkageControlPacketOnGameThread(MoveTemp(Packet), bControl);
     };
     // Every entry, from the editor or from Maya, is refused before any writer
-    // is borrowed while Cached Playback holds the connection. The editor can
-    // enter between Updates, so apply received cache commands at this handoff
-    // too: a pending enter reserves the cache and a pending clear releases it.
+    // is borrowed while Cached Playback holds the connection. Both wire and
+    // editor entries reach this guard after Source applies earlier controls.
     LinkageSession.EntryGuard = [this](FString& OutCode, FString& OutError)
     {
-        DrainCacheCommandsOnGameThread();
         if (CacheSession.GetState() == EMtoUCacheState::Idle)
         {
             return true;
@@ -314,6 +312,16 @@ FMtoULiveLinkSource::FMtoULiveLinkSource(uint16 InPort)
         return false;
     };
     StartListener();
+}
+
+bool FMtoULiveLinkSource::RequestLinkageEnter(int32 ModeRevision, FString& OutError)
+{
+    check(IsInGameThread());
+    // Revalidate mode and revision AFTER queued peer controls, before starting
+    // BeginTakeover. Draining from its guard would reenter an in-progress mode.
+    LeavesTakenBeforeUpdate += DrainTimeControlsOnGameThread();
+    FString ErrorCode;
+    return LinkageSession.RequestEnter(ModeRevision, OutError, ErrorCode);
 }
 
 FMtoUTimeControlView FMtoULiveLinkSource::GetTimeControlView() const
@@ -473,7 +481,8 @@ void FMtoULiveLinkSource::Update()
     // Maya's leave_linkage messages this update takes off the intake queue;
     // the worker drops frames behind them until the mirror below shows what
     // they did.
-    int32 LeavesTaken = 0;
+    int32 LeavesTaken = LeavesTakenBeforeUpdate;
+    LeavesTakenBeforeUpdate = 0;
     uint64 DisconnectedSession = 0;
     while (DisconnectedSessions.Dequeue(DisconnectedSession))
     {
@@ -577,7 +586,8 @@ void FMtoULiveLinkSource::Update()
             break;
         }
     }
-    HandleCacheCommandsOnGameThread();
+    LeavesTaken += DrainTimeControlsOnGameThread();
+    TickCacheOnGameThread();
 
     // A display of the set evaluates only its subject: a Sequencer restoring
     // what a muted track saved before the takeover (an earlier anim instance
@@ -603,7 +613,6 @@ void FMtoULiveLinkSource::Update()
     // Linkage intake and pump: the control messages and the staged pose groups
     // follow the greeting, and the camera/time pump asks the editor for the
     // current target on its bounded cadence.
-    LeavesTaken += DrainLinkageControlsOnGameThread();
     {
         // A confirmed removal of the second object runs before any group of
         // the old set is staged, so none of them is published any more.
@@ -759,7 +768,7 @@ int32 FMtoULiveLinkSource::GetPendingLeaveCount() const
 #if WITH_DEV_AUTOMATION_TESTS
 int32 FMtoULiveLinkSource::GetPendingCacheCommandCount() const
 {
-    return CacheCommands.GetPendingCommandCount();
+    return CacheCommands.GetPendingCommandCount(PublishedTimeControlOrder.Load());
 }
 
 EMtoUCacheState FMtoULiveLinkSource::GetCacheSessionState() const
@@ -952,6 +961,8 @@ uint32 FMtoULiveLinkSource::Run()
                 return true;
             }
         }
+        const uint64 Order = ++NextTimeControlOrder;
+        Command.IntakeOrder = Order;
         const bool bEnqueued = CacheCommands.Produce(
             MoveTemp(Command),
             [this, ActiveSession]()
@@ -970,6 +981,10 @@ uint32 FMtoULiveLinkSource::Run()
         if (!bEnqueued)
         {
             MarkDisconnected();
+        }
+        else
+        {
+            PublishedTimeControlOrder.Store(Order);
         }
         return bEnqueued;
     };
@@ -1379,9 +1394,12 @@ uint32 FMtoULiveLinkSource::Run()
                             // so the drain can never undercount it.
                             WorkerLinkageLeavesPending += 1;
                         }
+                        const uint64 Order = ++NextTimeControlOrder;
+                        Control.IntakeOrder = Order;
                         PendingLinkageControls.Enqueue(MoveTemp(Control));
                         QueuedLinkageControls.Store(QueuedLinkageControls.Load() + 1);
                         NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.Load());
+                        PublishedTimeControlOrder.Store(Order);
                         continue;
                     }
                     if (MessageType == TEXT("group"))
@@ -2047,73 +2065,104 @@ void FMtoULiveLinkSource::DrainLinkageHellosOnGameThread()
     }
 }
 
-int32 FMtoULiveLinkSource::DrainLinkageControlsOnGameThread()
+int32 FMtoULiveLinkSource::DrainTimeControlsOnGameThread()
 {
     check(IsInGameThread());
-    const double NowSeconds = FPlatformTime::Seconds();
+    const uint64 ThroughOrder = PublishedTimeControlOrder.Load();
     int32 LeavesDrained = 0;
-    FMtoUPendingLinkageControl Control;
-    while (PendingLinkageControls.Dequeue(Control))
+    while (true)
     {
-        QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
-        if (Control.Kind == FMtoUPendingLinkageControl::EKind::LeaveLinkage)
+        const FMtoUPendingLinkageControl* Head = PendingLinkageControls.Peek();
+        const bool bLinkage = Head && Head->IntakeOrder <= ThroughOrder;
+        uint64 CacheOrder = 0;
+        const bool bCache = CacheCommands.PeekOrder(CacheOrder) && CacheOrder <= ThroughOrder;
+        if (!bLinkage && !bCache)
         {
-            ++LeavesDrained;
-        }
-        int32 SessionId = INDEX_NONE;
-        switch (Control.Kind)
-        {
-        case FMtoUPendingLinkageControl::EKind::Mode:
-            SessionId = Control.Mode.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::LeaveLinkage:
-            SessionId = Control.LeaveLinkage.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::RemoveObject:
-            SessionId = Control.RemoveObject.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceResult:
-            SessionId = Control.ReferenceResult.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
-            SessionId = Control.ReferenceRemoved.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceQuery:
-            SessionId = Control.ReferenceQuery.SessionId;
             break;
         }
-        if (SessionId == INDEX_NONE || SessionId < 1
-            || !IsSessionActiveOnGameThread(static_cast<uint64>(SessionId)))
+        if (bCache && (!bLinkage || CacheOrder < Head->IntakeOrder))
         {
-            continue;
+            FMtoUCacheCommand Command;
+            // Cancellation may replace the cache head between peek and take.
+            // Never take the replacement if it follows the next linkage control.
+            if (CacheCommands.TryConsume(Command, bLinkage ? Head->IntakeOrder - 1 : ThroughOrder))
+            {
+                HandleCacheCommandOnGameThread(Command);
+            }
         }
-        if (LinkageSession.GetSessionId() != SessionId)
+        else
         {
-            LinkageSession.BeginSession(SessionId);
-        }
-        switch (Control.Kind)
-        {
-        case FMtoUPendingLinkageControl::EKind::Mode:
-            LinkageSession.NoteMode(Control.Mode, NowSeconds);
-            break;
-        case FMtoUPendingLinkageControl::EKind::LeaveLinkage:
-            LinkageSession.NoteLeaveLinkage(Control.LeaveLinkage, NowSeconds);
-            break;
-        case FMtoUPendingLinkageControl::EKind::RemoveObject:
-            LinkageSession.NoteRemoveObject(Control.RemoveObject);
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceResult:
-            LinkageSession.NoteReferenceResult(Control.ReferenceResult);
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
-            LinkageSession.NoteReferenceRemoved(Control.ReferenceRemoved);
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceQuery:
-            LinkageSession.NoteReferenceQuery(Control.ReferenceQuery);
-            break;
+            FMtoUPendingLinkageControl Control;
+            if (PendingLinkageControls.Dequeue(Control))
+            {
+                QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+                if (Control.Kind == FMtoUPendingLinkageControl::EKind::LeaveLinkage)
+                {
+                    ++LeavesDrained;
+                }
+                HandleLinkageControlOnGameThread(Control);
+            }
         }
     }
     return LeavesDrained;
+}
+
+void FMtoULiveLinkSource::HandleLinkageControlOnGameThread(const FMtoUPendingLinkageControl& Control)
+{
+    check(IsInGameThread());
+    const double NowSeconds = FPlatformTime::Seconds();
+    int32 SessionId = INDEX_NONE;
+    switch (Control.Kind)
+    {
+    case FMtoUPendingLinkageControl::EKind::Mode:
+        SessionId = Control.Mode.SessionId;
+        break;
+    case FMtoUPendingLinkageControl::EKind::LeaveLinkage:
+        SessionId = Control.LeaveLinkage.SessionId;
+        break;
+    case FMtoUPendingLinkageControl::EKind::RemoveObject:
+        SessionId = Control.RemoveObject.SessionId;
+        break;
+    case FMtoUPendingLinkageControl::EKind::ReferenceResult:
+        SessionId = Control.ReferenceResult.SessionId;
+        break;
+    case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
+        SessionId = Control.ReferenceRemoved.SessionId;
+        break;
+    case FMtoUPendingLinkageControl::EKind::ReferenceQuery:
+        SessionId = Control.ReferenceQuery.SessionId;
+        break;
+    }
+    if (SessionId == INDEX_NONE || SessionId < 1
+        || !IsSessionActiveOnGameThread(static_cast<uint64>(SessionId)))
+    {
+        return;
+    }
+    if (LinkageSession.GetSessionId() != SessionId)
+    {
+        LinkageSession.BeginSession(SessionId);
+    }
+    switch (Control.Kind)
+    {
+    case FMtoUPendingLinkageControl::EKind::Mode:
+        LinkageSession.NoteMode(Control.Mode, NowSeconds);
+        break;
+    case FMtoUPendingLinkageControl::EKind::LeaveLinkage:
+        LinkageSession.NoteLeaveLinkage(Control.LeaveLinkage, NowSeconds);
+        break;
+    case FMtoUPendingLinkageControl::EKind::RemoveObject:
+        LinkageSession.NoteRemoveObject(Control.RemoveObject);
+        break;
+    case FMtoUPendingLinkageControl::EKind::ReferenceResult:
+        LinkageSession.NoteReferenceResult(Control.ReferenceResult);
+        break;
+    case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
+        LinkageSession.NoteReferenceRemoved(Control.ReferenceRemoved);
+        break;
+    case FMtoUPendingLinkageControl::EKind::ReferenceQuery:
+        LinkageSession.NoteReferenceQuery(Control.ReferenceQuery);
+        break;
+    }
 }
 
 void FMtoULiveLinkSource::IntakeLinkageGroupsOnGameThread()
@@ -3222,10 +3271,9 @@ bool FMtoULiveLinkSource::IsSessionActiveOnGameThread(uint64 SessionId) const
     return IsCurrentSession(SessionId);
 }
 
-void FMtoULiveLinkSource::HandleCacheCommandsOnGameThread()
+void FMtoULiveLinkSource::TickCacheOnGameThread()
 {
     check(IsInGameThread());
-    DrainCacheCommandsOnGameThread();
 
     // Advance playback only once per Update, never from an entry guard.
     // The synchronous epoch gate stays in the source: a replaced session
@@ -3236,41 +3284,36 @@ void FMtoULiveLinkSource::HandleCacheCommandsOnGameThread()
     }
 }
 
-void FMtoULiveLinkSource::DrainCacheCommandsOnGameThread()
+void FMtoULiveLinkSource::HandleCacheCommandOnGameThread(const FMtoUCacheCommand& Command)
 {
     check(IsInGameThread());
-    const bool bLinkageActive = LinkageSession.GetView().Mode == TEXT("linkage");
-    FMtoUCacheCommand Command;
-    while (CacheCommands.TryConsume(Command))
+    if (Command.SessionId != GameThreadSession || GameThreadSession == 0
+        || !IsSessionPublishableOnGameThread(Command.SessionId))
     {
-        if (Command.SessionId != GameThreadSession || GameThreadSession == 0
-            || !IsSessionPublishableOnGameThread(Command.SessionId))
-        {
-            continue;
-        }
-        // A cache command can arrive after the entry guard drained the queue
-        // but before Update mirrors the takeover to the worker. Decide here,
-        // on the same thread as linkage entry, before it gains cache ownership.
-        if (bLinkageActive)
-        {
-            EnqueueReplyPacketOnGameThread(Command.SessionId,
-                FMtoUProtocol::EncodeError(TEXT("MODE_CONFLICT"),
-                    TEXT("Unreal owns the sequence time while linkage is active.")), false);
-            continue;
-        }
-        if ((Command.Kind == FMtoUCacheCommand::EKind::Frame
-             || Command.Kind == FMtoUCacheCommand::EKind::End)
-            && Command.UploadId != CacheSession.GetActiveUploadId())
-        {
-            // Rejected, superseded, or cleared upload: discard every pending
-            // command of that identity at once. They can never produce a
-            // flood of stale errors or touch a newer upload attempt.
-            CacheCommands.CancelUpload(Command.SessionId, Command.UploadId);
-            continue;
-        }
-        ApplyCacheTransitionOnGameThread(
-            Command.SessionId, CacheSession.HandleCommand(Command));
+        return;
     }
+    // Evaluate authority at this command's receive position: a valid earlier
+    // exit has already applied, but a later or refused exit cannot release it.
+    // This also covers editor takeovers not yet mirrored to the worker.
+    if (LinkageSession.GetView().Mode == TEXT("linkage"))
+    {
+        EnqueueReplyPacketOnGameThread(Command.SessionId,
+            FMtoUProtocol::EncodeError(TEXT("MODE_CONFLICT"),
+                TEXT("Unreal owns the sequence time while linkage is active.")), false);
+        return;
+    }
+    if ((Command.Kind == FMtoUCacheCommand::EKind::Frame
+         || Command.Kind == FMtoUCacheCommand::EKind::End)
+        && Command.UploadId != CacheSession.GetActiveUploadId())
+    {
+        // Rejected, superseded, or cleared upload: discard every pending
+        // command of that identity at once. They can never produce a
+        // flood of stale errors or touch a newer upload attempt.
+        CacheCommands.CancelUpload(Command.SessionId, Command.UploadId);
+        return;
+    }
+    ApplyCacheTransitionOnGameThread(
+        Command.SessionId, CacheSession.HandleCommand(Command));
 }
 
 void FMtoULiveLinkSource::ApplyCacheTransitionOnGameThread(

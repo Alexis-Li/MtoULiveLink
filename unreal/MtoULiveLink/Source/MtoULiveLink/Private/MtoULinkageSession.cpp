@@ -1758,8 +1758,7 @@ bool MtoURequestLinkageEnter(int32 ModeRevision, FString& OutError)
 {
     if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
     {
-        FString ErrorCode;
-        return Source->GetLinkageSession().RequestEnter(ModeRevision, OutError, ErrorCode);
+        return Source->RequestLinkageEnter(ModeRevision, OutError);
     }
     OutError = TEXT("The MtoU_LiveLink listener is unavailable.");
     return false;

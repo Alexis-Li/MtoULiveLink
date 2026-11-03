@@ -128,6 +128,7 @@ struct FMtoUPendingLinkageControl
         ReferenceQuery
     };
 
+    uint64 IntakeOrder = 0;
     EKind Kind = EKind::Mode;
     FMtoUModeMessage Mode;
     FMtoULeaveLinkageMessage LeaveLinkage;
@@ -293,6 +294,8 @@ public:
      * the linkage session; Game Thread only.
      */
     FMtoUTimeControlView GetTimeControlView() const;
+    // Editor entry processes received controls before validating the request.
+    bool RequestLinkageEnter(int32 ModeRevision, FString& OutError);
     /**
      * The actor the connected session streams one object into, or null when
      * the session did not negotiate that object. Takeover and publishing use
@@ -318,11 +321,13 @@ public:
 
 #if WITH_DEV_AUTOMATION_TESTS
     // Automation-only gauges for the explicit-refresh critical window
-    // (Issue #39): total queued cache commands and the transient cache
+    // (Issue #39): fully published queued cache commands and the transient cache
     // state, read without disturbing the session. Production never calls
     // these; they exist so the Editor integration test needs no wider
     // production-type exports.
     int32 GetPendingCacheCommandCount() const;
+    // Coordinate a complete mixed-control batch without advancing Update.
+    uint64 GetReceivedTimeControlOrder() const { return PublishedTimeControlOrder.Load(); }
     EMtoUCacheState GetCacheSessionState() const;
 #endif
 
@@ -335,16 +340,16 @@ private:
     // Negotiates one object of the set; false when it refused the object and
     // the connection ends.
     bool HandleInitOnGameThread(FMtoUInitMessage&& Message);
-    void HandleCacheCommandsOnGameThread();
-    // Serializes received cache commands with linkage entry without ticking
-    // playback; also used by the guard when the editor enters between Updates.
-    void DrainCacheCommandsOnGameThread();
+    void TickCacheOnGameThread();
+    void HandleCacheCommandOnGameThread(const FMtoUCacheCommand& Command);
+    // Merges one completely published receive prefix of the two bounded queues.
+    // Returns consumed leave messages, counted until Update mirrors their result.
+    int32 DrainTimeControlsOnGameThread();
     // Linkage intake and pump. The greeting is answered before any object is
     // negotiated; control messages and staged groups are applied on the game
     // thread and only then reported back to Maya.
     void DrainLinkageHellosOnGameThread();
-    // Returns how many leave_linkage messages it took off the queue.
-    int32 DrainLinkageControlsOnGameThread();
+    void HandleLinkageControlOnGameThread(const FMtoUPendingLinkageControl& Control);
     void IntakeLinkageGroupsOnGameThread();
     // Resolves the published group, finishes a display restore, or publishes
     // the next staged group; runs after the editor was asked for the target.
@@ -482,6 +487,13 @@ private:
     // its exit, and those frames are dropped, not refused, until it applies.
     TAtomic<int32> WorkerLinkageLeavesPending{0};
     FMtoUCacheCommandQueue CacheCommands;
+    // One producer across both queues; publish only AFTER a complete enqueue.
+    // The game thread never consumes beyond the published prefix. Sequence
+    // gaps from cancelled uploads/sessions do not change the remaining order.
+    uint64 NextTimeControlOrder = 0;
+    TAtomic<uint64> PublishedTimeControlOrder{0};
+    // Editor entry can consume leaves before Update refreshes the worker mirror.
+    int32 LeavesTakenBeforeUpdate = 0;
 
     ILiveLinkClient* Client = nullptr;
     FGuid SourceGuid;

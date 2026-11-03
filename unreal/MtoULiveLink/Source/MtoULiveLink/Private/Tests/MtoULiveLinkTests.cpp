@@ -2831,6 +2831,23 @@ bool FMtoUCacheQueueAdmissionTest::RunTest(const FString& Parameters)
         Queue.TryConsume(Consumed));
     TestEqual(TEXT("surviving frame belongs to the newer upload"),
         Consumed.UploadId, 6);
+    // Cancellation between merge-peek and consume must not cross the next
+    // linkage control's receive order, or release the later frame's budget.
+    FMtoUCacheCommand First = FrameCommand(0, 7, PerFrame);
+    First.IntakeOrder = 1;
+    FMtoUCacheCommand Later = FrameCommand(0, 8, PerFrame);
+    Later.IntakeOrder = 3;
+    Queue.Produce(First, Never);
+    Queue.Produce(Later, Never);
+    uint64 Order = 0;
+    TestTrue(TEXT("the ordered head is visible"), Queue.PeekOrder(Order));
+    TestEqual(TEXT("the first receive order is at the head"), Order, uint64(1));
+    Queue.CancelUpload(1, 7);
+    TestFalse(TEXT("cancellation cannot consume past the linkage boundary"), Queue.TryConsume(Consumed, 2));
+    TestEqual(TEXT("the later frame still owns its queue budget"), Queue.GetPendingFrameCount(), 1);
+    TestTrue(TEXT("the later frame is consumable at its own order"), Queue.TryConsume(Consumed, 3));
+    TestEqual(TEXT("the later upload survives cancellation"), Consumed.UploadId, 8);
+    TestEqual(TEXT("its consumed budget is released"), Queue.GetPendingFrameCount(), 0);
     return true;
 }
 
@@ -13915,6 +13932,122 @@ bool FMtoULinkageCacheEntryGuardTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("the cache is idle"), Source->GetCacheSessionState() == EMtoUCacheState::Idle);
     TestTrue(TEXT("the time-control view reports the held takeover"),
         MtoUGetTimeControlView().bTakeoverHeld);
+
+    // ---- one intake batch must preserve leave -> cache order --------------
+    TestTrue(TEXT("the preceding preview ends"), MtoURequestLinkageLeave(TEXT("end"), 5, Error));
+    Pump();
+    struct FLeaveCacheCase
+    {
+        const TCHAR* Target;
+        bool bStale;
+        bool bOtherSession;
+        bool bCacheFirst;
+    };
+    const FLeaveCacheCase Cases[] = {
+        {TEXT("realtime"), false, false, false},
+        {TEXT("end"), false, false, false},
+        {TEXT("realtime"), true, false, false},
+        {TEXT("realtime"), false, true, false},
+        {TEXT("realtime"), false, false, true},
+    };
+    int32 Revision = 6;
+    int32 ClearId = 3;
+    for (const FLeaveCacheCase& Case : Cases)
+    {
+        const bool bValidLeave = !Case.bStale && !Case.bOtherSession;
+        const bool bCacheAccepted = bValidLeave && !Case.bCacheFirst;
+        TestTrue(TEXT("the editor enters between Updates"), MtoURequestLinkageEnter(Revision, Error));
+        const auto NoPump = []() {};
+        TestTrue(TEXT("Maya receives an entry statement without Update"),
+            Reader.Next(*Client, TEXT("mode_state"), Payload, NoPump));
+        const int32 RepliesBefore = Reader.OtherPayloads.Num();
+        const uint64 ReceivedBefore = Source->GetReceivedTimeControlOrder();
+        TestTrue(TEXT("Maya confirms entry"), Send(FString::Printf(TEXT(
+            "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":%d,\"mode\":\"linkage\","
+            "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}"), Revision)));
+        if (Case.bCacheFirst)
+        {
+            TestTrue(TEXT("cache entry precedes the exit"), Send(TEXT("{\"type\":\"cache_enter\"}")));
+        }
+        TestTrue(TEXT("Maya sends its exit"), Send(FString::Printf(TEXT(
+            "{\"type\":\"leave_linkage\",\"session_id\":%d,\"mode_revision\":%d,\"target\":\"%s\",\"detail\":\"\"}"),
+            Case.bOtherSession ? 999 : 1, Case.bStale ? Revision : Revision + 1, Case.Target)));
+        if (!Case.bCacheFirst)
+        {
+            TestTrue(TEXT("cache entry follows the exit"), Send(TEXT("{\"type\":\"cache_enter\"}")));
+        }
+        TestTrue(TEXT("the whole batch reaches intake before Update"), PollUntil([&]()
+        {
+            return Source->GetQueuedControlMessageCount() == 2 && Source->GetPendingCacheCommandCount() == 1
+                && Source->GetReceivedTimeControlOrder() == ReceivedBefore + 3;
+        }));
+        Pump();
+        TestTrue(TEXT("only a valid earlier exit lets the cache enter"), Source->GetCacheSessionState()
+            == (bCacheAccepted ? EMtoUCacheState::Entered : EMtoUCacheState::Idle));
+        TestTrue(TEXT("the time authority follows the received order"), MtoUGetTimeControlView().Authority
+            == (bCacheAccepted ? EMtoUTimeAuthority::Cache
+                : bValidLeave ? EMtoUTimeAuthority::Maya : EMtoUTimeAuthority::Sequence));
+        TestEqual(TEXT("invalid exits keep linkage active"),
+            MtoUGetLinkageView().Mode, FString(bValidLeave ? TEXT("realtime") : TEXT("linkage")));
+        if (!bCacheAccepted)
+        {
+            TestTrue(TEXT("a competing cache request is reported"), Reader.Next(*Client, TEXT("error"), Payload, Pump));
+        }
+        if (MtoUGetTimeControlView().bTakeoverHeld)
+        {
+            TestTrue(TEXT("each case returns its remaining writers"),
+                MtoURequestLinkageLeave(TEXT("end"), Revision + 2, Error));
+        }
+        TestFalse(TEXT("each case leaves no writer borrowed"), MtoUGetTimeControlView().bTakeoverHeld);
+        Pump();
+        TestTrue(TEXT("the connection can still clear its cache"), Send(FString::Printf(
+            TEXT("{\"type\":\"cache_clear\",\"clear_id\":%d}"), ClearId++)));
+        TestTrue(TEXT("the clear reply forms an ordered reply barrier"),
+            Reader.Next(*Client, TEXT("cache_cleared"), Payload, Pump));
+        if (bCacheAccepted)
+        {
+            for (int32 Index = RepliesBefore; Index < Reader.OtherPayloads.Num(); ++Index)
+            {
+                TSharedPtr<FJsonObject> Reply;
+                if (JsonObjectFromBytes(Reader.OtherPayloads[Index], Reply))
+                {
+                    TestFalse(TEXT("valid leave then cache is never refused"),
+                        Reply->GetStringField(TEXT("type")) == TEXT("error"));
+                }
+            }
+        }
+        TestTrue(TEXT("clearing leaves the cache idle"), Source->GetCacheSessionState() == EMtoUCacheState::Idle);
+        Revision += 3;
+    }
+
+    // Editor validation must follow queued peer transitions, without a guard
+    // recursively entering a second takeover or forgetting consumed leaves.
+    const int32 TakesBefore = Hooks.TakeOverCalls;
+    const uint64 BeforePeerEntry = Source->GetReceivedTimeControlOrder();
+    TestTrue(TEXT("Maya queues entry before the editor click"), Send(FString::Printf(TEXT(
+        "{\"type\":\"mode\",\"session_id\":1,\"mode_revision\":%d,\"mode\":\"linkage\","
+        "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"\"}"), Revision)));
+    TestTrue(TEXT("the peer entry is completely received"), PollUntil([&]()
+    {
+        return Source->GetReceivedTimeControlOrder() == BeforePeerEntry + 1;
+    }));
+    TestFalse(TEXT("editor revalidates after the queued peer entry"), MtoURequestLinkageEnter(Revision, Error));
+    TestEqual(TEXT("only the peer entry borrowed writers"), Hooks.TakeOverCalls, TakesBefore + 1);
+    const uint64 BeforePeerExit = Source->GetReceivedTimeControlOrder();
+    TestTrue(TEXT("Maya queues exit followed by cache"), Send(FString::Printf(TEXT(
+        "{\"type\":\"leave_linkage\",\"session_id\":1,\"mode_revision\":%d,\"target\":\"realtime\",\"detail\":\"\"}"),
+        Revision + 1)) && Send(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("the peer exit and cache are completely received"), PollUntil([&]()
+    {
+        return Source->GetReceivedTimeControlOrder() == BeforePeerExit + 2;
+    }));
+    TestFalse(TEXT("the editor observes the cache acquired after exit"), MtoURequestLinkageEnter(Revision + 2, Error));
+    TestEqual(TEXT("the editor refusal still names cache ownership"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("the consumed leave waits for the mirror update"), Source->GetPendingLeaveCount(), 1);
+    Pump();
+    TestEqual(TEXT("Update accounts for the leave consumed by editor entry"), Source->GetPendingLeaveCount(), 0);
+    TestTrue(TEXT("ending the preview returns the retained writer"), MtoURequestLinkageLeave(TEXT("end"), Revision + 3, Error));
 
     MtoUSetLinkageHooks(FMtoULinkageHooks());
     MtoUSetActiveSource(PreviousSource);
