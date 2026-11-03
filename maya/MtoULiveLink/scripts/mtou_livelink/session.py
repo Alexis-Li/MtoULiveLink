@@ -17,6 +17,7 @@ from .config import (
     CACHED_MODE,
     CHARACTER_OBJECT_ID,
     DEFAULT_PLAYBACK_CAP,
+    ERROR_CLOSE_WINDOW_SECONDS,
     LINKAGE_MODE,
     REALTIME_MODE,
     SECONDARY_OBJECT_ID,
@@ -95,9 +96,9 @@ def route_reply(reply, time_control, on_statement=None, note_reason=None):
     other error goes to ``on_statement`` to be reported, except the ``CACHE_``
     codes the protocol ignores without an identity, and ``note_reason`` keeps
     it unless ``on_statement`` returned False (routine scheduling). Whether the
-    connection ends is Unreal's decision: when it closes the socket, the noted
-    error is the reason. Returns False for a message the connection does not
-    accept.
+    connection ends is Unreal's decision: when it closes the socket right
+    after the noted error, that error is the reason. Returns False for a
+    message the connection does not accept.
     """
     kind = reply.get("type")
     if kind == "error":
@@ -181,9 +182,10 @@ class SenderWorker(threading.Thread):
         # Routes every post-ready Unreal message on this thread; False for a
         # message the connection does not accept, which ends it.
         self._on_reply = on_reply
-        # The last Unreal error reported on this connection: the reason shown
-        # when Unreal then closes it.
+        # The Unreal error received last, with the time it arrived: the
+        # reason shown when Unreal closes the connection right after it.
         self._reason = None
+        self._reason_at = None
 
     def submit(self, frame_message):
         with self._lock:
@@ -264,6 +266,17 @@ class SenderWorker(threading.Thread):
         """Keep ``diagnostic`` as the reason if Unreal closes the connection next."""
         with self._lock:
             self._reason = dict(diagnostic)
+            self._reason_at = time.monotonic()
+
+    def _close_reason(self):
+        """The noted error when Unreal closed right after it, else None."""
+        with self._lock:
+            reason, noted_at = self._reason, self._reason_at
+        if reason is None or noted_at is None:
+            return None
+        if time.monotonic() - noted_at > ERROR_CLOSE_WINDOW_SECONDS:
+            return None
+        return reason
 
     def _set_status(self, state, detail, warning=None, diagnostic=None):
         with self._lock:
@@ -487,6 +500,9 @@ class SenderWorker(threading.Thread):
                         self._set_status(
                             "error", diagnostic["summary"], diagnostic=diagnostic)
                         return
+                    with self._lock:
+                        # Only the message Unreal sent last explains its close.
+                        self._reason = None
                     if self._on_reply is not None and self._on_reply(reply):
                         continue
                     diagnostic = make_diagnostic(
@@ -496,8 +512,7 @@ class SenderWorker(threading.Thread):
                     return
         except Exception as exc:
             if not self._stop_event.is_set():
-                with self._lock:
-                    reason = self._reason
+                reason = self._close_reason()
                 if isinstance(exc, (ValueError, UnicodeError, json.JSONDecodeError)):
                     code = "INVALID_MESSAGE"
                 else:

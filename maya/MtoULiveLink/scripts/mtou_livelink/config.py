@@ -80,6 +80,11 @@ UPLOAD_CHUNK_FRAMES = 64
 # itself has no real-time deadline and is never paced by this value.
 UPLOAD_READY_TIMEOUT_SECONDS = 60.0
 
+# Unreal closes the connection right after the error that ends it. A close
+# later than this after Maya received that error, or after any other message,
+# is not explained by it.
+ERROR_CLOSE_WINDOW_SECONDS = 2.0
+
 REALTIME_MODE = "realtime"
 
 CACHED_MODE = "cached"

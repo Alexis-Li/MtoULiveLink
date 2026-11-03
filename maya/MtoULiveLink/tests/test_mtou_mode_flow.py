@@ -22,6 +22,7 @@ SCRIPTS = pathlib.Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from mtou_livelink import cache as mtou_cache
 from mtou_livelink import config as mtou_config
 from mtou_livelink import controller as mtou_controller
 from mtou_livelink import protocol as mtou_protocol
@@ -512,6 +513,27 @@ class UnrealErrorTests(ConnectionHarness):
         self.use_every_mode()
         self.assert_reported_once_and_ended()
 
+    def assert_a_later_close_has_its_own_reason(self):
+        self.socket.hang_up()
+        self.wait_until(lambda: (self.fire_timers() or self.controller._session is None),
+                        "the connection to end")
+        self.assertEqual(["INVALID_MESSAGE", "STREAM_INTERRUPTED"],
+                         [error["code"] for error in self.errors])
+        self.assertEqual("STREAM_INTERRUPTED", self.controller._last_diagnostic["code"])
+
+    def test_a_close_after_other_messages_is_not_blamed_on_the_error(self):
+        self.assert_reported_once_and_kept()
+        self.socket.push(REFERENCE_OFFER)
+        self.wait_until(lambda: self.controller.reference_offer() is not None,
+                        "the message after the error")
+        self.assert_a_later_close_has_its_own_reason()
+
+    def test_a_close_long_after_the_error_is_not_blamed_on_it(self):
+        self.assert_reported_once_and_kept()
+        # Unreal closes after the error that ends a connection at once.
+        with mock.patch.object(mtou_session, "ERROR_CLOSE_WINDOW_SECONDS", -1.0):
+            self.assert_a_later_close_has_its_own_reason()
+
     def test_a_cache_error_without_an_identity_is_ignored(self):
         self.socket.push({"type": "error", "code": "CACHE_METADATA_INVALID",
                           "message": "stale clear", "details": "clear_id 1"})
@@ -520,6 +542,75 @@ class UnrealErrorTests(ConnectionHarness):
                         "the message after the error")
         self.assertEqual([], self.errors)
         self.assertTrue(self.session.is_ready)
+
+
+class UploadTimeoutTests(ConnectionHarness):
+    """Unreal never accepts an upload while the connection stays open."""
+
+    def setUp(self):
+        super(UploadTimeoutTests, self).setUp()
+        self.status = []
+        show = self.controller._set_connected
+        patcher = mock.patch.object(
+            self.controller, "_set_connected",
+            lambda connected, status: (self.status.append(status),
+                                       show(connected, status)))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_upload_fails_and_realtime_resumes_on_the_same_connection(self):
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        mark = self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+        cached = self.controller._cached_playback
+        control = self.session.time_control
+        upload = mock.Mock()
+        # What CacheUpload.advance returns once Unreal's Ready deadline passed.
+        with mock.patch.object(mtou_cache, "UPLOAD_READY_TIMEOUT_SECONDS", -1.0):
+            real = mtou_cache.CacheUpload(lambda message: None, lambda: True)
+            real._end_sent = True
+            upload.advance.return_value = real.advance()
+        cached._phase = "uploading"
+        cached._upload = upload
+
+        cached._poll()
+        self.flush()
+
+        self.wait_for_sent(mark, ["cache_clear", "frame"], "the clear and the live pose")
+        self.assertEqual(mtou_config.REALTIME_MODE, control.state)
+        self.assertIs(self.session, self.controller._session)
+        self.assertTrue(self.session.is_ready)
+        self.assertEqual("upload_failed", cached._phase)
+        # The panel stays connected and names the failure in its status line.
+        self.assertEqual(mtou_cache.CachedPlayback.REALTIME, cached.view.state)
+        self.assertEqual("CACHED_UPLOAD_TIMEOUT", self.controller._last_diagnostic["code"])
+        self.assertTrue(self.controller._session_ready())
+        self.assertIn("未在时限内确认", self.status[-1])
+        self.wait_until(lambda: not control.cache_holds_connection(),
+                        "Unreal to confirm the clear")
+
+    def test_a_send_failure_on_a_usable_connection_does_not_say_it_ended(self):
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        mark = self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+        cached = self.controller._cached_playback
+        upload = mock.Mock()
+        upload.advance.return_value = mtou_cache.CacheUploadResult(
+            False, mtou_cache.CacheUpload.TRANSPORT,
+            mtou_session.StreamingSessionError(
+                "STREAM_INTERRUPTED", "the cached queue refused a frame"))
+        cached._phase = "uploading"
+        cached._upload = upload
+
+        cached._poll()
+        self.flush()
+
+        self.wait_for_sent(mark, ["cache_clear", "frame"], "the clear and the live pose")
+        self.assertEqual(mtou_config.REALTIME_MODE, self.session.time_control.state)
+        self.assertTrue(self.controller._session_ready())
+        self.assertEqual("CACHED_UPLOAD_INTERRUPTED",
+                         self.controller._last_diagnostic["code"])
+        self.assertNotIn("中断", self.status[-1])
 
 
 class DisconnectReasonTests(ConnectionHarness):
