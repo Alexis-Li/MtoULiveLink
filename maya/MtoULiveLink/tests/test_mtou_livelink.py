@@ -3619,8 +3619,8 @@ class CacheUploadTests(unittest.TestCase):
             now[0] = armed + 0.5
             outcome = upload.advance()
             self.assertFalse(outcome.processed)
-            self.assertEqual(mtou_cache.CacheUpload.TRANSPORT, outcome.action)
-            self.assertEqual("STREAM_INTERRUPTED", outcome.detail["code"])
+            self.assertEqual(mtou_cache.CacheUpload.FAILED, outcome.action)
+            self.assertEqual("CACHED_UPLOAD_FAILED", outcome.detail["code"])
 
     def test_open_failure_is_corrupt(self):
         class BadCache(self._FakeCache):

@@ -678,9 +678,12 @@ class CacheUpload(object):
                 and self._is_drained() and self._deadline is None):
             self._deadline = time.time() + UPLOAD_READY_TIMEOUT_SECONDS
         if self._deadline is not None and time.time() > self._deadline:
-            return CacheUploadResult(False, self.TRANSPORT, make_diagnostic(
-                "STREAM_INTERRUPTED",
-                "Timed out waiting for Unreal to accept the uploaded cache."))
+            # Unreal has not answered, but the connection may still be open:
+            # the upload fails and the connection is not blamed.
+            return CacheUploadResult(False, self.FAILED, make_diagnostic(
+                "CACHED_UPLOAD_FAILED",
+                "Timed out waiting for Unreal to accept the uploaded cache.",
+                solution="已返回实时预览；请再次点击缓存播放上传。"))
         if self._declaring:
             return self._pump_declaration()
         return self._pump_frames()
@@ -1894,12 +1897,19 @@ class CachedPlayback(object):
                 "The streaming connection ended during capture."),
                 transport_lost=True)
             return
-        self._remove_playback_poller()
-        self._discard_upload()
-        self._phase = "transport_failed"
         diagnostic = error if isinstance(error, dict) else make_diagnostic(
             "STREAM_INTERRUPTED", str(getattr(error, "message", error)),
             details=str(getattr(error, "details", error)))
+        session = self._streaming_session
+        if session is not None and session.is_ready:
+            # The connection is still usable, so it is not what failed: end
+            # the upload and give time back to realtime instead of holding the
+            # lease behind a view that says the connection is gone.
+            self._fail_upload(diagnostic)
+            return
+        self._remove_playback_poller()
+        self._discard_upload()
+        self._phase = "transport_failed"
         self._publish(diagnostic=diagnostic)
         self._end_with_connection()
 
