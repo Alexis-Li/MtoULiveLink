@@ -334,6 +334,7 @@ public:
 private:
 #if WITH_DEV_AUTOMATION_TESTS
     friend class FMtoUSessionIsolationTestAccess;
+    friend class FMtoUControlBudgetTestAccess;
     // Editor integration coverage for explicit refresh during a session.
     friend class FMtoURefreshEndsSessionTestAccess;
 #endif
@@ -359,6 +360,25 @@ private:
     // restored, its subject leaves the stream and the new set is confirmed.
     void RemoveSecondaryObjectOnGameThread(const FString& ObjectId, int32 SetRevision);
     void SendLinkageControlPacketOnGameThread(TArray<uint8> Packet, bool bControl);
+    // The two control budgets are shared between the worker and the game
+    // thread, so every change is one atomic step. A slot is taken before its
+    // message becomes visible to the consumer and returned exactly once by
+    // the consumer that takes the message, whether it acts on it or drops it;
+    // the count then never dips below the messages still queued.
+    //
+    // Reply direction (game thread produces, worker consumes). Takes a slot
+    // unless the frozen control queue is full.
+    bool TryAdmitOutgoingControl();
+    // Takes a slot beyond the limit: the refusal that ends a connection that
+    // overflowed needs a slot of its own to be delivered.
+    void AdmitOutgoingControl();
+    void ReleaseOutgoingControl();
+    // Intake direction (worker produces, game thread consumes). The worker is
+    // the only producer, so a check made before the slot is taken can only
+    // become more permissive: the consumer never adds.
+    bool CanAdmitLinkageControl() const;
+    void AdmitLinkageControl();
+    void ReleaseLinkageControl();
     bool ApplyPoseGroupOnGameThread(
         const FMtoUPoseGroupMessage& Group,
         TArray<FMtoUAppliedComponent>& OutComponents,
@@ -470,8 +490,9 @@ private:
     // Undelivered linkage control messages in the intake direction; a peer
     // that never lets the game thread drain is refused instead of backlogged.
     TAtomic<int32> QueuedLinkageControls{0};
-    // Undelivered control messages in the reply direction, decremented by the
-    // worker as each packet reaches the socket.
+    // Undelivered control messages in the reply direction, returned by the
+    // worker as it takes each reply: sent, or dropped because its session
+    // ended.
     TAtomic<int32> QueuedOutgoingControls{0};
     // Peaks of both control queues for the scheduling measurement.
     TAtomic<int32> OutgoingControlPeak{0};

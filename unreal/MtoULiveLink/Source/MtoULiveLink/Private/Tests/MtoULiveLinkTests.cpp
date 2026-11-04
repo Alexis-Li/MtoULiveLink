@@ -177,6 +177,36 @@ public:
     }
 };
 
+// The two control budgets of the linkage transport: the replies waiting for
+// the worker and the intake messages waiting for the game thread.
+class FMtoUControlBudgetTestAccess
+{
+public:
+    // The path every control reply of the editor takes.
+    static void SendControl(FMtoULiveLinkSource& Source, const TArray<uint8>& Packet)
+    {
+        Source.SendLinkageControlPacketOnGameThread(Packet, true);
+    }
+    static int32 OutgoingQueued(const FMtoULiveLinkSource& Source)
+    {
+        return Source.QueuedOutgoingControls.Load();
+    }
+    static void SetOutgoingQueued(FMtoULiveLinkSource& Source, int32 Count)
+    {
+        Source.QueuedOutgoingControls.Store(Count);
+    }
+    static int32 IncomingQueued(const FMtoULiveLinkSource& Source)
+    {
+        return Source.QueuedLinkageControls.Load();
+    }
+    static bool TryAdmitOutgoing(FMtoULiveLinkSource& Source) { return Source.TryAdmitOutgoingControl(); }
+    static void AdmitOutgoing(FMtoULiveLinkSource& Source) { Source.AdmitOutgoingControl(); }
+    static void ReleaseOutgoing(FMtoULiveLinkSource& Source) { Source.ReleaseOutgoingControl(); }
+    static bool CanAdmitIncoming(const FMtoULiveLinkSource& Source) { return Source.CanAdmitLinkageControl(); }
+    static void AdmitIncoming(FMtoULiveLinkSource& Source) { Source.AdmitLinkageControl(); }
+    static void ReleaseIncoming(FMtoULiveLinkSource& Source) { Source.ReleaseLinkageControl(); }
+};
+
 namespace
 {
 FString FromUtf8(const TArray<uint8>& Bytes);
@@ -12536,6 +12566,323 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
 
     Source->StopListener();
     LiveLinkClient.RemoveSource(Source);
+    return true;
+}
+
+namespace
+{
+/** A listening source on a free loopback port, for the control budget tests. */
+struct FMtoUControlBudgetFixture
+{
+    ISocketSubsystem* SocketSubsystem = nullptr;
+    ILiveLinkClient* LiveLinkClient = nullptr;
+    uint16 Port = 0;
+    TSharedPtr<FMtoULiveLinkSource> Source;
+
+    bool Open(FAutomationTestBase& Test)
+    {
+        SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+        Test.TestNotNull(TEXT("platform socket subsystem is available"), SocketSubsystem);
+        IModularFeatures& Features = IModularFeatures::Get();
+        if (!SocketSubsystem || !Features.IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName))
+        {
+            return false;
+        }
+        LiveLinkClient = &Features.GetModularFeature<ILiveLinkClient>(ILiveLinkClient::ModularFeatureName);
+        FSocket* Reservation = BindLoopback(*SocketSubsystem, 0, true);
+        Test.TestNotNull(TEXT("test port can be reserved"), Reservation);
+        if (!Reservation)
+        {
+            return false;
+        }
+        TSharedRef<FInternetAddr> ReservedAddress = SocketSubsystem->CreateInternetAddr();
+        Reservation->GetAddress(*ReservedAddress);
+        Port = static_cast<uint16>(ReservedAddress->GetPort());
+        DestroySocket(*SocketSubsystem, Reservation);
+
+        Source = MakeShared<FMtoULiveLinkSource>(Port);
+        Test.TestTrue(TEXT("Live Link source receives a guid"),
+            LiveLinkClient->AddSource(Source.ToSharedRef()).IsValid());
+        return Test.TestTrue(TEXT("source reaches listening state"),
+            WaitForStatus(Source.ToSharedRef(), TEXT("Listening on")));
+    }
+
+    void Close()
+    {
+        if (Source.IsValid())
+        {
+            Source->StopListener();
+            LiveLinkClient->RemoveSource(Source.ToSharedRef());
+            Source.Reset();
+        }
+    }
+};
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUControlBudgetEndedSessionsTest,
+    "MtoULiveLink.Linkage.ControlBudget.EndedSessions",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUControlBudgetEndedSessionsTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUControlBudgetFixture Fixture;
+    if (!Fixture.Open(*this))
+    {
+        Fixture.Close();
+        return false;
+    }
+    FMtoULiveLinkSource& Source = *Fixture.Source;
+    const auto Pump = [&]() { Source.Update(); };
+    const TArray<uint8> StalePacket = FMtoUProtocol::EncodeError(
+        TEXT("INVALID_MESSAGE"), TEXT("a reply of an ended session"));
+    const TArray<uint8> Hello = LinkageHelloPacket();
+
+    // Each connection greets and ends; the editor keeps answering after the
+    // disconnect, and those replies carry the ended session. Together they are
+    // more than the control queue holds.
+    constexpr int32 Cycles = 4;
+    constexpr int32 StalePerCycle = 6;
+    static_assert(Cycles * StalePerCycle > FMtoUProtocol::MaxControlQueue,
+        "the ended sessions must outnumber the frozen control queue");
+    for (int32 Cycle = 0; Cycle < Cycles; ++Cycle)
+    {
+        const FString Label = FString::Printf(TEXT("connection %d"), Cycle + 1);
+        FSocket* Client = ConnectLoopback(*Fixture.SocketSubsystem, Fixture.Port);
+        TestNotNull(*(Label + TEXT(" connects")), Client);
+        if (!Client)
+        {
+            break;
+        }
+        FMtoULinkageReplyReader Reader;
+        TestTrue(*(Label + TEXT(" greeting is sent")),
+            SendBytes(*Client, Hello.GetData(), Hello.Num()));
+        TArray<uint8> Payload;
+        TestTrue(*(Label + TEXT(" greeting is answered")),
+            Reader.Next(*Client, TEXT("hello_ack"), Payload, Pump));
+        TestFalse(*(Label + TEXT(" is not refused")), Reader.OtherTypes.Contains(TEXT("error")));
+        // The replies of the earlier sessions were dropped when this
+        // connection began, and the dropped ones returned their slots.
+        TestEqual(*(Label + TEXT(" holds no slot of an ended session")),
+            FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+
+        DestroySocket(*Fixture.SocketSubsystem, Client);
+        TestTrue(*(Label + TEXT(" ends")), PollUntil([&]()
+        {
+            Source.Update();
+            return Source.GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+        }));
+        for (int32 Reply = 0; Reply < StalePerCycle; ++Reply)
+        {
+            FMtoUControlBudgetTestAccess::SendControl(Source, StalePacket);
+        }
+        Source.Update();
+        // Nobody is connected, so the replies wait for the next connection.
+        TestEqual(*(Label + TEXT(" leaves its replies queued")),
+            FMtoUControlBudgetTestAccess::OutgoingQueued(Source), StalePerCycle);
+    }
+
+    // Past the frozen limit in total, a new connection still completes its
+    // greeting and is not refused.
+    FSocket* Last = ConnectLoopback(*Fixture.SocketSubsystem, Fixture.Port);
+    TestNotNull(TEXT("the last connection connects"), Last);
+    if (Last)
+    {
+        FMtoULinkageReplyReader Reader;
+        TestTrue(TEXT("the last greeting is sent"), SendBytes(*Last, Hello.GetData(), Hello.Num()));
+        TArray<uint8> Payload;
+        TestTrue(TEXT("the last greeting is answered"),
+            Reader.Next(*Last, TEXT("hello_ack"), Payload, Pump));
+        TArray<uint8> Refusal;
+        TestFalse(TEXT("nothing refuses the last connection"),
+            Reader.Next(*Last, TEXT("error"), Refusal, Pump, 0.2));
+        TestEqual(TEXT("the ended sessions left no slot behind"),
+            FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+        DestroySocket(*Fixture.SocketSubsystem, Last);
+    }
+    Fixture.Close();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUControlBudgetOverflowTest,
+    "MtoULiveLink.Linkage.ControlBudget.CurrentSessionOverflow",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUControlBudgetOverflowTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUControlBudgetFixture Fixture;
+    if (!Fixture.Open(*this))
+    {
+        Fixture.Close();
+        return false;
+    }
+    FMtoULiveLinkSource& Source = *Fixture.Source;
+    const auto Pump = [&]() { Source.Update(); };
+    FSocket* Client = ConnectLoopback(*Fixture.SocketSubsystem, Fixture.Port);
+    TestNotNull(TEXT("Maya client connects"), Client);
+    if (!Client)
+    {
+        Fixture.Close();
+        return false;
+    }
+    FMtoULinkageReplyReader Reader;
+    const TArray<uint8> Hello = LinkageHelloPacket();
+    TestTrue(TEXT("greeting is sent"), SendBytes(*Client, Hello.GetData(), Hello.Num()));
+    TArray<uint8> Payload;
+    TestTrue(TEXT("greeting is answered"), Reader.Next(*Client, TEXT("hello_ack"), Payload, Pump));
+    TestEqual(TEXT("the answered greeting holds no slot"),
+        FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+
+    // The peer has left the whole frozen queue undelivered. The slots are
+    // taken by hand because the worker would otherwise drain real replies
+    // faster than the test could fill the queue.
+    FMtoUControlBudgetTestAccess::SetOutgoingQueued(Source, FMtoUProtocol::MaxControlQueue);
+    const TArray<uint8> Reply = FMtoUProtocol::EncodeError(
+        TEXT("INVALID_MESSAGE"), TEXT("one control reply too many"));
+    FMtoUControlBudgetTestAccess::SendControl(Source, Reply);
+
+    TArray<uint8> Refusal;
+    TestTrue(TEXT("the overflow of the current session is refused"),
+        Reader.Next(*Client, TEXT("error"), Refusal, Pump));
+    TSharedPtr<FJsonObject> Error;
+    if (JsonObjectFromBytes(Refusal, Error))
+    {
+        TestEqual(TEXT("the refusal names the frozen code"),
+            Error->GetStringField(TEXT("code")), FString(TEXT("RESOURCE_LIMIT")));
+    }
+    TestTrue(TEXT("the refused connection is closed"), WaitForClose(*Client));
+    // The refusal gave its own slot back; the slots taken by hand remain.
+    TestEqual(TEXT("the refusal returned its slot"),
+        FMtoUControlBudgetTestAccess::OutgoingQueued(Source), FMtoUProtocol::MaxControlQueue);
+    TestTrue(TEXT("the limit is not relaxed"),
+        !FMtoUControlBudgetTestAccess::TryAdmitOutgoing(Source));
+    FMtoUControlBudgetTestAccess::SetOutgoingQueued(Source, 0);
+
+    DestroySocket(*Fixture.SocketSubsystem, Client);
+    Fixture.Close();
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUControlBudgetConcurrencyTest,
+    "MtoULiveLink.Linkage.ControlBudget.Concurrency",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUControlBudgetConcurrencyTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUControlBudgetFixture Fixture;
+    if (!Fixture.Open(*this))
+    {
+        Fixture.Close();
+        return false;
+    }
+    FMtoULiveLinkSource& Source = *Fixture.Source;
+    constexpr int32 Threads = 4;
+    constexpr int32 PerThread = 50000;
+    const auto RunAll = [](TFunctionRef<void(int32)> Body)
+    {
+        TArray<TFuture<void>> Running;
+        for (int32 Index = 0; Index < Threads; ++Index)
+        {
+            Running.Add(Async(EAsyncExecution::Thread, [&Body, Index]() { Body(Index); }));
+        }
+        for (TFuture<void>& Future : Running)
+        {
+            Future.Wait();
+        }
+    };
+
+    // Producers and consumers of the intake budget run at the same time, as
+    // the worker and the game thread do; no increment or decrement is lost.
+    // Every thread takes and returns the same number of slots, so the count
+    // can only end at zero if all of them landed.
+    RunAll([&](int32)
+    {
+        for (int32 Round = 0; Round < PerThread; ++Round)
+        {
+            FMtoUControlBudgetTestAccess::AdmitIncoming(Source);
+            FMtoUControlBudgetTestAccess::ReleaseIncoming(Source);
+        }
+    });
+    TestEqual(TEXT("the intake budget loses no update"),
+        FMtoUControlBudgetTestAccess::IncomingQueued(Source), 0);
+    RunAll([&](int32)
+    {
+        for (int32 Round = 0; Round < PerThread; ++Round)
+        {
+            FMtoUControlBudgetTestAccess::AdmitOutgoing(Source);
+        }
+    });
+    TestEqual(TEXT("every reply slot taken is counted"),
+        FMtoUControlBudgetTestAccess::OutgoingQueued(Source), Threads * PerThread);
+    RunAll([&](int32)
+    {
+        for (int32 Round = 0; Round < PerThread; ++Round)
+        {
+            FMtoUControlBudgetTestAccess::ReleaseOutgoing(Source);
+        }
+    });
+    TestEqual(TEXT("every reply slot returned is counted"),
+        FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+    RunAll([&](int32 Index)
+    {
+        for (int32 Round = 0; Round < PerThread; ++Round)
+        {
+            if (Index % 2 == 0)
+            {
+                FMtoUControlBudgetTestAccess::AdmitIncoming(Source);
+            }
+            else
+            {
+                FMtoUControlBudgetTestAccess::ReleaseIncoming(Source);
+            }
+        }
+    });
+    TestEqual(TEXT("concurrent intake and consumption lose no update"),
+        FMtoUControlBudgetTestAccess::IncomingQueued(Source), 0);
+
+    // Producers racing for the reply budget never pass the frozen limit.
+    // Each slot a producer wins is handed to the consumer as a token, which
+    // returns the slot; what was admitted equals what was returned.
+    TAtomic<int32> Tokens{0};
+    TAtomic<int32> Admitted{0};
+    TAtomic<int32> Returned{0};
+    TAtomic<int32> Producers{Threads};
+    Source.ResetControlQueuePeaks();
+    TFuture<void> Consumer = Async(EAsyncExecution::Thread, [&]()
+    {
+        while (Producers.Load() > 0 || Tokens.Load() > 0)
+        {
+            int32 Token = Tokens.Load();
+            if (Token > 0 && Tokens.CompareExchange(Token, Token - 1))
+            {
+                FMtoUControlBudgetTestAccess::ReleaseOutgoing(Source);
+                Returned.IncrementExchange();
+            }
+        }
+    });
+    RunAll([&](int32)
+    {
+        for (int32 Round = 0; Round < PerThread; ++Round)
+        {
+            if (FMtoUControlBudgetTestAccess::TryAdmitOutgoing(Source))
+            {
+                Admitted.IncrementExchange();
+                Tokens.IncrementExchange();
+            }
+        }
+        Producers.DecrementExchange();
+    });
+    Consumer.Wait();
+    int32 OutgoingPeak = 0;
+    int32 IncomingPeak = 0;
+    Source.GetControlQueuePeaks(OutgoingPeak, IncomingPeak);
+    TestEqual(TEXT("every admitted reply slot was returned"), Returned.Load(), Admitted.Load());
+    TestEqual(TEXT("no reply slot is left"), FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+    TestTrue(TEXT("the reply queue never passed the frozen limit"),
+        OutgoingPeak >= 1 && OutgoingPeak <= FMtoUProtocol::MaxControlQueue);
+    Fixture.Close();
     return true;
 }
 

@@ -522,12 +522,12 @@ void FMtoULiveLinkSource::Update()
                 FMtoUPendingHello Hello;
                 while (PendingHellos.Dequeue(Hello))
                 {
-                    QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+                    ReleaseLinkageControl();
                 }
                 FMtoUPendingLinkageControl Control;
                 while (PendingLinkageControls.Dequeue(Control))
                 {
-                    QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+                    ReleaseLinkageControl();
                     if (Control.Kind == FMtoUPendingLinkageControl::EKind::LeaveLinkage)
                     {
                         ++LeavesTaken;
@@ -536,7 +536,7 @@ void FMtoULiveLinkSource::Update()
                 FMtoUPendingPoseGroup Group;
                 while (PendingPoseGroups.Dequeue(Group))
                 {
-                    QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+                    ReleaseLinkageControl();
                 }
             }
             // The transient cache and its upload/play identity history are
@@ -936,11 +936,7 @@ uint32 FMtoULiveLinkSource::Run()
 
     // Bounded linkage intake: the frozen control queue is enforced before a
     // message gains a queue slot, so a peer that never lets the game thread
-    // drain is refused instead of backlogged.
-    auto CanAdmitLinkageControl = [&]() -> bool
-    {
-        return QueuedLinkageControls.Load() < FMtoUProtocol::MaxControlQueue;
-    };
+    // drain is refused instead of backlogged (CanAdmitLinkageControl).
 
     // Bounded admission enqueue: the producer never blocks the loop for
     // control messages, and a pre-admitted frame is always accepted. Only a
@@ -1131,15 +1127,18 @@ uint32 FMtoULiveLinkSource::Run()
             FMtoUOutgoing Reply;
             while (OutgoingReplies.Dequeue(Reply))
             {
+                // The slot is returned once the reply leaves the queue, sent
+                // or not: a reply of an ended session is dropped here and
+                // must not keep a slot of the frozen control queue.
+                if (Reply.bControl)
+                {
+                    ReleaseOutgoingControl();
+                }
                 if (Reply.SessionId != ActiveSession)
                 {
                     continue;
                 }
                 bDidWork = true;
-                if (Reply.bControl)
-                {
-                    QueuedOutgoingControls.Store(FMath::Max(0, QueuedOutgoingControls.Load() - 1));
-                }
                 if (!SendPacket(*ClientSocket, Reply.Packet, bStopRequested))
                 {
                     MarkDisconnected();
@@ -1246,9 +1245,8 @@ uint32 FMtoULiveLinkSource::Run()
                             FMtoUPendingHello Pending;
                             Pending.SessionId = ActiveSession;
                             Pending.Message = MoveTemp(Hello);
+                            AdmitLinkageControl();
                             PendingHellos.Enqueue(MoveTemp(Pending));
-                            QueuedLinkageControls.Store(QueuedLinkageControls.Load() + 1);
-                            NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.Load());
                             continue;
                         }
                         FMtoUInitMessage Init;
@@ -1396,9 +1394,8 @@ uint32 FMtoULiveLinkSource::Run()
                         }
                         const uint64 Order = ++NextTimeControlOrder;
                         Control.IntakeOrder = Order;
+                        AdmitLinkageControl();
                         PendingLinkageControls.Enqueue(MoveTemp(Control));
-                        QueuedLinkageControls.Store(QueuedLinkageControls.Load() + 1);
-                        NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.Load());
                         PublishedTimeControlOrder.Store(Order);
                         continue;
                     }
@@ -1431,9 +1428,8 @@ uint32 FMtoULiveLinkSource::Run()
                             SendErrorAndDisconnect(GroupErrorCode, GroupError);
                             break;
                         }
+                        AdmitLinkageControl();
                         PendingPoseGroups.Enqueue(MoveTemp(Pending));
-                        QueuedLinkageControls.Store(QueuedLinkageControls.Load() + 1);
-                        NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.Load());
                         continue;
                     }
                     if (MessageType == TEXT("cache_frame"))
@@ -2052,7 +2048,7 @@ void FMtoULiveLinkSource::DrainLinkageHellosOnGameThread()
     FMtoUPendingHello Hello;
     while (PendingHellos.Dequeue(Hello))
     {
-        QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+        ReleaseLinkageControl();
         if (Hello.SessionId == 0 || !IsSessionActiveOnGameThread(Hello.SessionId))
         {
             continue;
@@ -2095,7 +2091,7 @@ int32 FMtoULiveLinkSource::DrainTimeControlsOnGameThread()
             FMtoUPendingLinkageControl Control;
             if (PendingLinkageControls.Dequeue(Control))
             {
-                QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+                ReleaseLinkageControl();
                 if (Control.Kind == FMtoUPendingLinkageControl::EKind::LeaveLinkage)
                 {
                     ++LeavesDrained;
@@ -2172,7 +2168,7 @@ void FMtoULiveLinkSource::IntakeLinkageGroupsOnGameThread()
     FMtoUPendingPoseGroup Pending;
     while (PendingPoseGroups.Dequeue(Pending))
     {
-        QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+        ReleaseLinkageControl();
         if (Pending.SessionId == 0 || !IsSessionActiveOnGameThread(Pending.SessionId))
         {
             continue;
@@ -2326,8 +2322,7 @@ void FMtoULiveLinkSource::RemoveSecondaryObjectOnGameThread(
         Residual.IsEmpty() ? FString(TEXT("the removed target was restored")) : Residual);
     Reply.RemovedObjectId = ObjectId;
     Reply.bControl = true;
-    QueuedOutgoingControls.Store(QueuedOutgoingControls.Load() + 1);
-    NoteQueuePeak(OutgoingControlPeak, QueuedOutgoingControls.Load());
+    AdmitOutgoingControl();
     OutgoingReplies.Enqueue(MoveTemp(Reply));
     if (!Residual.IsEmpty())
     {
@@ -3216,6 +3211,45 @@ void FMtoULiveLinkSource::HoldLinkageDisplaysOnGameThread(bool bHold)
     }
 }
 
+bool FMtoULiveLinkSource::TryAdmitOutgoingControl()
+{
+    int32 Queued = QueuedOutgoingControls.Load();
+    while (Queued < FMtoUProtocol::MaxControlQueue)
+    {
+        if (QueuedOutgoingControls.CompareExchange(Queued, Queued + 1))
+        {
+            NoteQueuePeak(OutgoingControlPeak, Queued + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+void FMtoULiveLinkSource::AdmitOutgoingControl()
+{
+    NoteQueuePeak(OutgoingControlPeak, QueuedOutgoingControls.IncrementExchange() + 1);
+}
+
+void FMtoULiveLinkSource::ReleaseOutgoingControl()
+{
+    QueuedOutgoingControls.DecrementExchange();
+}
+
+bool FMtoULiveLinkSource::CanAdmitLinkageControl() const
+{
+    return QueuedLinkageControls.Load() < FMtoUProtocol::MaxControlQueue;
+}
+
+void FMtoULiveLinkSource::AdmitLinkageControl()
+{
+    NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.IncrementExchange() + 1);
+}
+
+void FMtoULiveLinkSource::ReleaseLinkageControl()
+{
+    QueuedLinkageControls.DecrementExchange();
+}
+
 void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Packet, bool bControl)
 {
     check(IsInGameThread());
@@ -3226,7 +3260,7 @@ void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Pac
     const int32 SessionId = LinkageSession.GetSessionId() != 0
         ? LinkageSession.GetSessionId()
         : static_cast<int32>(GameThreadSession);
-    if (bControl && QueuedOutgoingControls.Load() >= FMtoUProtocol::MaxControlQueue)
+    if (bControl && !TryAdmitOutgoingControl())
     {
         // Overflow is an error, never an unbounded backlog.
         SetStatus(TEXT("Linkage control queue overflow."));
@@ -3238,15 +3272,9 @@ void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Pac
             FString::Printf(TEXT("%d undelivered control messages"), FMtoUProtocol::MaxControlQueue));
         Reply.bCloseAfter = true;
         Reply.bControl = true;
-        QueuedOutgoingControls.Store(QueuedOutgoingControls.Load() + 1);
-        NoteQueuePeak(OutgoingControlPeak, QueuedOutgoingControls.Load());
+        AdmitOutgoingControl();
         OutgoingReplies.Enqueue(MoveTemp(Reply));
         return;
-    }
-    if (bControl)
-    {
-        QueuedOutgoingControls.Store(QueuedOutgoingControls.Load() + 1);
-        NoteQueuePeak(OutgoingControlPeak, QueuedOutgoingControls.Load());
     }
     FMtoUOutgoing Reply;
     Reply.SessionId = SessionId;
