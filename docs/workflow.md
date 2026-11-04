@@ -279,8 +279,8 @@ issue. These actions include the following unless explicitly narrowed:
    has reached its owner, including helpers, drafts, payloads and results.
    Validate resolved paths before deletion and preserve shared or uncertain files.
    Opt-in acceptance fixtures in `<fixtures>` are shared inputs: keep them, and
-   make sure their placeholder templates, listed in
-   [testing.md](testing.md#acceptance-fixtures), are current.
+   make sure their placeholder templates in `docs/acceptance-fixtures/`
+   ([testing.md](testing.md#acceptance-fixtures)) are current.
 5. **Verify.** Paginate comments to confirm that one status comment remains;
    check evidence links, publication state and scratch after the last helper run.
    Report any incomplete cleanup with its reason and next action. Close without
@@ -304,3 +304,20 @@ published references. Issue closure and a product release are separate actions.
 Local checks and repository instructions guide publication. Server enforcement
 depends on GitHub settings; current CI does not validate acceptance claims or
 authorize merges.
+
+## Release
+
+- The product version (Maya `__version__`, Unreal `VersionName` and
+  `Version`; currently 1.0.0) changes only in the release change, which sets
+  it to the version being released for both components together. Other PRs
+  leave it alone.
+- The protocol version both hosts negotiate changes with the wire contract;
+  the PR that changes it adds an `Upgrade notes` entry under `Unreleased`
+  instead of bumping the product version.
+- The release change sets the version with
+  `python tools/version.py <version> --apply`. `python tools/package.py --apply`
+  writes `MtoULiveLink-<version>.zip` (Maya) and
+  `MtoULiveLink-<version>-UE<engine>.zip` (Unreal) to `releases/`; verify an
+  installation from those archives before publishing.
+- Release tags use `v<version>`. A collection updates its pin only to a
+  published, reviewed commit; it does not track the moving tip.

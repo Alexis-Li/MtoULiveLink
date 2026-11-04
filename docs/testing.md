@@ -199,13 +199,18 @@ empty preference directory.
 ## Acceptance fixtures
 
 The JSON files the `MtoUOptIn.*` tests take, the Maya preference templates and
-their README are shared test inputs kept in `<fixtures>`, not scratch. A
-fixture can have a placeholder template in this repository, with every machine
-path and private asset replaced by a placeholder, to be updated when the
-fixture's fields change. The only template kept today is
-[the C02 multi-subject fixture](history/issue-54-review-evidence/real-c02-fixture.template.json),
-described in the [issue 54 acceptance record](history/issue-54-multi-subject-acceptance.md);
-templates for the other fixtures are not yet written.
+their README are shared test inputs kept in `<fixtures>`, not scratch.
+
+Fixtures are built when a change needs host acceptance that no existing
+fixture covers, not ahead of need. That change builds the fixture the case
+requires in `<fixtures>` and adds its placeholder template, with every machine
+path and private asset replaced by a placeholder, under
+`docs/acceptance-fixtures/` (created with the first template). A template is
+updated when its fixture's fields change.
+
+The [issue 54 acceptance record](history/issue-54-multi-subject-acceptance.md)
+keeps the C02 fixture template of the removed multi-subject prototype with its
+evidence; it is history, not a maintained template.
 
 ## mayapy and peers
 

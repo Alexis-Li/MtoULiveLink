@@ -62,10 +62,11 @@ pinned commit. Do not change sibling projects.
 - Opt-in acceptance fixtures (the JSON files the `MtoUOptIn.*` tests take, the
   Maya preference templates and their README) are shared test inputs, not
   scratch. Keep them in `<fixtures>`, the parent's `.tmp/mtou-acceptance-fixtures/`,
-  and never remove them with task scratch or on issue closure. Where a
-  fixture has a placeholder template (every machine path and private asset
-  replaced by a placeholder; [docs/testing.md](docs/testing.md#acceptance-fixtures)
-  lists them), update it when the fixture's fields change.
+  and never remove them with task scratch or on issue closure. Fixtures are
+  built when a change needs host acceptance that no existing fixture covers,
+  not ahead of need: build the one the case requires in `<fixtures>` and add
+  its placeholder template under `docs/acceptance-fixtures/` in the same
+  change. Update a template when its fixture's fields change.
 
 Commands run from the repository root. `<mayapy>` is Maya 2024
 `bin/mayapy.exe`; also use Maya 2022.4 when a change touches Maya API usage or
@@ -124,20 +125,8 @@ and procedures. Run only those the task affects.
 
 ## Versions
 
-The product version (Maya `__version__`, Unreal `VersionName` and `Version`)
-changes only in the release change, which sets it to the version being
-released for both components together; other PRs leave it alone. It is
-1.0.0.
-The protocol version both hosts negotiate still changes with the wire
-contract; the PR that changes it adds an `Upgrade notes` entry under
-`Unreleased` instead of bumping the product version.
-
-The release change sets the version with `python tools/version.py <version>
---apply`. `python tools/package.py --apply` writes `MtoULiveLink-<version>.zip`
-(Maya) and `MtoULiveLink-<version>-UE<engine>.zip` (Unreal) to `releases/`;
-verify an installation from those archives before publishing. Release tags use
-`v<version>`. A collection updates its pin only to a published, reviewed
-commit; it does not track the moving tip.
+Only the release change sets the product version; other PRs never change it.
+See [Release](docs/workflow.md#release).
 
 ## Changelog
 
