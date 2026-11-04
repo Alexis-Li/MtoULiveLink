@@ -30,6 +30,9 @@ repository's issues.
 - When Unreal does not confirm a cache upload within 60 seconds, Maya returns to **实时**
   on the same connection and says so, instead of disconnecting; switch to **缓存播放**
   and click **捕获并上传** to try again. (#9)
+- After linkage sessions have ended several times, Unreal no longer refuses a new Maya
+  connection with a full control queue (`RESOURCE_LIMIT`), so restarting the editor is
+  not needed to connect again. (#11)
 
 ## 1.0.0 - 2026-10-30
 
