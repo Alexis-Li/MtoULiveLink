@@ -33,6 +33,8 @@ repository's issues.
 - After linkage sessions have ended several times, Unreal no longer refuses a new Maya
   connection with a full control queue (`RESOURCE_LIMIT`), so restarting the editor is
   not needed to connect again. (#11)
+- Leaving linkage no longer reports a "恢复残留" for a locked output-resolution attribute
+  that linkage never changed; only an attribute that could not be put back is listed. (#12)
 
 ## 1.0.0 - 2026-10-30
 
