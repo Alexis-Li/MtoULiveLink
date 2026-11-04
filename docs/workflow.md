@@ -16,8 +16,12 @@ new changelog entries use this repository's tracker.
 | Change | State before implementing | Record and decision |
 | --- | --- | --- |
 | Local fix or small feature; interfaces and state ownership unchanged | Real call chain, change location, directly affected behavior and how it will be verified | A short note in the task; no separate document |
-| Cross-module feature, or a change to a public interface or to state/resource ownership | Reused capabilities, module responsibilities, data/state flow, failure recovery, compatibility and behavior that must be preserved | The existing issue or design record; one review of the key design before implementing |
+| Cross-module feature, or a change to a public interface or to state/resource ownership | Reused capabilities, module responsibilities, data/state flow, failure recovery, compatibility and behavior that must be preserved; how each acceptance criterion will be shown at the lowest test level that exercises it, and any driver scenario, fixture field or test hook to add so an agent can run it unattended | The existing issue or design record; one review of the key design before implementing |
 | The approach depends on an unproven host capability | The open question that decides the approach | Settle it with a minimal prototype or experiment before building further |
+
+A design whose behavior can be checked only by a person at the hosts is
+reworked until a test can observe it, or the acceptance names that check as
+manual with its reason.
 
 Make ordinary implementation choices without asking. Changing agreed product
 semantics or an important trade-off is the user's decision. Cite an existing
