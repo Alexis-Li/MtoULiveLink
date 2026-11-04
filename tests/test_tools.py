@@ -31,6 +31,20 @@ class ProjectToolTests(unittest.TestCase):
     def test_project_is_valid(self):
         self.assertEqual([], validate_project.validate()["errors"])
 
+    def test_file_scan_skips_nested_checkouts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            worktree = root / ".claude" / "worktrees" / "review"
+            (worktree / "docs").mkdir(parents=True)
+            (worktree / ".git").write_text("gitdir: <repository>/.git/worktrees/review\n")
+            (worktree / "docs" / "notes.md").write_text("checkout copy\n")
+            (root / ".claude" / "notes.md").write_text("local note\n")
+            scanned = {
+                path.relative_to(root).as_posix()
+                for path in validate_project._iter_files(root)
+            }
+        self.assertEqual({".claude/notes.md"}, scanned)
+
     def test_unreal_conformance_data_is_current(self):
         self.assertEqual([], _load_generator("generate_mtou_unreal_corpus").check_generated())
 

@@ -171,9 +171,12 @@ def _path_policy_text(relative_path: str, text: str) -> str:
 
 def _iter_files(root: Path):
     for current, directories, files in os.walk(root):
+        # A nested checkout (a linked worktree such as .claude/worktrees/<name>)
+        # holds another commit's files and is validated from its own root.
         directories[:] = [name for name in directories
                           if name not in {".git", ".tmp", ".worktrees"}
-                          and name.lower() not in FORBIDDEN_DIRS]
+                          and name.lower() not in FORBIDDEN_DIRS
+                          and not (Path(current) / name / ".git").exists()]
         for name in files:
             yield Path(current) / name
 
