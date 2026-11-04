@@ -381,23 +381,21 @@ class Controller(object):
         self._update_linkage_status()
         self._script_jobs.append(cmds.scriptJob(
             event=["timeUnitChanged", self._on_time_unit_changed], parent=WINDOW_NAME))
-        self._script_jobs.append(cmds.scriptJob(
-            event=["SceneOpened", self._on_scene_change], parent=WINDOW_NAME))
-        self._script_jobs.append(cmds.scriptJob(
-            event=["NewSceneOpened", self._on_scene_change], parent=WINDOW_NAME))
         if om is not None:
             try:
                 self._maya_exit_callback = om.MSceneMessage.addCallback(
                     om.MSceneMessage.kMayaExiting, self._on_maya_exiting)
             except (AttributeError, RuntimeError, TypeError):
                 self._maya_exit_callback = None
-            for message in ("kBeforeNew", "kBeforeOpen"):
-                try:
-                    self._scene_replace_callbacks.append(om.MSceneMessage.addCallback(
-                        getattr(om.MSceneMessage, message),
-                        self._on_before_scene_replaced))
-                except (AttributeError, RuntimeError, TypeError):
-                    pass
+        # The before-replace callback releases the role while the old scene is
+        # open. The after-open scriptJob runs from the idle queue, possibly
+        # after a new role is set and connected, so it is only the fallback
+        # for a replacement the callback could not be registered for.
+        for message, event in (("kBeforeNew", "NewSceneOpened"),
+                               ("kBeforeOpen", "SceneOpened")):
+            if not self._add_scene_replace_callback(message):
+                self._script_jobs.append(cmds.scriptJob(
+                    event=[event, self._on_scene_change], parent=WINDOW_NAME))
         cmds.showWindow(WINDOW_NAME)
         self._apply_panel_theme(
             (workflow_card, connection_card, scene_card, preview_card,
@@ -1367,12 +1365,22 @@ class Controller(object):
         """Release the session while the scene it captured is still open.
 
         After the replacement the old snapshot would write its time, gate and
-        camera into the new scene, so the restore happens here; the after-open
-        handler then finds nothing left to restore.
+        camera into the new scene, so the restore happens here. No after-open
+        handler follows: a late one would clear the role set in the new scene.
         """
         del unused
         self._clear_role()
         self._clear_secondary()
+
+    def _add_scene_replace_callback(self, message):
+        if om is None:
+            return False
+        try:
+            self._scene_replace_callbacks.append(om.MSceneMessage.addCallback(
+                getattr(om.MSceneMessage, message), self._on_before_scene_replaced))
+        except (AttributeError, RuntimeError, TypeError):
+            return False
+        return True
 
     def _remove_scene_replace_callbacks(self):
         callbacks, self._scene_replace_callbacks = self._scene_replace_callbacks, []

@@ -51,8 +51,9 @@ their registration, the tool's scriptJobs, Python threads, open sockets,
 ``new_scene``, ``reopen_scene`` (the fixture scene again, then connect),
 ``lock_link_camera`` (``target`` ``unlock`` unlocks and deletes it), ``quit``. Each runs the handler
 of the panel control it names. The result file always carries the latest
-linkage status, the object set and the panel's workflow, mode, cache state and
-status line; ``ack`` names the last finished command.
+linkage status, the object set and the panel's workflow, mode, cache state,
+status line and ``controls`` (whether 进入联动, 返回实时, 结束预览, 实时预览, 缓存播放
+and 捕获并上传 are enabled); ``ack`` names the last finished command.
 
 ``prefs`` describes the preferences this Maya started with, read before Maya
 can save them again: the ``pluginPrefs.mel`` in this Maya's own preference
@@ -447,6 +448,10 @@ class _CountingOpenMaya(object):
         return value
 
 
+# Every scriptJob id a panel of this process registered, closed panels' too.
+TOOL_SCRIPT_JOBS = set()
+
+
 def install_callback_census():
     from mtou_livelink import mayaapi
     if not isinstance(mayaapi.om, _CountingOpenMaya):
@@ -461,8 +466,10 @@ def census():
     families = {}
     for family in LIVE_CALLBACKS.values():
         families[family] = families.get(family, 0) + 1
-    jobs = [job for job in cmds.scriptJob(listJobs=True) or []
-            if "mtou" in job.lower() or "Controller" in job]
+    # Only the jobs a panel registered: Maya's own come and go on their own.
+    if CONTROLLER is not None:
+        TOOL_SCRIPT_JOBS.update(CONTROLLER._script_jobs)
+    jobs = [job for job in TOOL_SCRIPT_JOBS if cmds.scriptJob(exists=job)]
     sockets = 0
     for item in gc.get_objects():
         try:
@@ -502,6 +509,8 @@ def open_panel():
     """The public entry again, then the role and the connection."""
     global CONTROLLER
     import MtoULiveLink
+    if CONTROLLER is not None:
+        TOOL_SCRIPT_JOBS.update(CONTROLLER._script_jobs)
     CONTROLLER = MtoULiveLink.run()
     connect_role()
 
@@ -509,9 +518,8 @@ def open_panel():
 def reopen_scene():
     """Open the fixture scene again, as an artist does, and connect."""
     open_scene()
-    # The panel's SceneOpened scriptJob runs on the idle queue; Maya runs it
-    # before a person can click 设置角色, so the driver does too.
-    cmds.flushIdleQueue()
+    # No flush: whatever Maya still runs from the idle queue about the open
+    # must leave the role set below alone, as it must for a quick artist.
     if "start_frame" in FIXTURE:
         cmds.currentTime(float(FIXTURE["start_frame"]), update=True)
     connect_role()
@@ -661,6 +669,21 @@ def reference_nodes(fragment):
     return nodes
 
 
+PANEL_CONTROLS = (("enter", "_enter_linkage_button"), ("leave_realtime", "_leave_linkage_button"),
+                  ("leave_end", "_end_linkage_button"), ("realtime", "_realtime_mode_button"),
+                  ("cached", "_cached_mode_button"), ("capture", "_capture_button"))
+
+
+def control_states():
+    """Whether each panel button a person can click is enabled; None while the panel is closed."""
+    states = {}
+    for name, attribute in PANEL_CONTROLS:
+        control = getattr(CONTROLLER, attribute, None)
+        states[name] = (bool(cmds.control(control, query=True, enable=True))
+                        if control and cmds.control(control, exists=True) else None)
+    return states
+
+
 def tick():
     try:
         status = CONTROLLER.linkage_status()
@@ -684,7 +707,8 @@ def tick():
             # The panel's controls are gone while it is closed (close_panel).
             "status": cmds.text(CONTROLLER._status_text, query=True, label=True)
             if CONTROLLER._status_text and cmds.text(CONTROLLER._status_text, exists=True)
-            else None}
+            else None,
+            "controls": control_states()}
         try:
             command = json.loads(Path(FIXTURE["command"]).read_text(encoding="utf-8-sig"))
         except (OSError, ValueError):

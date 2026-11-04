@@ -91,8 +91,44 @@ and windows) over:
   gate, cameras and undo;
 - a restore that cannot delete the tool camera.
 
-The counts are compared with the warmed-up baseline. Put `close_world` last so
+The counts are compared with the warmed-up baseline, and the role and the
+pairing must stay set from one step to the next. Put `close_world` last so
 the final census after it is compared with the disconnected one.
+
+**Time control (`time_control{cache_range, live_frames?, paths?}`).** One
+object only. Each path is a list of clicks: `maya_enter`, `ue_enter`
+(Unreal's Details), `leave_realtime`, `leave_end`, `cached` (缓存播放, then
+捕获并上传 `cache_range`) and `realtime`. Without `paths` it runs D-1 (进入联动,
+返回实时, 缓存播放, 结束预览, 实时预览), D-2 (Unreal's 进入联动 during Cached
+Playback) and a path through every mode control while 返回实时 keeps the
+takeover. For every click the test:
+
+- waits until the control is offered or withheld as the state allows, and
+  fails if it never is. The rules are the
+  [Mode transitions](../protocol/README.md#mode-transitions) table and the
+  panel's own: no mode switch during linkage, 实时预览 stays offered in real
+  time, and 缓存播放 is offered while 返回实时 keeps the takeover;
+- clicks an offered control and waits until both hosts reach the state it
+  leads to: who drives time, the takeover, the panel mode and the writers. An
+  Unreal 进入联动 that is withheld is still requested, as a stale click would
+  be, and must be refused with `CACHE_NOT_CLEARED` during a cache or
+  `MODE_CONFLICT` during linkage, without borrowing a writer;
+- then checks the preview: while Maya drives time, Unreal's Live Link subject
+  must show Maya's pose at the next `live_frames` frame (default
+  `oracle_frames`), and that pose must differ beyond `world_tolerance_cm` from
+  the one the subject showed before, so a frozen preview cannot pass; linkage
+  must converge on that sequence frame; a cache must be Ready with the
+  captured range.
+
+`cache_range` must be two increasing frames, and there must be at least two
+live frames, each different from the next; a malformed `time_control` fails
+the test with the reason. Every path must end in real time without a
+takeover.
+
+A new order of the existing clicks only needs a `paths` entry; a new control
+or state extends the step vocabulary and the availability rules in
+`MtoULinkageProductionTests.cpp`. This scenario replaces a manual D-1/D-2
+reproduction in the real GUI.
 
 ## Test editor ports
 
