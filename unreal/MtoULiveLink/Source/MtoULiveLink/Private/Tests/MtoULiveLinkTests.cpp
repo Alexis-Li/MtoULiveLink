@@ -14223,6 +14223,45 @@ bool FMtoULinkageCacheEntryGuardTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("the refused Maya entry leaves the cache as it was"),
         Source->GetCacheSessionState() == EMtoUCacheState::Entered);
 
+    // ---- an upload in flight ------------------------------------------------
+    // The first of two frames has arrived and Unreal is receiving: an entry is
+    // refused before any writer is borrowed and the same upload still ends Ready.
+    FString Transforms;
+    for (int32 Index = 0; Index < Skeleton->GetNum(); ++Index)
+    {
+        Transforms += Index > 0 ? TEXT(",[0,0,0,0,0,0,1,1,1,1]") : TEXT("[0,0,0,0,0,0,1,1,1,1]");
+    }
+    const FString UploadFrame = FString::Printf(
+        TEXT("{\"type\":\"cache_frame\",\"index\":@I@,\"transforms\":[%s],\"curves\":[]}"), *Transforms);
+    const FString FirstFrame = UploadFrame.Replace(TEXT("@I@"), TEXT("0"));
+    const FString SecondFrame = UploadFrame.Replace(TEXT("@I@"), TEXT("1"));
+    const int32 UploadBytes = Packet(FirstFrame).Num() + Packet(SecondFrame).Num();
+    TestTrue(TEXT("the upload begins with its first frame"), Send(FString::Printf(
+        TEXT("{\"type\":\"cache_begin\",\"upload_id\":1,\"revision\":9,\"fps\":30,\"start_frame\":1,"
+             "\"end_frame\":2,\"frame_count\":2,\"payload_size\":%d}"), UploadBytes)) && Send(FirstFrame));
+    TestTrue(TEXT("Unreal is receiving the upload"), PollUntil([&]()
+    {
+        Pump();
+        return Source->GetCacheSessionState() == EMtoUCacheState::Receiving;
+    }));
+    TestFalse(TEXT("an editor entry is refused while the upload is in flight"),
+        MtoURequestLinkageEnter(1, Error));
+    TestEqual(TEXT("the refusal during the upload names the contract code"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("CACHE_NOT_CLEARED")));
+    TestEqual(TEXT("no writer was taken over during the upload"), Hooks.TakeOverCalls, 0);
+    TestTrue(TEXT("the refused entry leaves the upload receiving"),
+        Source->GetCacheSessionState() == EMtoUCacheState::Receiving);
+    TestTrue(TEXT("the rest of the upload is sent"), Send(SecondFrame) && Send(TEXT("{\"type\":\"cache_end\"}")));
+    TestTrue(TEXT("the upload that saw the refused entry still ends Ready"),
+        Reader.Next(*Client, TEXT("cache_ready"), Payload, Pump));
+    TSharedPtr<FJsonObject> Ready;
+    if (JsonObjectFromBytes(Payload, Ready))
+    {
+        TestEqual(TEXT("Ready names the upload"), static_cast<int32>(Ready->GetNumberField(TEXT("upload_id"))), 1);
+        TestEqual(TEXT("Ready holds every frame"), static_cast<int32>(Ready->GetNumberField(TEXT("frame_count"))), 2);
+    }
+    TestTrue(TEXT("the cache is Ready"), Source->GetCacheSessionState() == EMtoUCacheState::Ready);
+
     // ---- an editor entry applies a clear that is still waiting ------------
     TestTrue(TEXT("Maya clears the cache"),
         Send(TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}")));

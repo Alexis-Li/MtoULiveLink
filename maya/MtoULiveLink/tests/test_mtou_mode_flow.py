@@ -33,6 +33,7 @@ SESSION_ID = 4242
 REVISION = 7
 BIND = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
 WAIT_SECONDS = 5.0
+ANSWER_SECONDS = 1.0
 
 
 class FakeScene(object):
@@ -282,6 +283,15 @@ class ConnectionHarness(unittest.TestCase):
             lambda: self.sent_after(count)[:len(expected)] == list(expected), what)
         return count + len(expected)
 
+    def answer_unreal_entry(self, mark):
+        """Unreal enters linkage; Maya's ``mode`` answer must follow at once."""
+        started = time.monotonic()
+        self.socket.push(mode_state(1))
+        self.wait_for_sent(mark, ["mode"], "Maya's answer to the entry")
+        # Unreal waits 5 s for the answer before it falls back (D-2); Maya
+        # answers on its next main-thread pass, far inside that.
+        self.assertLess(time.monotonic() - started, ANSWER_SECONDS)
+
     def mode(self, mode):
         self.controller._on_mode_changed(mode)
         self.flush()
@@ -433,8 +443,7 @@ class UnrealDuringCachedTests(ConnectionHarness):
         mark = self.enter_cached()
         view = self.controller._cached_playback.view
 
-        self.socket.push(mode_state(1))
-        self.wait_for_sent(mark, ["mode"], "Maya's answer to the entry")
+        self.answer_unreal_entry(mark)
 
         refusal = self.socket.sent[mark]
         self.assertEqual(("realtime", 1, "failed"),
@@ -486,8 +495,7 @@ class DuringUploadTests(ConnectionHarness):
     def test_an_unreal_entry_is_refused_at_once_and_the_upload_completes(self):
         mark = self.start_upload()
 
-        self.socket.push(mode_state(1))
-        self.wait_for_sent(mark, ["mode"], "Maya's answer to the entry")
+        self.answer_unreal_entry(mark)
 
         refusal = self.socket.sent[mark]
         self.assertEqual(("realtime", 1, "failed"),
