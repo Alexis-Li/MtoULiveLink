@@ -1113,6 +1113,44 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual([], host.restore_state(state))
         self.assertEqual((35.0, 4.0), self._camera_values(transform))
 
+    def test_linkage_restores_the_whole_gate_once_and_skips_a_locked_unchanged_plug(self):
+        # The camera adapter alone captures and restores the resolution gate:
+        # all four attributes return to their pre-linkage values, and a plug the
+        # user locked that still holds its value is not a residual.
+        import test_mtou_camera as payloads
+
+        gate_plugs = ("width", "height", "pixelAspect", "deviceAspectRatio")
+
+        def gate():
+            return tuple(round(cmds.getAttr("defaultResolution." + name), 6)
+                         for name in gate_plugs)
+
+        cmds.setAttr("defaultResolution.width", 1024)
+        cmds.setAttr("defaultResolution.height", 768)
+        cmds.setAttr("defaultResolution.pixelAspect", 1.1)
+        cmds.setAttr("defaultResolution.deviceAspectRatio", 1024 * 1.1 / 768)
+        before = gate()
+        self.addCleanup(lambda: cmds.objExists(mtou_config.LINK_CAMERA_NAME)
+                        and cmds.delete(mtou_config.LINK_CAMERA_NAME))
+        time_payload = {"display_frame": 12.0, "playback_range": {"start": 0, "end": 100},
+                        "display_rate": {"numerator": 24, "denominator": 1}}
+        host = self._linkage_host()
+        state = host.capture_state()
+        self.assertNotIn("gate", state)
+        host.apply_target(time_payload, payloads.camera_payload(),
+                          payloads.gate_payload())
+        self.assertNotEqual(before, gate())
+        self.assertEqual([], host.restore_state(state))
+        self.assertEqual(before, gate())
+
+        # Locked before entering and never written: restoring reports nothing.
+        host = self._linkage_host()
+        state = host.capture_state()
+        cmds.setAttr("defaultResolution.width", lock=True)
+        self.addCleanup(lambda: cmds.setAttr("defaultResolution.width", lock=False))
+        self.assertEqual([], host.restore_state(state))
+        self.assertEqual(before, gate())
+
     def _camera(self, name, focal, x):
         transform = cmds.createNode("transform", name=name)
         shape = cmds.createNode("camera", name=name + "Shape", parent=transform)

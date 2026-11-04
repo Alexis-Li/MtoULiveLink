@@ -1491,7 +1491,12 @@ class LinkCamera(object):
         for panel, camera in (state or {}).get("panels", {}).items():
             residual.extend(self._restore_panel(panel, camera))
 
-        for plug, value in sorted((state or {}).get("resolution", {}).items()):
+        captured_gate = (state or {}).get("resolution", {})
+        # In the order apply writes them, so the derived device aspect lands last.
+        for plug in RESOLUTION_PLUGS:
+            if plug not in captured_gate:
+                continue
+            value = captured_gate[plug]
             try:
                 if _holds(plug, value):
                     # Never written, or already back: a locked plug that holds
