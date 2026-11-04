@@ -456,6 +456,76 @@ class UnrealDuringCachedTests(ConnectionHarness):
         self.assertEqual("tx-1", self.controller.reference_offer()["transfer_id"])
 
 
+class DuringUploadTests(ConnectionHarness):
+    """A real capture whose upload Unreal has received but not yet made Ready."""
+
+    CAPTURE_RANGE = (1, 3)
+
+    def start_upload(self):
+        """Capture three frames and send them; return the mark after cache_end."""
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+        cached = self.controller._cached_playback
+        cached.capture(24.0, capture_range=self.CAPTURE_RANGE)
+        self.wait_until(lambda: (self.fire_timers() or "cache_end" in self.socket.types()),
+                        "the upload to reach cache_end")
+        self.assertEqual("uploading", cached._phase)
+        return len(self.socket.types())
+
+    def make_ready(self):
+        cached = self.controller._cached_playback
+        first, last = self.CAPTURE_RANGE
+        self.socket.push({"type": "cache_ready", "upload_id": cached._active_upload_id,
+                          "revision": REVISION, "frame_count": last - first + 1})
+        self.wait_until(lambda: (self.fire_timers() or cached._phase == "ready_to_play"),
+                        "the upload to become Ready")
+
+    # AC-04: an Unreal entry during the upload is refused at once and the
+    # upload completes undisturbed.
+    def test_an_unreal_entry_is_refused_at_once_and_the_upload_completes(self):
+        mark = self.start_upload()
+
+        self.socket.push(mode_state(1))
+        self.wait_for_sent(mark, ["mode"], "Maya's answer to the entry")
+
+        refusal = self.socket.sent[mark]
+        self.assertEqual(("realtime", 1, "failed"),
+                         (refusal["mode"], refusal["mode_revision"], refusal["transition"]))
+        self.assertEqual("CACHE_NOT_CLEARED", self.errors[-1]["code"])
+        self.assertIsNone(self.controller._linkage)
+        self.assertEqual("uploading", self.controller._cached_playback._phase)
+        self.make_ready()
+        self.assertEqual(mtou_config.CACHED_MODE, self.session.time_control.state)
+        self.assertNotIn("cache_clear", self.sent_after(mark))
+        self.assertEqual(["CACHE_NOT_CLEARED"], [error["code"] for error in self.errors])
+
+    # AC-08: a connection lost during the upload ends with its real reason.
+    def test_a_connection_lost_during_the_upload_ends_with_its_reason(self):
+        self.start_upload()
+
+        self.socket.hang_up()
+        self.wait_until(lambda: (self.fire_timers() or self.controller._session is None),
+                        "the connection to end")
+
+        self.assertEqual(["STREAM_INTERRUPTED"], [error["code"] for error in self.errors])
+        # The panel's status line names the same reason, not the upload.
+        self.assertEqual("STREAM_INTERRUPTED", self.controller._last_diagnostic["code"])
+
+    def test_an_unreal_error_that_closes_during_the_upload_names_that_error(self):
+        self.start_upload()
+
+        self.socket.push({"type": "error", "code": "PAIRING_REQUIRED",
+                          "message": "the target was removed",
+                          "details": "Binding Actor deleted"})
+        self.socket.hang_up()
+        self.wait_until(lambda: (self.fire_timers() or self.controller._session is None),
+                        "the connection to end")
+
+        self.assertEqual([("PAIRING_REQUIRED", "Binding Actor deleted")],
+                         [(error["code"], error["details"]) for error in self.errors])
+
+
 class UnrealErrorTests(ConnectionHarness):
     """An Unreal error has one outcome whatever modes the connection used."""
 
