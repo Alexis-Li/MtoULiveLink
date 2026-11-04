@@ -613,6 +613,63 @@ class UploadTimeoutTests(ConnectionHarness):
         self.assertNotIn("中断", self.status[-1])
 
 
+class MayaDisconnectTests(ConnectionHarness):
+    """Maya ends the connection itself (断开连接, closing the panel, a new scene)."""
+
+    # What Unreal answers a cache command during linkage: no identity.
+    REFUSAL = {"type": "error", "code": "MODE_CONFLICT",
+               "message": "Unreal owns the sequence time while linkage is active.",
+               "details": "Unreal owns the sequence time while linkage is active."}
+
+    def queued_by(self, action):
+        """The message types ``action`` hands the sender."""
+        queued = []
+        worker = self.session._worker
+        for name in ("submit_ordered", "submit_control"):
+            original = getattr(worker, name)
+
+            def spy(message, original=original):
+                queued.append(message.get("type"))
+                return original(message)
+            patcher = mock.patch.object(worker, name, spy)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        action()
+        return queued
+
+    def enter_linkage(self):
+        start = len(self.socket.types())
+        self.controller.enter_linkage()
+        self.wait_for_sent(start, ["mode"], "the linkage entry")
+
+    def test_during_linkage_no_cache_clear_is_sent(self):
+        self.enter_linkage()
+        self.assertNotIn("cache_clear", self.queued_by(self.controller.disconnect))
+        self.assertEqual([], self.errors)
+
+    def test_during_cached_playback_the_cache_is_cleared(self):
+        start = len(self.socket.types())
+        self.mode(mtou_config.CACHED_MODE)
+        self.wait_for_sent(start, ["cache_enter"], "the cached entry")
+        self.assertIn("cache_clear", self.queued_by(self.controller.disconnect))
+
+    def test_an_error_arriving_after_the_disconnect_is_not_shown(self):
+        self.enter_linkage()
+        route = self.session._route_reply
+        self.controller.disconnect()
+        route(dict(self.REFUSAL))
+        self.flush()
+        self.assertEqual([], self.errors)
+
+    def test_an_error_reported_just_before_the_disconnect_is_not_shown(self):
+        self.enter_linkage()
+        self.session._route_reply(dict(self.REFUSAL))
+        # The dialog waits for Maya's next main-thread pass; the panel closes first.
+        self.controller.disconnect()
+        self.flush()
+        self.assertEqual([], self.errors)
+
+
 class DisconnectReasonTests(ConnectionHarness):
     """A connection lost while sampling is paused ends with its real reason."""
 
