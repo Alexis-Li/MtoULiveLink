@@ -46,7 +46,8 @@ affects the approach, start implementing.
 
 - At the start, state briefly what behavior must be shown and the smallest
   check that shows it. Keep the project's required checks; add more only for
-  uncovered acceptance, an actual failure or evidenced regression risk.
+  uncovered acceptance, an actual failure or evidenced regression risk. The
+  opt-in host tests and their procedures are in [testing.md](testing.md).
 - Do not add tests or defensive branches (retries, compatibility layers,
   settings, fallbacks) for cases with no real trigger. Keep targeted checks for
   reachable paths that could delete assets or damage a project.
@@ -278,7 +279,8 @@ issue. These actions include the following unless explicitly narrowed:
    has reached its owner, including helpers, drafts, payloads and results.
    Validate resolved paths before deletion and preserve shared or uncertain files.
    Opt-in acceptance fixtures in `<fixtures>` are shared inputs: keep them, and
-   make sure their placeholder templates in `docs/acceptance-fixtures/` are current.
+   make sure their placeholder templates, listed in
+   [testing.md](testing.md#acceptance-fixtures), are current.
 5. **Verify.** Paginate comments to confirm that one status comment remains;
    check evidence links, publication state and scratch after the last helper run.
    Report any incomplete cleanup with its reason and next action. Close without
