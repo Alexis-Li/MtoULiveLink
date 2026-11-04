@@ -3,14 +3,17 @@
 The default checks and their commands are in [AGENTS.md](../AGENTS.md). This
 document is the procedure for the opt-in tests and host checks that the default
 run leaves out: what each one covers, the options it needs, and how to read its
-result. The constraints that apply to every run (run only what a task affects,
-report a missing prerequisite, no unexpected dialogs, same-hash comparisons)
-stay in AGENTS.md; [workflow.md](workflow.md) defines how much verification a
-change needs.
+result. The constraints that apply to every run are in AGENTS.md: run only
+what a task affects, report a missing prerequisite, no unexpected Maya dialogs,
+`maya.app_dir_template` with same-hash throughput comparisons, the window check
+after panel lifecycle changes, and a separate port for a test editor beside a
+person's own. [workflow.md](workflow.md) defines how much verification a change
+needs.
 
 Paths are placeholders: `<Maya2024>` is a Maya 2024 install, `<project>` a
 UE 5.7 project that loads `unreal/`, `<scratch>` the task scratch directory and
-`<fixtures>` the shared acceptance fixtures.
+`<fixtures>` the shared acceptance fixtures and `<evidence>` the `evidence`
+directory a Maya GUI test's fixture names for its run records.
 
 ## Opt-in tests
 
@@ -76,9 +79,10 @@ after the first scenario's playback. For each delay the looping sequence plays
 barrier; then a pause and a jump must converge within 2 s.
 `sustained-<delay>ms.json` holds the scheduling record and percentiles.
 
-**Lifecycle (`lifecycle`, `lifecycle_check`).** With `lifecycle{cycles}` the
-scenarios count what Maya holds (OpenMaya callbacks at registration,
-scriptJobs, threads, sockets, MtoU nodes and windows) over:
+**Lifecycle (`lifecycle`, `lifecycle_check`).** The scenarios `lifecycle`
+(with `lifecycle{cycles}`) and `lifecycle_check` count what Maya holds
+(OpenMaya callbacks at registration, scriptJobs, threads, sockets, MtoU nodes
+and windows) over:
 
 - connect, linkage, 结束预览 and disconnect cycles;
 - a closed and reopened panel, and a replaced scene;
@@ -89,6 +93,12 @@ scriptJobs, threads, sockets, MtoU nodes and windows) over:
 
 The counts are compared with the warmed-up baseline. Put `close_world` last so
 the final census after it is compared with the disconnected one.
+
+## Test editor ports
+
+A test editor can run beside a person's own. `-MtoULiveLinkPort=<n>` moves the
+Unreal listener off 54321; the two Maya GUI tests pass it to the Maya they
+start, and `MTOU_LIVELINK_PORT` does the same for any other Maya.
 
 ## Maya GUI tests
 
@@ -148,12 +158,6 @@ set whatever `pluginPrefs.mel` says. Compare throughput only between runs with
 the same SHA-256. With `maya-default` the loaded count varies between runs
 because Maya is still autoloading while it plays.
 
-### Ports
-
-A test editor can run beside a person's own. `-MtoULiveLinkPort=<n>` moves the
-Unreal listener off 54321; the two Maya GUI tests pass it to the Maya they
-start, and `MTOU_LIVELINK_PORT` does the same for any other Maya.
-
 ## Maya GUI checks
 
 Both scripts run with a host Python, not `mayapy`, and start real Maya GUI
@@ -196,9 +200,9 @@ empty preference directory.
 
 The JSON files the `MtoUOptIn.*` tests take, the Maya preference templates and
 their README are shared test inputs kept in `<fixtures>`, not scratch. A
-fixture's fields are documented by a placeholder template in this repository,
-with every machine path and private asset replaced by a placeholder. The only
-template kept today is
+fixture can have a placeholder template in this repository, with every machine
+path and private asset replaced by a placeholder, to be updated when the
+fixture's fields change. The only template kept today is
 [the C02 multi-subject fixture](history/issue-54-review-evidence/real-c02-fixture.template.json),
 described in the [issue 54 acceptance record](history/issue-54-multi-subject-acceptance.md);
 templates for the other fixtures are not yet written.

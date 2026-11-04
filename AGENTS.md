@@ -62,11 +62,10 @@ pinned commit. Do not change sibling projects.
 - Opt-in acceptance fixtures (the JSON files the `MtoUOptIn.*` tests take, the
   Maya preference templates and their README) are shared test inputs, not
   scratch. Keep them in `<fixtures>`, the parent's `.tmp/mtou-acceptance-fixtures/`,
-  and never remove them with task scratch or on issue closure. A fixture's
-  fields are documented in a placeholder template in the repository, with
-  every machine path and private asset replaced by a placeholder
-  ([docs/testing.md](docs/testing.md#acceptance-fixtures) lists them); update
-  it when the fixture's fields change.
+  and never remove them with task scratch or on issue closure. Where a
+  fixture has a placeholder template (every machine path and private asset
+  replaced by a placeholder; [docs/testing.md](docs/testing.md#acceptance-fixtures)
+  lists them), update it when the fixture's fields change.
 
 Commands run from the repository root. `<mayapy>` is Maya 2024
 `bin/mayapy.exe`; also use Maya 2022.4 when a change touches Maya API usage or
@@ -97,17 +96,20 @@ and procedures. Run only those the task affects.
 
 - A test started without its required arguments fails and its error names them.
   A missing prerequisite (a real Maya, a fixture, a preference template) is
-  reported as missing; never skip the test and claim it passed.
+  reported as missing; never substitute a stand-in (such as an empty
+  preference directory), or skip the test and claim it passed.
 - The two Maya GUI tests (`MtoUOptIn.Editor.Linkage.ProductionSequence`,
   `MtoUOptIn.Editor.Workflow.GuiRegression`) fail on any Maya dialog the
   scenario did not expect. Add a new expected dialog to the test's per-stage
   list; do not skip it.
 - Give them `maya.app_dir_template`, not a reused `maya.app_dir`, and compare
-  throughput only between runs with the same preference SHA-256.
+  throughput only between runs with the same `pluginPrefs.mel` SHA-256 (recorded
+  in the test log).
 - After changing window or panel lifecycle, run `maya_gui_window_check.py`
   twice: with the default quit and with `--quit title-bar`.
 - A test editor running beside a person's own uses `-MtoULiveLinkPort=<n>`, so
-  it never takes 54321.
+  it never takes 54321; any other Maya used with that editor gets the same port
+  through `MTOU_LIVELINK_PORT`.
 
 ## Iteration
 
