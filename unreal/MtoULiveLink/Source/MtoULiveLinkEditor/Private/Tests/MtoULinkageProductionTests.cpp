@@ -7,6 +7,8 @@
 #include "MtoUSceneRefExport.h"
 #include "MtoUGuiAcceptance.h"
 #include "MtoULinkageEditor.h"
+#include "MtoUCachePlayback.h"
+#include "MtoULiveLinkActorDetails.h"
 #include "MtoULiveLinkActor.h"
 #include "MtoULiveLinkBinding.h"
 #include "MtoUCharacterComposition.h"
@@ -28,11 +30,15 @@
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "ILevelSequenceEditorToolkit.h"
+#include "ILiveLinkClient.h"
 #include "ISequencer.h"
 #include "SequencerSettings.h"
 #include "LevelSequence.h"
 #include "LevelSequenceEditorBlueprintLibrary.h"
 #include "LiveLinkInstance.h"
+#include "Features/IModularFeatures.h"
+#include "Roles/LiveLinkAnimationRole.h"
+#include "Roles/LiveLinkAnimationTypes.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
 #include "Misc/CoreDelegates.h"
@@ -460,6 +466,17 @@ private:
         FString Secondary;
         return MayaResult.IsValid() && MayaResult->TryGetObjectField(TEXT("objects"), Objects)
             && (*Objects)->TryGetStringField(TEXT("secondary"), Secondary) && !Secondary.IsEmpty();
+    }
+
+    /** Maya still has the main character and, when the fixture pairs one, the second object. */
+    bool MayaPairingKept() const
+    {
+        const TSharedPtr<FJsonObject>* Objects = nullptr;
+        FString Primary;
+        const bool bPaired = Fixture->GetObjectField(TEXT("maya"))->HasTypedField<EJson::Object>(TEXT("secondary"));
+        return MayaResult.IsValid() && MayaResult->TryGetObjectField(TEXT("objects"), Objects)
+            && (*Objects)->TryGetStringField(TEXT("primary"), Primary) && !Primary.IsEmpty()
+            && (!bPaired || MayaSetHasSecondary());
     }
 
     int32 NegotiatedObjects() const
@@ -1139,6 +1156,11 @@ private:
             AddLifecycle();
             return;
         }
+        if (Scenario == TEXT("time_control"))
+        {
+            AddTimeControl();
+            return;
+        }
         if (Scenario == TEXT("lifecycle_check"))
         {
             // After the Unreal exits before it: one more round, the same census.
@@ -1801,6 +1823,488 @@ private:
         });
     }
 
+    // ----------------------------------------------------------- time control
+
+    /** Who drives time, as the time-control contract describes it after each click. */
+    struct FTimeModel
+    {
+        enum class EOwner : uint8 { Maya, Sequence, Cache };
+        EOwner Owner = EOwner::Maya;
+        /** 返回实时 keeps Unreal's takeover until 结束预览. */
+        bool bTakeover = false;
+    };
+
+    /** Whether the contract offers a control in this state (ADR 0014). */
+    static bool TimeControlAvailable(const FTimeModel& Model, const FString& Action)
+    {
+        using EOwner = FTimeModel::EOwner;
+        if (Action == TEXT("maya_enter") || Action == TEXT("ue_enter") || Action == TEXT("cached"))
+        {
+            return Model.Owner == EOwner::Maya;
+        }
+        if (Action == TEXT("leave_realtime"))
+        {
+            return Model.Owner == EOwner::Sequence;
+        }
+        if (Action == TEXT("leave_end"))
+        {
+            return Model.Owner == EOwner::Sequence || Model.bTakeover;
+        }
+        // 实时预览 stays offered in real time and once a cache can be left.
+        return Model.Owner != EOwner::Sequence;
+    }
+
+    static FTimeModel TimeControlAfter(FTimeModel Model, const FString& Action)
+    {
+        using EOwner = FTimeModel::EOwner;
+        if (Action == TEXT("maya_enter") || Action == TEXT("ue_enter"))
+        {
+            Model.Owner = EOwner::Sequence;
+            Model.bTakeover = true;
+        }
+        else if (Action == TEXT("leave_realtime") || Action == TEXT("realtime"))
+        {
+            Model.Owner = EOwner::Maya;
+        }
+        else if (Action == TEXT("leave_end"))
+        {
+            Model.Owner = Model.Owner == EOwner::Sequence ? EOwner::Maya : Model.Owner;
+            Model.bTakeover = false;
+        }
+        else if (Action == TEXT("cached"))
+        {
+            Model.Owner = EOwner::Cache;
+        }
+        return Model;
+    }
+
+    static FString DescribeTimeModel(const FTimeModel& Model)
+    {
+        using EOwner = FTimeModel::EOwner;
+        return FString::Printf(TEXT("%s%s"),
+            Model.Owner == EOwner::Maya ? TEXT("realtime") : Model.Owner == EOwner::Sequence ? TEXT("linkage") : TEXT("cached"),
+            Model.bTakeover ? TEXT(" + takeover") : TEXT(""));
+    }
+
+    /**
+     * Time-control paths through the real panels: D-1, D-2 and a takeover
+     * path by default, or the fixture's `time_control{paths}`. Each step is one
+     * control a person clicks in Maya's panel or Unreal's Details. Before the
+     * click the control's availability must be what the contract offers in
+     * that state; an offered control is clicked and both hosts must reach the
+     * state the contract names. An unavailable control is not clicked, except
+     * Unreal's 进入联动, which is still requested as a stale click would and
+     * must be refused without borrowing a writer. After every step, while Maya
+     * drives time Unreal's Live Link subject must show Maya's current pose (a
+     * frozen preview fails), linkage must converge on a sequence frame and a
+     * cache must be Ready.
+     */
+    void AddTimeControl()
+    {
+        if (HasSecondary())
+        {
+            Add(TEXT("[time_control] needs a single-object fixture"), 1.0, [this]()
+            {
+                Test->AddError(TEXT("time_control runs Cached Playback, which a set of two objects does not offer: "
+                    "list it in a single-object fixture."));
+                return true;
+            });
+            return;
+        }
+        const TSharedPtr<FJsonObject>* SpecField = nullptr;
+        if (!Fixture->TryGetObjectField(TEXT("time_control"), SpecField))
+        {
+            Add(TEXT("[time_control] needs time_control{cache_range}"), 1.0, [this]()
+            {
+                Test->AddError(TEXT("The time_control scenario requires time_control{cache_range: [start, end]}."));
+                return true;
+            });
+            return;
+        }
+        const TSharedPtr<FJsonObject> Spec = *SpecField;
+        const TArray<TSharedPtr<FJsonValue>>& Range = Spec->GetArrayField(TEXT("cache_range"));
+        TimeControlRange = {static_cast<int32>(Range[0]->AsNumber()), static_cast<int32>(Range[1]->AsNumber())};
+        TimeControlLiveFrames.Reset();
+        const TArray<TSharedPtr<FJsonValue>>* Live = nullptr;
+        for (const TSharedPtr<FJsonValue>& Frame : Spec->TryGetArrayField(TEXT("live_frames"), Live)
+                 ? *Live : Fixture->GetArrayField(TEXT("oracle_frames")))
+        {
+            TimeControlLiveFrames.Add(Frame->AsNumber());
+        }
+
+        TArray<TPair<FString, TArray<FString>>> Paths;
+        const TArray<TSharedPtr<FJsonValue>>* Listed = nullptr;
+        if (Spec->TryGetArrayField(TEXT("paths"), Listed))
+        {
+            for (const TSharedPtr<FJsonValue>& Path : *Listed)
+            {
+                TArray<FString> Actions;
+                for (const TSharedPtr<FJsonValue>& Action : Path->AsObject()->GetArrayField(TEXT("steps")))
+                {
+                    Actions.Add(Action->AsString());
+                }
+                Paths.Add({Path->AsObject()->GetStringField(TEXT("name")), Actions});
+            }
+        }
+        else
+        {
+            // D-1: the four clicks that once froze the preview, then 实时预览.
+            Paths.Add({TEXT("D-1"), {TEXT("maya_enter"), TEXT("leave_realtime"), TEXT("cached"), TEXT("leave_end"),
+                TEXT("realtime")}});
+            // D-2: Unreal's 进入联动 during Cached Playback, then after it.
+            Paths.Add({TEXT("D-2"), {TEXT("cached"), TEXT("ue_enter"), TEXT("maya_enter"), TEXT("realtime"),
+                TEXT("ue_enter"), TEXT("leave_end")}});
+            // Every mode control during linkage and while 返回实时 keeps the takeover.
+            Paths.Add({TEXT("takeover"), {TEXT("maya_enter"), TEXT("cached"), TEXT("realtime"), TEXT("leave_realtime"),
+                TEXT("cached"), TEXT("maya_enter"), TEXT("realtime"), TEXT("maya_enter"), TEXT("leave_end")}});
+        }
+
+        Add(TEXT("[time_control] starts from real time without a takeover"), 60.0, [this]()
+        {
+            return TimeControlObserved(FTimeModel(), false);
+        });
+        static const TSet<FString> Known = {TEXT("maya_enter"), TEXT("ue_enter"), TEXT("leave_realtime"),
+            TEXT("leave_end"), TEXT("cached"), TEXT("realtime")};
+        for (const TPair<FString, TArray<FString>>& Path : Paths)
+        {
+            FTimeModel Model;
+            int32 Index = 0;
+            for (const FString& Action : Path.Value)
+            {
+                const FString Tag = FString::Printf(TEXT("[time_control] %s %d %s"), *Path.Key, ++Index, *Action);
+                if (!Known.Contains(Action))
+                {
+                    Add(Tag, 1.0, [this, Tag]()
+                    {
+                        Test->AddError(Tag + TEXT(": unknown step"));
+                        return true;
+                    });
+                    continue;
+                }
+                const bool bOffered = TimeControlAvailable(Model, Action);
+                const FTimeModel After = bOffered ? TimeControlAfter(Model, Action) : Model;
+                Add(Tag, 300.0, [this, Tag, Action, bOffered, Model, After]()
+                {
+                    return TimeControlStep(Tag, Action, bOffered, Model, After);
+                });
+                Add(Tag + TEXT(": the preview follows its time owner"), 120.0, [this, Tag, After]()
+                {
+                    return TimeControlLiveness(Tag, After);
+                });
+                Model = After;
+            }
+            if (Model.Owner != FTimeModel::EOwner::Maya || Model.bTakeover)
+            {
+                const FString Message = FString::Printf(
+                    TEXT("time_control path %s ends in %s; end it with leave_end or realtime."), *Path.Key, *DescribeTimeModel(Model));
+                Add(TEXT("[time_control] ") + Path.Key + TEXT(" must end in real time"), 1.0, [this, Message]()
+                {
+                    Test->AddError(Message);
+                    return true;
+                });
+                return;
+            }
+        }
+    }
+
+    /** Whether the panel offers one Maya control now; false while the panel cannot say. */
+    bool MayaControlEnabled(const FString& Action) const
+    {
+        const TSharedPtr<FJsonObject>* Panel = nullptr;
+        const TSharedPtr<FJsonObject>* Controls = nullptr;
+        bool bEnabled = false;
+        const FString Key = Action == TEXT("maya_enter") ? FString(TEXT("enter")) : Action;
+        return MayaResult.IsValid() && MayaResult->TryGetObjectField(TEXT("panel"), Panel)
+            && (*Panel)->TryGetObjectField(TEXT("controls"), Controls)
+            && (*Controls)->TryGetBoolField(Key, bEnabled) && bEnabled;
+    }
+
+    FString MayaPanelMode() const
+    {
+        const TSharedPtr<FJsonObject>* Panel = nullptr;
+        FString Mode;
+        if (MayaResult.IsValid() && MayaResult->TryGetObjectField(TEXT("panel"), Panel))
+        {
+            (*Panel)->TryGetStringField(TEXT("mode"), Mode);
+        }
+        return Mode;
+    }
+
+    /** Both hosts are in the model's state with no transition pending; with `bReport`, logs what differs. */
+    bool TimeControlObserved(const FTimeModel& Model, bool bReport)
+    {
+        using EOwner = FTimeModel::EOwner;
+        const FMtoUTimeControlView Time = MtoUGetTimeControlView();
+        const EMtoUTimeAuthority Expected = Model.Owner == EOwner::Maya ? EMtoUTimeAuthority::Maya
+            : Model.Owner == EOwner::Sequence ? EMtoUTimeAuthority::Sequence : EMtoUTimeAuthority::Cache;
+        const FString PanelMode = MayaPanelMode();
+        const bool bMatches = Time.Authority == Expected && !Time.bTransitioning
+            && Time.bTakeoverHeld == Model.bTakeover
+            && MayaLinkageActive() == (Model.Owner == EOwner::Sequence)
+            && PanelMode == (Model.Owner == EOwner::Cache ? TEXT("cached") : TEXT("realtime"))
+            && MayaConnected();
+        if (!bMatches && bReport)
+        {
+            Log(FString::Printf(TEXT("[time_control] expected %s; Unreal authority %d transitioning %d takeover %d; "
+                "Maya linkage %d mode '%s' connected %d"), *DescribeTimeModel(Model), static_cast<int32>(Time.Authority),
+                Time.bTransitioning ? 1 : 0, Time.bTakeoverHeld ? 1 : 0, MayaLinkageActive() ? 1 : 0, *PanelMode,
+                MayaConnected() ? 1 : 0));
+        }
+        return bMatches;
+    }
+
+    /** What a person sees on the control: the Details' own rule for 进入联动, the panel's for the rest. */
+    bool TimeControlOffers(const FString& Action) const
+    {
+        return Action == TEXT("ue_enter")
+            ? FMtoULiveLinkActorDetails::CanEnterLinkage(MtoUGetLinkageView(), MtoUGetTimeControlView())
+            : MayaControlEnabled(Action);
+    }
+
+    /** One click: availability, then the click and the state the contract names. */
+    bool TimeControlStep(const FString& Tag, const FString& Action, bool bOffered,
+        const FTimeModel& Before, const FTimeModel& After)
+    {
+        const double Now = FPlatformTime::Seconds();
+        if (TimeControlPhase == 0)
+        {
+            // The panels catch up with the previous step's replies: wait for
+            // the availability, not for a fixed time.
+            if (TimeControlWaitStarted == 0.0)
+            {
+                TimeControlWaitStarted = Now;
+            }
+            if (TimeControlOffers(Action) != bOffered)
+            {
+                if (Now - TimeControlWaitStarted < 10.0)
+                {
+                    return false;
+                }
+                Test->AddError(FString::Printf(TEXT("%s: in %s the control is %s; the contract %s it"), *Tag,
+                    *DescribeTimeModel(Before), bOffered ? TEXT("unavailable") : TEXT("available"),
+                    bOffered ? TEXT("offers") : TEXT("withholds")));
+                TimeControlWaitStarted = 0.0;
+                bAbort = true;
+                return true;
+            }
+            TimeControlWaitStarted = 0.0;
+            if (!bOffered)
+            {
+                if (Action == TEXT("ue_enter"))
+                {
+                    // A click that reaches the request anyway, as a stale
+                    // button would: refused, and no writer is borrowed.
+                    FString Error;
+                    const bool bAccepted = MtoURequestLinkageEnter(MtoUGetLinkageView().Identity.ModeRevision + 1, Error);
+                    Log(Tag + TEXT(": unavailable; a stale request is refused: ") + Error);
+                    Test->TestFalse(*(Tag + TEXT(": Unreal refuses entry while it is unavailable")), bAccepted);
+                    Test->TestTrue(*(Tag + TEXT(": the refusal leaves the writers as they were")),
+                        WritersMuted(Before.bTakeover, *(Tag + TEXT(" after the refusal"))));
+                }
+                else
+                {
+                    Log(Tag + TEXT(": unavailable, not clicked"));
+                }
+                TimeControlPhase = 2;
+                return false;
+            }
+            Log(FString::Printf(TEXT("%s: offered in %s, clicked"), *Tag, *DescribeTimeModel(Before)));
+            if (Action == TEXT("ue_enter"))
+            {
+                FString Error;
+                const bool bAccepted = MtoURequestLinkageEnter(MtoUGetLinkageView().Identity.ModeRevision + 1, Error);
+                Test->TestTrue(*(Tag + TEXT(": Unreal accepts the entry ") + Error), bAccepted);
+                TimeControlId = -1;
+            }
+            else if (Action == TEXT("maya_enter"))
+            {
+                TimeControlId = SendMaya(TEXT("enter"));
+            }
+            else if (Action == TEXT("leave_realtime") || Action == TEXT("leave_end"))
+            {
+                TimeControlId = SendMaya(TEXT("leave"), Action == TEXT("leave_end") ? TEXT("end") : TEXT("realtime"));
+            }
+            else
+            {
+                TimeControlId = SendMaya(TEXT("mode"), Action);
+            }
+            TimeControlPhase = 1;
+            return false;
+        }
+        if (TimeControlPhase == 1)
+        {
+            if (TimeControlId >= 0 && !MayaAcked(TimeControlId))
+            {
+                return false;
+            }
+            if (Action == TEXT("cached") && TimeControlCaptureId < 0)
+            {
+                if (MayaPanelMode() != TEXT("cached") || !MayaControlEnabled(TEXT("capture")))
+                {
+                    return false;
+                }
+                // 自定义捕获范围 and 捕获并上传.
+                TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
+                Fields->SetArrayField(TEXT("range"), NumberArray({static_cast<double>(TimeControlRange.Key),
+                    static_cast<double>(TimeControlRange.Value)}));
+                TimeControlCaptureId = Driver.Send(TEXT("capture"), Fields);
+                return false;
+            }
+            if (TimeControlCaptureId >= 0 && !MayaAcked(TimeControlCaptureId))
+            {
+                return false;
+            }
+            if (TimeControlWaitStarted == 0.0)
+            {
+                TimeControlWaitStarted = Now;
+            }
+            const bool bReport = Now - TimeControlWaitStarted > 30.0 && !bTimeControlReported;
+            bTimeControlReported |= bReport;
+            const bool bCacheSettled = After.Owner != FTimeModel::EOwner::Cache
+                || Actor->GetCachePlaybackView().State == EMtoUCacheState::Ready;
+            if (!bCacheSettled || !TimeControlObserved(After, bReport))
+            {
+                return false;
+            }
+            Test->TestTrue(*(Tag + TEXT(": the writers follow the takeover")),
+                WritersMuted(After.bTakeover, *(Tag + TEXT(" after the click"))));
+            TimeControlPhase = 2;
+            return false;
+        }
+        TimeControlPhase = 0;
+        TimeControlId = TimeControlCaptureId = -1;
+        TimeControlWaitStarted = 0.0;
+        bTimeControlReported = false;
+        if (!TimeControlObserved(After, true))
+        {
+            Test->AddError(Tag + TEXT(": both hosts leave ") + DescribeTimeModel(After));
+        }
+        return true;
+    }
+
+    /**
+     * Maya drives time: its next frame reaches Unreal's Live Link subject.
+     * Linkage: a sequence frame converges. A cache: Ready with the captured range.
+     */
+    bool TimeControlLiveness(const FString& Tag, const FTimeModel& Model)
+    {
+        using EOwner = FTimeModel::EOwner;
+        if (Model.Owner == EOwner::Cache)
+        {
+            const FMtoUCachePlaybackView Cache = Actor->GetCachePlaybackView();
+            Test->TestEqual(*(Tag + TEXT(": the cache is Ready")), static_cast<int32>(Cache.State),
+                static_cast<int32>(EMtoUCacheState::Ready));
+            Test->TestEqual(*(Tag + TEXT(": the cache holds the captured range")), Cache.FrameCount,
+                TimeControlRange.Value - TimeControlRange.Key + 1);
+            return true;
+        }
+        const double Frame = TimeControlLiveFrames[TimeControlLiveIndex % TimeControlLiveFrames.Num()];
+        if (Model.Owner == EOwner::Sequence)
+        {
+            if (!SetTimeAndSettleOnce(Frame))
+            {
+                return false;
+            }
+            const FMtoULinkageView View = MtoUGetLinkageView();
+            if (!View.bConverged || !FMath::IsNearlyEqual(View.AppliedDisplayFrame, Frame, 0.01))
+            {
+                return false;
+            }
+            Log(FString::Printf(TEXT("%s: linkage converged on frame %.1f"), *Tag, Frame));
+            SettledFrame = -1.0;
+            ++TimeControlLiveIndex;
+            return true;
+        }
+        if (TimeControlPhase == 0)
+        {
+            TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
+            Fields->SetNumberField(TEXT("frame"), Frame);
+            TimeControlId = Driver.Send(TEXT("time"), Fields);
+            TimeControlPhase = 1;
+            return false;
+        }
+        if (!MayaAcked(TimeControlId))
+        {
+            return false;
+        }
+        if (TimeControlPhase == 1)
+        {
+            TimeControlId = SendMaya(TEXT("snapshot"));
+            TimeControlPhase = 2;
+            TimeControlWaitStarted = FPlatformTime::Seconds();
+            return false;
+        }
+        // Wait for the subject to show the snapshot's pose; a preview whose
+        // live poses are discarded never does.
+        int32 Compared = 0;
+        const double Distance = SubjectDistanceFromSnapshot(Compared);
+        const bool bShown = Compared > 0 && Distance <= Fixture->GetNumberField(TEXT("world_tolerance_cm"));
+        if (!bShown && FPlatformTime::Seconds() - TimeControlWaitStarted < 10.0)
+        {
+            return false;
+        }
+        Log(FString::Printf(TEXT("%s: Maya frame %.1f on the Live Link subject: %d bones, max %.4f cm"),
+            *Tag, Frame, Compared, Distance));
+        Test->TestTrue(*(Tag + TEXT(": Unreal shows Maya's current pose")), bShown);
+        TimeControlPhase = 0;
+        TimeControlId = -1;
+        TimeControlWaitStarted = 0.0;
+        ++TimeControlLiveIndex;
+        return true;
+    }
+
+    /** Largest distance between the oracle bones on the Live Link subject and in Maya's snapshot. */
+    double SubjectDistanceFromSnapshot(int32& OutCompared) const
+    {
+        OutCompared = 0;
+        const double None = TNumericLimits<double>::Max();
+        if (!MayaResult.IsValid() || !MayaResult->HasTypedField<EJson::Object>(TEXT("snapshot"))
+            || !IModularFeatures::Get().IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName))
+        {
+            return None;
+        }
+        ILiveLinkClient& Client =
+            IModularFeatures::Get().GetModularFeature<ILiveLinkClient>(ILiveLinkClient::ModularFeatureName);
+        FLiveLinkSubjectFrameData Frame;
+        if (!Client.EvaluateFrame_AnyThread(Actor->GetLiveLinkSubject(), ULiveLinkAnimationRole::StaticClass(), Frame))
+        {
+            return None;
+        }
+        const FLiveLinkSkeletonStaticData* Static = Frame.StaticData.Cast<FLiveLinkSkeletonStaticData>();
+        const FLiveLinkAnimationFrameData* Animation = Frame.FrameData.Cast<FLiveLinkAnimationFrameData>();
+        if (!Static || !Animation || Animation->Transforms.Num() != Static->BoneNames.Num())
+        {
+            return None;
+        }
+        // The subject's root space is Maya's world in the common axes.
+        TArray<FTransform> Root;
+        Root.Reserve(Animation->Transforms.Num());
+        for (int32 Index = 0; Index < Animation->Transforms.Num(); ++Index)
+        {
+            const int32 Parent = Static->BoneParents.IsValidIndex(Index) ? Static->BoneParents[Index] : INDEX_NONE;
+            Root.Add(Parent >= 0 && Parent < Index ? Animation->Transforms[Index] * Root[Parent] : Animation->Transforms[Index]);
+        }
+        const TSharedPtr<FJsonObject> Row = SnapshotRow(MayaResult->GetObjectField(TEXT("snapshot")), false);
+        const TSharedPtr<FJsonObject>* Joints = nullptr;
+        if (!Row.IsValid() || !Row->TryGetObjectField(TEXT("joints"), Joints))
+        {
+            return None;
+        }
+        double Distance = 0.0;
+        for (const TPair<FString, TSharedPtr<FJsonValue>>& Joint : (*Joints)->Values)
+        {
+            const int32 Index = Static->BoneNames.IndexOfByKey(FName(*Joint.Key));
+            if (Index == INDEX_NONE)
+            {
+                continue;
+            }
+            const FVector Maya = ReadVector(Joint.Value->AsObject(), TEXT("world"));
+            Distance = FMath::Max(Distance, FVector::Distance(FVector(Maya.X, Maya.Z, Maya.Y), Root[Index].GetLocation()));
+            ++OutCompared;
+        }
+        return Distance;
+    }
+
     /** Sends one Maya command and waits for its acknowledgement and a condition. */
     bool LifecycleSend(const FString& Action, const FString& Target, TFunctionRef<bool()> Ready)
     {
@@ -1854,6 +2358,13 @@ private:
         const bool bInterrupted = Kind == TEXT("panel_live") || Kind == TEXT("scene_live");
         const bool bPanel = Kind == TEXT("panel") || Kind == TEXT("panel_live");
         const bool bScene = Kind == TEXT("scene") || Kind == TEXT("scene_live");
+        if (LifecycleId < 0 && (LifecyclePhase == 0 || LifecyclePhase == 3 || LifecyclePhase == 6))
+        {
+            // A late scene notice could clear the role a step set; nothing may
+            // until the step itself ends the session.
+            Test->TestTrue(*FString::Printf(TEXT("[lifecycle] %s phase %d: the role and the pairing are still set"),
+                *Kind, LifecyclePhase), MayaPairingKept());
+        }
         switch (LifecyclePhase)
         {
         case 0:
@@ -1972,7 +2483,7 @@ private:
         {
             const FString Action = bPanel ? TEXT("open_panel")
                 : bScene ? TEXT("reopen_scene") : TEXT("connect");
-            return LifecycleSend(Action, FString(), [this]() { return MayaConnected(); });
+            return LifecycleSend(Action, FString(), [this]() { return MayaConnected() && MayaPairingKept(); });
         }
         case 6:
             return LifecycleSend(TEXT("resources"), FString(), [this]()
@@ -4120,6 +4631,12 @@ private:
     TMap<FName, FVector> SecondaryBeforePose, InjectMainPose, InjectSecondPose;
     TMap<int32, TMap<FName, FOracleRotation>> SecondaryOracleRotations;
     bool bSecondaryAnchorPinned = false;
+    // time_control: the step's phase and the command it waits on.
+    TPair<int32, int32> TimeControlRange;
+    TArray<double> TimeControlLiveFrames;
+    int32 TimeControlPhase = 0, TimeControlId = -1, TimeControlCaptureId = -1, TimeControlLiveIndex = 0;
+    double TimeControlWaitStarted = 0.0;
+    bool bTimeControlReported = false;
     bool bMayaStarted = false;
     FTransform ProbeTransform;
     // The composition a swap replaced, put back afterwards.
