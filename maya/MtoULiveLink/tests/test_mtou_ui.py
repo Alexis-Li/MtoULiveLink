@@ -1133,6 +1133,70 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(1, len(self.removed_callbacks))
         self.assertIsNone(self.controller._reference_window)
 
+    def scene_replacement_harness(self):
+        """Build the panel with Maya's scene messages; return them by name."""
+        registered = {}
+
+        class _SceneMessage(object):
+            kMayaExiting, kBeforeNew, kBeforeOpen = "exiting", "before_new", "before_open"
+
+            @staticmethod
+            def addCallback(message, callback):
+                registered[message] = callback
+                return len(registered) + 100
+
+        self.fake_om.MSceneMessage = _SceneMessage
+        self.build_ui()
+        return registered
+
+    def after_open_notices(self):
+        return [call[1]["event"][1] for call in self.fake_cmds.scriptJob.call_args_list
+                if call[1].get("event", [None])[0] in ("SceneOpened", "NewSceneOpened")]
+
+    def test_a_late_scene_notice_keeps_the_role_set_in_the_new_scene(self):
+        callbacks = self.scene_replacement_harness()
+        self.enter_linkage()
+
+        with self.bindings:
+            callbacks["before_open"]()
+        self.assertIsNone(self.controller._linkage)
+        self.assertIsNone(self.controller._scene)
+        # The artist sets the role in the opened scene and connects before
+        # Maya's idle queue delivers anything about the open.
+        new_scene, new_session = FakeCharacterScene(), FakeStreamingSession()
+        self.controller._scene, self.controller._session = new_scene, new_session
+        with self.bindings:
+            for notice in self.after_open_notices():
+                notice()
+
+        self.assertIs(new_scene, self.controller._scene)
+        self.assertIs(new_session, self.controller._session)
+        self.assertFalse(getattr(new_scene, "closed", False))
+
+    def test_a_new_scene_still_releases_linkage_before_it_replaces_the_old(self):
+        callbacks = self.scene_replacement_harness()
+        self.enter_linkage()
+
+        with self.bindings:
+            callbacks["before_new"]()
+
+        self.assertIsNone(self.controller._linkage)
+        self.assertIsNone(self.controller._scene)
+        self.assertEqual(1, len(self.removed_callbacks))
+
+    def test_without_scene_messages_the_after_open_notice_releases_the_role(self):
+        self.build_ui()  # the fake OpenMaya has no MSceneMessage
+        self.enter_linkage()
+        notices = self.after_open_notices()
+
+        with self.bindings:
+            for notice in notices:
+                notice()
+
+        self.assertEqual(2, len(notices))
+        self.assertIsNone(self.controller._linkage)
+        self.assertIsNone(self.controller._scene)
+
     def test_maya_exit_releases_linkage_and_its_windows(self):
         self.enter_linkage()
         self.controller._reference_window = mock.Mock()
