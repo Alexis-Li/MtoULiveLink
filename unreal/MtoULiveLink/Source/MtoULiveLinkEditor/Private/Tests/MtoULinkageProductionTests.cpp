@@ -1943,20 +1943,29 @@ private:
                 {
                     Actions.Add(Action->AsString());
                 }
-                Paths.Add({Path->AsObject()->GetStringField(TEXT("name")), Actions});
+                Paths.Emplace(Path->AsObject()->GetStringField(TEXT("name")), MoveTemp(Actions));
             }
         }
         else
         {
+            const auto AddPath = [&Paths](const TCHAR* Name, std::initializer_list<const TCHAR*> Actions)
+            {
+                TArray<FString> Steps;
+                for (const TCHAR* Action : Actions)
+                {
+                    Steps.Add(Action);
+                }
+                Paths.Emplace(Name, MoveTemp(Steps));
+            };
             // D-1: the four clicks that once froze the preview, then 实时预览.
-            Paths.Add({TEXT("D-1"), {TEXT("maya_enter"), TEXT("leave_realtime"), TEXT("cached"), TEXT("leave_end"),
-                TEXT("realtime")}});
+            AddPath(TEXT("D-1"), {TEXT("maya_enter"), TEXT("leave_realtime"), TEXT("cached"), TEXT("leave_end"),
+                TEXT("realtime")});
             // D-2: Unreal's 进入联动 during Cached Playback, then after it.
-            Paths.Add({TEXT("D-2"), {TEXT("cached"), TEXT("ue_enter"), TEXT("maya_enter"), TEXT("realtime"),
-                TEXT("ue_enter"), TEXT("leave_end")}});
+            AddPath(TEXT("D-2"), {TEXT("cached"), TEXT("ue_enter"), TEXT("maya_enter"), TEXT("realtime"),
+                TEXT("ue_enter"), TEXT("leave_end")});
             // Every mode control during linkage and while 返回实时 keeps the takeover.
-            Paths.Add({TEXT("takeover"), {TEXT("maya_enter"), TEXT("cached"), TEXT("realtime"), TEXT("leave_realtime"),
-                TEXT("cached"), TEXT("maya_enter"), TEXT("realtime"), TEXT("maya_enter"), TEXT("leave_end")}});
+            AddPath(TEXT("takeover"), {TEXT("maya_enter"), TEXT("cached"), TEXT("realtime"), TEXT("leave_realtime"),
+                TEXT("cached"), TEXT("maya_enter"), TEXT("realtime"), TEXT("maya_enter"), TEXT("leave_end")});
         }
 
         Add(TEXT("[time_control] starts from real time without a takeover"), 60.0, [this]()

@@ -91,8 +91,31 @@ and windows) over:
   gate, cameras and undo;
 - a restore that cannot delete the tool camera.
 
-The counts are compared with the warmed-up baseline. Put `close_world` last so
+The counts are compared with the warmed-up baseline, and the role and the
+pairing must stay set from one step to the next. Put `close_world` last so
 the final census after it is compared with the disconnected one.
+
+**Time control (`time_control{cache_range, live_frames?, paths?}`).** One
+object only. Each path is a list of clicks: `maya_enter`, `ue_enter`
+(Unreal's Details), `leave_realtime`, `leave_end`, `cached` (缓存播放, then
+捕获并上传 `cache_range`) and `realtime`. Without `paths` it runs D-1 (进入联动,
+返回实时, 缓存播放, 结束预览, 实时预览), D-2 (Unreal's 进入联动 during Cached
+Playback) and a path through every mode control while 返回实时 keeps the
+takeover. For every click the test:
+
+- waits until the control is offered or withheld as the time-control contract
+  says for the state (ADR 0014), and fails if it never is;
+- clicks an offered control and waits until both hosts reach the contract's
+  state: who drives time, the takeover, the panel mode and the writers. An
+  Unreal 进入联动 that is withheld is still requested, as a stale click would
+  be, and must be refused without borrowing a writer;
+- then checks the preview: while Maya drives time, Unreal's Live Link subject
+  must show Maya's pose at the next `live_frames` frame (default
+  `oracle_frames`); linkage must converge on that sequence frame; a cache must
+  be Ready with the captured range.
+
+Every path must end in real time without a takeover. A manual D-1/D-2
+reproduction is not needed when this scenario passes.
 
 ## Test editor ports
 

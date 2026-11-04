@@ -1,0 +1,51 @@
+{
+  "evidence": "<scratch>/mtou-acceptance-runs/production-sequence",
+  "level": "<Level>",
+  "main_sequence": "<MainSequence>",
+  "shot_sequence": "<ShotSequence>",
+  "switch_sequence": "<OtherSequenceOfTheSameAct>",
+  "binding": "<MtoUBindingAsset>",
+  "object_id": "character",
+  "target_binding": "<SequenceCharacterBinding>",
+  "anchor": {
+    "location": [120.0, -80.0, 0.0],
+    "rotation": [3.0, -4.0, 37.0]
+  },
+  "oracle_frames": [120, 260, 400],
+  "scenarios": [
+    "realtime",
+    "maya_end",
+    "time_control",
+    "lifecycle",
+    "close_sequencer",
+    "switch_sequence",
+    "destroy_target",
+    "lifecycle_check",
+    "close_world"
+  ],
+  "lifecycle": {
+    "cycles": 2
+  },
+  "time_control": {
+    "cache_range": [120, 160]
+  },
+  "play_seconds": 8.0,
+  "world_tolerance_cm": 0.1,
+  "screen_tolerance_ndc": 0.002,
+  "rotation_tolerance_deg": 0.5,
+  "morph_tolerance": 0.01,
+  "details_widths": [350, 430, 500],
+  "details_height": 1600,
+  "maya": {
+    "exe": "<Maya2024>/bin/maya.exe",
+    "driver": "<checkout>/maya/MtoULiveLink/tests/maya_gui_linkage_driver.py",
+    "scripts": "<checkout>/maya/MtoULiveLink/scripts",
+    "app_dir_template": "<fixtures>/maya-prefs-minimal",
+    "allow_scene_load_warnings": true,
+    "scene": "<MayaScene.ma>",
+    "root": "<CharacterRootJoint>",
+    "oracle_joints": ["<SkinnedJoint>", "<SkinnedJoint>"],
+    "morph_namespace": "<CharacterNamespace>",
+    "start_frame": 0
+  }
+}
