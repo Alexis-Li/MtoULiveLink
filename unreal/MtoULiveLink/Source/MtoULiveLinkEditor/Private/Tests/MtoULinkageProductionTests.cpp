@@ -2050,7 +2050,8 @@ private:
         const bool bMatches = Time.Authority == Expected && !Time.bTransitioning
             && Time.bTakeoverHeld == Model.bTakeover
             && MayaLinkageActive() == (Model.Owner == EOwner::Sequence)
-            && PanelMode == (Model.Owner == EOwner::Cache ? TEXT("cached") : TEXT("realtime"))
+            && PanelMode == (Model.Owner == EOwner::Cache ? TEXT("cached")
+                : Model.Owner == EOwner::Sequence ? TEXT("linkage") : TEXT("realtime"))
             && MayaConnected();
         if (!bMatches && bReport)
         {
