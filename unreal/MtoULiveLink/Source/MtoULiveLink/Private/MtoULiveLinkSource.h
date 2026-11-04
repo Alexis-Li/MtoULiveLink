@@ -296,6 +296,8 @@ public:
     FMtoUTimeControlView GetTimeControlView() const;
     // Editor entry processes received controls before validating the request.
     bool RequestLinkageEnter(int32 ModeRevision, FString& OutError);
+    // The same entry, with the refusal's wire code (such as CACHE_NOT_CLEARED).
+    bool RequestLinkageEnter(int32 ModeRevision, FString& OutError, FString& OutCode);
     /**
      * The actor the connected session streams one object into, or null when
      * the session did not negotiate that object. Takeover and publishing use

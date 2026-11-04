@@ -316,12 +316,17 @@ FMtoULiveLinkSource::FMtoULiveLinkSource(uint16 InPort)
 
 bool FMtoULiveLinkSource::RequestLinkageEnter(int32 ModeRevision, FString& OutError)
 {
+    FString ErrorCode;
+    return RequestLinkageEnter(ModeRevision, OutError, ErrorCode);
+}
+
+bool FMtoULiveLinkSource::RequestLinkageEnter(int32 ModeRevision, FString& OutError, FString& OutCode)
+{
     check(IsInGameThread());
     // Revalidate mode and revision AFTER queued peer controls, before starting
     // BeginTakeover. Draining from its guard would reenter an in-progress mode.
     LeavesTakenBeforeUpdate += DrainTimeControlsOnGameThread();
-    FString ErrorCode;
-    return LinkageSession.RequestEnter(ModeRevision, OutError, ErrorCode);
+    return LinkageSession.RequestEnter(ModeRevision, OutError, OutCode);
 }
 
 FMtoUTimeControlView FMtoULiveLinkSource::GetTimeControlView() const

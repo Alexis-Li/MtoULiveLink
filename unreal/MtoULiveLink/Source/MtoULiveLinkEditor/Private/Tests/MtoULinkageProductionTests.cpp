@@ -4,6 +4,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include "MtoULinkage.h"
 #include "MtoULiveLinkSource.h"
+#include "MtoULinkageSession.h"
 #include "MtoUSceneRefExport.h"
 #include "MtoUGuiAcceptance.h"
 #include "MtoULinkageEditor.h"
@@ -1921,32 +1922,19 @@ private:
             });
             return;
         }
-        const TSharedPtr<FJsonObject> Spec = *SpecField;
-        const TArray<TSharedPtr<FJsonValue>>& Range = Spec->GetArrayField(TEXT("cache_range"));
-        TimeControlRange = {static_cast<int32>(Range[0]->AsNumber()), static_cast<int32>(Range[1]->AsNumber())};
-        TimeControlLiveFrames.Reset();
-        const TArray<TSharedPtr<FJsonValue>>* Live = nullptr;
-        for (const TSharedPtr<FJsonValue>& Frame : Spec->TryGetArrayField(TEXT("live_frames"), Live)
-                 ? *Live : Fixture->GetArrayField(TEXT("oracle_frames")))
+        const FString Invalid = ReadTimeControlSpec(*SpecField);
+        if (!Invalid.IsEmpty())
         {
-            TimeControlLiveFrames.Add(Frame->AsNumber());
+            Add(TEXT("[time_control] fixture"), 1.0, [this, Invalid]()
+            {
+                Test->AddError(Invalid);
+                return true;
+            });
+            return;
         }
 
-        TArray<TPair<FString, TArray<FString>>> Paths;
-        const TArray<TSharedPtr<FJsonValue>>* Listed = nullptr;
-        if (Spec->TryGetArrayField(TEXT("paths"), Listed))
-        {
-            for (const TSharedPtr<FJsonValue>& Path : *Listed)
-            {
-                TArray<FString> Actions;
-                for (const TSharedPtr<FJsonValue>& Action : Path->AsObject()->GetArrayField(TEXT("steps")))
-                {
-                    Actions.Add(Action->AsString());
-                }
-                Paths.Emplace(Path->AsObject()->GetStringField(TEXT("name")), MoveTemp(Actions));
-            }
-        }
-        else
+        TArray<TPair<FString, TArray<FString>>> Paths = TimeControlPaths;
+        if (Paths.IsEmpty())
         {
             const auto AddPath = [&Paths](const TCHAR* Name, std::initializer_list<const TCHAR*> Actions)
             {
@@ -2014,6 +2002,71 @@ private:
                 return;
             }
         }
+    }
+
+    /**
+     * Reads time_control into the members the steps use; returns why it is
+     * malformed, or nothing. A malformed fixture fails the test, never the editor.
+     */
+    FString ReadTimeControlSpec(const TSharedPtr<FJsonObject>& Spec)
+    {
+        TimeControlLiveFrames.Reset();
+        TimeControlPaths.Reset();
+        const TArray<TSharedPtr<FJsonValue>>* Range = nullptr;
+        double Start = 0.0, End = 0.0;
+        if (!Spec->TryGetArrayField(TEXT("cache_range"), Range) || Range->Num() != 2
+            || !(*Range)[0]->TryGetNumber(Start) || !(*Range)[1]->TryGetNumber(End) || Start >= End)
+        {
+            return TEXT("time_control{cache_range} must be two increasing frames [start, end].");
+        }
+        TimeControlRange = {static_cast<int32>(Start), static_cast<int32>(End)};
+        const TArray<TSharedPtr<FJsonValue>>* Live = nullptr;
+        for (const TSharedPtr<FJsonValue>& Frame : Spec->TryGetArrayField(TEXT("live_frames"), Live)
+                 ? *Live : Fixture->GetArrayField(TEXT("oracle_frames")))
+        {
+            double Value = 0.0;
+            if (!Frame->TryGetNumber(Value))
+            {
+                return TEXT("time_control{live_frames} must hold frame numbers.");
+            }
+            TimeControlLiveFrames.Add(Value);
+        }
+        // Consecutive checks need different frames: one frame could not tell
+        // a frozen preview from a live one.
+        if (TimeControlLiveFrames.Num() < 2)
+        {
+            return TEXT("time_control needs at least two live frames (live_frames, or oracle_frames without it).");
+        }
+        for (int32 Index = 0; Index < TimeControlLiveFrames.Num(); ++Index)
+        {
+            if (TimeControlLiveFrames[Index] == TimeControlLiveFrames[(Index + 1) % TimeControlLiveFrames.Num()])
+            {
+                return TEXT("Each time_control live frame must differ from the next, and the last from the first.");
+            }
+        }
+        const TArray<TSharedPtr<FJsonValue>>* Listed = nullptr;
+        if (!Spec->TryGetArrayField(TEXT("paths"), Listed))
+        {
+            return FString();
+        }
+        for (const TSharedPtr<FJsonValue>& Path : *Listed)
+        {
+            const TSharedPtr<FJsonObject>* Object = nullptr;
+            const TArray<TSharedPtr<FJsonValue>>* PathSteps = nullptr;
+            FString Name;
+            if (!Path->TryGetObject(Object) || !(*Object)->TryGetStringField(TEXT("name"), Name)
+                || !(*Object)->TryGetArrayField(TEXT("steps"), PathSteps) || PathSteps->IsEmpty())
+            {
+                return TEXT("Each time_control{paths} entry needs a name and a non-empty steps list.");
+            }
+            TArray<FString> Actions;
+            for (const TSharedPtr<FJsonValue>& Action : *PathSteps)
+            {
+                Actions.Add(Action->AsString());
+            }
+            TimeControlPaths.Emplace(Name, MoveTemp(Actions));
+        }
+        return FString();
     }
 
     /** Whether the panel offers one Maya control now; false while the panel cannot say. */
@@ -2103,11 +2156,17 @@ private:
                 if (Action == TEXT("ue_enter"))
                 {
                     // A click that reaches the request anyway, as a stale
-                    // button would: refused, and no writer is borrowed.
-                    FString Error;
-                    const bool bAccepted = MtoURequestLinkageEnter(MtoUGetLinkageView().Identity.ModeRevision + 1, Error);
-                    Log(Tag + TEXT(": unavailable; a stale request is refused: ") + Error);
+                    // button would: the entry MtoURequestLinkageEnter makes,
+                    // read with its code. It is refused for the state's
+                    // reason, and no writer is borrowed.
+                    FString Error, Code;
+                    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+                    const bool bAccepted = Source.IsValid()
+                        && Source->RequestLinkageEnter(MtoUGetLinkageView().Identity.ModeRevision + 1, Error, Code);
+                    Log(FString::Printf(TEXT("%s: unavailable; a stale request is refused: %s %s"), *Tag, *Code, *Error));
                     Test->TestFalse(*(Tag + TEXT(": Unreal refuses entry while it is unavailable")), bAccepted);
+                    Test->TestEqual(*(Tag + TEXT(": the refusal names the reason")), Code,
+                        FString(Before.Owner == FTimeModel::EOwner::Cache ? TEXT("CACHE_NOT_CLEARED") : TEXT("MODE_CONFLICT")));
                     Test->TestTrue(*(Tag + TEXT(": the refusal leaves the writers as they were")),
                         WritersMuted(Before.bTakeover, *(Tag + TEXT(" after the refusal"))));
                 }
@@ -2227,6 +2286,8 @@ private:
         }
         if (TimeControlPhase == 0)
         {
+            // What Unreal shows before Maya moves: a frozen preview keeps it.
+            SubjectPositions(TimeControlShownBefore);
             TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
             Fields->SetNumberField(TEXT("frame"), Frame);
             TimeControlId = Driver.Send(TEXT("time"), Fields);
@@ -2246,16 +2307,24 @@ private:
         }
         // Wait for the subject to show the snapshot's pose; a preview whose
         // live poses are discarded never does.
+        const double Tolerance = Fixture->GetNumberField(TEXT("world_tolerance_cm"));
+        TMap<FName, FVector> Shown;
         int32 Compared = 0;
-        const double Distance = SubjectDistanceFromSnapshot(Compared);
-        const bool bShown = Compared > 0 && Distance <= Fixture->GetNumberField(TEXT("world_tolerance_cm"));
+        const double Distance = SubjectPositions(Shown) ? SnapshotDistance(Shown, Compared) : TNumericLimits<double>::Max();
+        const bool bShown = Compared > 0 && Distance <= Tolerance;
         if (!bShown && FPlatformTime::Seconds() - TimeControlWaitStarted < 10.0)
         {
             return false;
         }
-        Log(FString::Printf(TEXT("%s: Maya frame %.1f on the Live Link subject: %d bones, max %.4f cm"),
-            *Tag, Frame, Compared, Distance));
+        int32 ComparedBefore = 0;
+        const double Moved = SnapshotDistance(TimeControlShownBefore, ComparedBefore);
+        Log(FString::Printf(TEXT("%s: Maya frame %.1f on the Live Link subject: %d bones, max %.4f cm; "
+            "%.4f cm from the pose shown before"), *Tag, Frame, Compared, Distance, ComparedBefore > 0 ? Moved : -1.0));
         Test->TestTrue(*(Tag + TEXT(": Unreal shows Maya's current pose")), bShown);
+        // Only a pose that moved beyond the tolerance tells a live preview
+        // from one frozen on the previous pose.
+        Test->TestTrue(*(Tag + TEXT(": Maya's new pose differs from the pose shown before, so a frozen preview would fail")),
+            ComparedBefore > 0 && Moved > Tolerance);
         TimeControlPhase = 0;
         TimeControlId = -1;
         TimeControlWaitStarted = 0.0;
@@ -2263,28 +2332,26 @@ private:
         return true;
     }
 
-    /** Largest distance between the oracle bones on the Live Link subject and in Maya's snapshot. */
-    double SubjectDistanceFromSnapshot(int32& OutCompared) const
+    /** Root-space positions of every bone on the Live Link subject; false while it has no complete frame. */
+    bool SubjectPositions(TMap<FName, FVector>& Out) const
     {
-        OutCompared = 0;
-        const double None = TNumericLimits<double>::Max();
-        if (!MayaResult.IsValid() || !MayaResult->HasTypedField<EJson::Object>(TEXT("snapshot"))
-            || !IModularFeatures::Get().IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName))
+        Out.Reset();
+        if (!IModularFeatures::Get().IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName))
         {
-            return None;
+            return false;
         }
         ILiveLinkClient& Client =
             IModularFeatures::Get().GetModularFeature<ILiveLinkClient>(ILiveLinkClient::ModularFeatureName);
         FLiveLinkSubjectFrameData Frame;
         if (!Client.EvaluateFrame_AnyThread(Actor->GetLiveLinkSubject(), ULiveLinkAnimationRole::StaticClass(), Frame))
         {
-            return None;
+            return false;
         }
         const FLiveLinkSkeletonStaticData* Static = Frame.StaticData.Cast<FLiveLinkSkeletonStaticData>();
         const FLiveLinkAnimationFrameData* Animation = Frame.FrameData.Cast<FLiveLinkAnimationFrameData>();
         if (!Static || !Animation || Animation->Transforms.Num() != Static->BoneNames.Num())
         {
-            return None;
+            return false;
         }
         // The subject's root space is Maya's world in the common axes.
         TArray<FTransform> Root;
@@ -2293,24 +2360,31 @@ private:
         {
             const int32 Parent = Static->BoneParents.IsValidIndex(Index) ? Static->BoneParents[Index] : INDEX_NONE;
             Root.Add(Parent >= 0 && Parent < Index ? Animation->Transforms[Index] * Root[Parent] : Animation->Transforms[Index]);
+            Out.Add(Static->BoneNames[Index], Root[Index].GetLocation());
         }
-        const TSharedPtr<FJsonObject> Row = SnapshotRow(MayaResult->GetObjectField(TEXT("snapshot")), false);
+        return true;
+    }
+
+    /** Largest distance between the oracle bones in Shown and in Maya's snapshot. */
+    double SnapshotDistance(const TMap<FName, FVector>& Shown, int32& OutCompared) const
+    {
+        OutCompared = 0;
+        const TSharedPtr<FJsonObject> Row = MayaResult.IsValid() && MayaResult->HasTypedField<EJson::Object>(TEXT("snapshot"))
+            ? SnapshotRow(MayaResult->GetObjectField(TEXT("snapshot")), false) : nullptr;
         const TSharedPtr<FJsonObject>* Joints = nullptr;
         if (!Row.IsValid() || !Row->TryGetObjectField(TEXT("joints"), Joints))
         {
-            return None;
+            return TNumericLimits<double>::Max();
         }
         double Distance = 0.0;
         for (const TPair<FString, TSharedPtr<FJsonValue>>& Joint : (*Joints)->Values)
         {
-            const int32 Index = Static->BoneNames.IndexOfByKey(FName(*Joint.Key));
-            if (Index == INDEX_NONE)
+            if (const FVector* Location = Shown.Find(FName(*Joint.Key)))
             {
-                continue;
+                const FVector Maya = ReadVector(Joint.Value->AsObject(), TEXT("world"));
+                Distance = FMath::Max(Distance, FVector::Distance(FVector(Maya.X, Maya.Z, Maya.Y), *Location));
+                ++OutCompared;
             }
-            const FVector Maya = ReadVector(Joint.Value->AsObject(), TEXT("world"));
-            Distance = FMath::Max(Distance, FVector::Distance(FVector(Maya.X, Maya.Z, Maya.Y), Root[Index].GetLocation()));
-            ++OutCompared;
         }
         return Distance;
     }
@@ -4644,6 +4718,8 @@ private:
     // time_control: the step's phase and the command it waits on.
     TPair<int32, int32> TimeControlRange;
     TArray<double> TimeControlLiveFrames;
+    TArray<TPair<FString, TArray<FString>>> TimeControlPaths;
+    TMap<FName, FVector> TimeControlShownBefore;
     int32 TimeControlPhase = 0, TimeControlId = -1, TimeControlCaptureId = -1, TimeControlLiveIndex = 0;
     double TimeControlWaitStarted = 0.0;
     bool bTimeControlReported = false;

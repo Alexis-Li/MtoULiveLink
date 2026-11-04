@@ -103,19 +103,32 @@ object only. Each path is a list of clicks: `maya_enter`, `ue_enter`
 Playback) and a path through every mode control while 返回实时 keeps the
 takeover. For every click the test:
 
-- waits until the control is offered or withheld as the time-control contract
-  says for the state (ADR 0014), and fails if it never is;
-- clicks an offered control and waits until both hosts reach the contract's
-  state: who drives time, the takeover, the panel mode and the writers. An
+- waits until the control is offered or withheld as the state allows, and
+  fails if it never is. The rules are the
+  [Mode transitions](../protocol/README.md#mode-transitions) table and the
+  panel's own: no mode switch during linkage, 实时预览 stays offered in real
+  time, and 缓存播放 is offered while 返回实时 keeps the takeover;
+- clicks an offered control and waits until both hosts reach the state it
+  leads to: who drives time, the takeover, the panel mode and the writers. An
   Unreal 进入联动 that is withheld is still requested, as a stale click would
-  be, and must be refused without borrowing a writer;
+  be, and must be refused with `CACHE_NOT_CLEARED` during a cache or
+  `MODE_CONFLICT` during linkage, without borrowing a writer;
 - then checks the preview: while Maya drives time, Unreal's Live Link subject
   must show Maya's pose at the next `live_frames` frame (default
-  `oracle_frames`); linkage must converge on that sequence frame; a cache must
-  be Ready with the captured range.
+  `oracle_frames`), and that pose must differ beyond `world_tolerance_cm` from
+  the one the subject showed before, so a frozen preview cannot pass; linkage
+  must converge on that sequence frame; a cache must be Ready with the
+  captured range.
 
-Every path must end in real time without a takeover. A manual D-1/D-2
-reproduction is not needed when this scenario passes.
+`cache_range` must be two increasing frames, and there must be at least two
+live frames, each different from the next; a malformed `time_control` fails
+the test with the reason. Every path must end in real time without a
+takeover.
+
+A new order of the existing clicks only needs a `paths` entry; a new control
+or state extends the step vocabulary and the availability rules in
+`MtoULinkageProductionTests.cpp`. This scenario replaces a manual D-1/D-2
+reproduction in the real GUI.
 
 ## Test editor ports
 
