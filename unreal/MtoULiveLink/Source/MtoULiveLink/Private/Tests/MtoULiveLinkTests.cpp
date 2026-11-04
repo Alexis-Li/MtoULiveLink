@@ -12778,108 +12778,128 @@ bool FMtoUControlBudgetConcurrencyTest::RunTest(const FString& Parameters)
         return false;
     }
     FMtoULiveLinkSource& Source = *Fixture.Source;
+    using Access = FMtoUControlBudgetTestAccess;
     constexpr int32 Threads = 4;
-    constexpr int32 PerThread = 50000;
-    const auto RunAll = [](TFunctionRef<void(int32)> Body)
+    constexpr int32 Rounds = 250000;
+    // Every thread waits until all of them run, so the loops overlap for
+    // their whole length. Started one after another, a loop would end before
+    // the next thread began and a read-modify-write would never be caught.
+    const auto RunTogether = [](TFunctionRef<void(int32)> Body)
     {
+        TAtomic<int32> Ready{0};
         TArray<TFuture<void>> Running;
         for (int32 Index = 0; Index < Threads; ++Index)
         {
-            Running.Add(Async(EAsyncExecution::Thread, [&Body, Index]() { Body(Index); }));
+            Running.Add(Async(EAsyncExecution::Thread, [&Body, &Ready, Index]()
+            {
+                Ready.IncrementExchange();
+                while (Ready.Load() < Threads)
+                {
+                    FPlatformProcess::YieldThread();
+                }
+                Body(Index);
+            }));
         }
         for (TFuture<void>& Future : Running)
         {
             Future.Wait();
         }
     };
+    // One consumer returns the slots the producers took, as the other thread
+    // of the transport does. A producer hands each slot over as a token.
+    struct FHandOver
+    {
+        TAtomic<int32> Tokens{0};
+        TAtomic<int32> Taken{0};
+        TAtomic<int32> Returned{0};
+        TAtomic<int32> Producers{Threads};
+    };
+    const auto RunHandOver = [&](FHandOver& Slots, TFunctionRef<bool()> Take, TFunctionRef<void()> Return)
+    {
+        TFuture<void> Consumer = Async(EAsyncExecution::Thread, [&]()
+        {
+            while (Slots.Producers.Load() > 0 || Slots.Tokens.Load() > 0)
+            {
+                int32 Token = Slots.Tokens.Load();
+                if (Token > 0 && Slots.Tokens.CompareExchange(Token, Token - 1))
+                {
+                    Return();
+                    Slots.Returned.IncrementExchange();
+                }
+                else
+                {
+                    FPlatformProcess::YieldThread();
+                }
+            }
+        });
+        RunTogether([&](int32)
+        {
+            for (int32 Round = 0; Round < Rounds; ++Round)
+            {
+                if (Take())
+                {
+                    Slots.Taken.IncrementExchange();
+                    Slots.Tokens.IncrementExchange();
+                }
+            }
+            Slots.Producers.DecrementExchange();
+        });
+        Consumer.Wait();
+    };
 
-    // Producers and consumers of the intake budget run at the same time, as
-    // the worker and the game thread do; no increment or decrement is lost.
-    // Every thread takes and returns the same number of slots, so the count
-    // can only end at zero if all of them landed.
-    RunAll([&](int32)
-    {
-        for (int32 Round = 0; Round < PerThread; ++Round)
-        {
-            FMtoUControlBudgetTestAccess::AdmitIncoming(Source);
-            FMtoUControlBudgetTestAccess::ReleaseIncoming(Source);
-        }
-    });
-    TestEqual(TEXT("the intake budget loses no update"),
-        FMtoUControlBudgetTestAccess::IncomingQueued(Source), 0);
-    RunAll([&](int32)
-    {
-        for (int32 Round = 0; Round < PerThread; ++Round)
-        {
-            FMtoUControlBudgetTestAccess::AdmitOutgoing(Source);
-        }
-    });
-    TestEqual(TEXT("every reply slot taken is counted"),
-        FMtoUControlBudgetTestAccess::OutgoingQueued(Source), Threads * PerThread);
-    RunAll([&](int32)
-    {
-        for (int32 Round = 0; Round < PerThread; ++Round)
-        {
-            FMtoUControlBudgetTestAccess::ReleaseOutgoing(Source);
-        }
-    });
-    TestEqual(TEXT("every reply slot returned is counted"),
-        FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
-    RunAll([&](int32 Index)
-    {
-        for (int32 Round = 0; Round < PerThread; ++Round)
-        {
-            if (Index % 2 == 0)
-            {
-                FMtoUControlBudgetTestAccess::AdmitIncoming(Source);
-            }
-            else
-            {
-                FMtoUControlBudgetTestAccess::ReleaseIncoming(Source);
-            }
-        }
-    });
-    TestEqual(TEXT("concurrent intake and consumption lose no update"),
-        FMtoUControlBudgetTestAccess::IncomingQueued(Source), 0);
-
-    // Producers racing for the reply budget never pass the frozen limit.
-    // Each slot a producer wins is handed to the consumer as a token, which
-    // returns the slot; what was admitted equals what was returned.
-    TAtomic<int32> Tokens{0};
-    TAtomic<int32> Admitted{0};
-    TAtomic<int32> Returned{0};
-    TAtomic<int32> Producers{Threads};
-    Source.ResetControlQueuePeaks();
-    TFuture<void> Consumer = Async(EAsyncExecution::Thread, [&]()
-    {
-        while (Producers.Load() > 0 || Tokens.Load() > 0)
-        {
-            int32 Token = Tokens.Load();
-            if (Token > 0 && Tokens.CompareExchange(Token, Token - 1))
-            {
-                FMtoUControlBudgetTestAccess::ReleaseOutgoing(Source);
-                Returned.IncrementExchange();
-            }
-        }
-    });
-    RunAll([&](int32)
-    {
-        for (int32 Round = 0; Round < PerThread; ++Round)
-        {
-            if (FMtoUControlBudgetTestAccess::TryAdmitOutgoing(Source))
-            {
-                Admitted.IncrementExchange();
-                Tokens.IncrementExchange();
-            }
-        }
-        Producers.DecrementExchange();
-    });
-    Consumer.Wait();
+    // Every thread takes a slot and returns it at once, so the count can
+    // only be between zero and the number of threads, and only ends at zero
+    // if no increment or decrement was lost.
     int32 OutgoingPeak = 0;
     int32 IncomingPeak = 0;
+    Source.ResetControlQueuePeaks();
+    RunTogether([&](int32)
+    {
+        for (int32 Round = 0; Round < Rounds; ++Round)
+        {
+            Access::AdmitIncoming(Source);
+            Access::ReleaseIncoming(Source);
+        }
+    });
     Source.GetControlQueuePeaks(OutgoingPeak, IncomingPeak);
-    TestEqual(TEXT("every admitted reply slot was returned"), Returned.Load(), Admitted.Load());
-    TestEqual(TEXT("no reply slot is left"), FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+    TestEqual(TEXT("the intake budget loses no update"), Access::IncomingQueued(Source), 0);
+    TestTrue(TEXT("the intake budget never counts a slot nobody holds"),
+        IncomingPeak >= 1 && IncomingPeak <= Threads);
+
+    Source.ResetControlQueuePeaks();
+    RunTogether([&](int32)
+    {
+        for (int32 Round = 0; Round < Rounds; ++Round)
+        {
+            Access::AdmitOutgoing(Source);
+            Access::ReleaseOutgoing(Source);
+        }
+    });
+    Source.GetControlQueuePeaks(OutgoingPeak, IncomingPeak);
+    TestEqual(TEXT("the reply budget loses no update"), Access::OutgoingQueued(Source), 0);
+    TestTrue(TEXT("the reply budget never counts a slot nobody holds"),
+        OutgoingPeak >= 1 && OutgoingPeak <= Threads);
+
+    // Producers and the consumer of one count run at the same time: the
+    // worker and the game thread for the intake, the game thread and the
+    // worker for the replies.
+    FHandOver Intake;
+    RunHandOver(Intake,
+        [&]() { Access::AdmitIncoming(Source); return true; },
+        [&]() { Access::ReleaseIncoming(Source); });
+    TestEqual(TEXT("every intake slot taken was returned"), Intake.Returned.Load(), Intake.Taken.Load());
+    TestEqual(TEXT("no intake slot is left"), Access::IncomingQueued(Source), 0);
+
+    // Producers racing for the reply budget never pass the frozen limit.
+    Source.ResetControlQueuePeaks();
+    FHandOver Replies;
+    RunHandOver(Replies,
+        [&]() { return Access::TryAdmitOutgoing(Source); },
+        [&]() { Access::ReleaseOutgoing(Source); });
+    Source.GetControlQueuePeaks(OutgoingPeak, IncomingPeak);
+    TestEqual(TEXT("every reply slot taken was returned"), Replies.Returned.Load(), Replies.Taken.Load());
+    TestTrue(TEXT("the racing producers took reply slots"), Replies.Taken.Load() > 0);
+    TestEqual(TEXT("no reply slot is left"), Access::OutgoingQueued(Source), 0);
     TestTrue(TEXT("the reply queue never passed the frozen limit"),
         OutgoingPeak >= 1 && OutgoingPeak <= FMtoUProtocol::MaxControlQueue);
     Fixture.Close();
