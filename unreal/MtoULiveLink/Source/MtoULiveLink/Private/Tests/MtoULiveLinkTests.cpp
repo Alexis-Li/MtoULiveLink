@@ -15738,6 +15738,11 @@ public:
     {
         return Source.QueuedLinkageControls.Load();
     }
+    // A reply the game thread queues for a session, as its own replies are.
+    static void QueueReply(FMtoULiveLinkSource& Source, uint64 SessionId, TArray<uint8> Packet)
+    {
+        Source.EnqueueReplyPacketOnGameThread(SessionId, MoveTemp(Packet), false);
+    }
 };
 
 namespace
@@ -15950,27 +15955,20 @@ struct FMtoUSessionEndMaya
     FMtoUSessionEndMaya(const FMtoUSessionEndMaya&) = delete;
     FMtoUSessionEndMaya& operator=(const FMtoUSessionEndMaya&) = delete;
 
-    // Maya hangs up. It reads what Unreal still has in flight first: the
-    // worker writes a reply to a vanished peer in a loop that only the
-    // connection state can end, so a hang-up with a reply pending would test
-    // that loop, not the session end.
+    // Maya hangs up, whatever Unreal still has in flight.
     void Drop()
+    {
+        DestroySocket(*Fixture.Sockets, Socket);
+    }
+
+    // Maya hangs up abortively: the connection is reset, not closed.
+    void Reset()
     {
         if (Socket)
         {
-            PollUntil([this]()
-            {
-                Pump();
-                uint8 Buffer[65536];
-                int32 Read = 0;
-                if (Socket->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read) && Read > 0)
-                {
-                    Reader.Decoder.Append(Buffer, Read);
-                }
-                return false;
-            }, 0.15);
-            DestroySocket(*Fixture.Sockets, Socket);
+            Socket->SetLinger(true, 0);
         }
+        Drop();
     }
     void Pump() { Fixture.Pump(); }
 
@@ -16149,6 +16147,102 @@ bool FMtoUSessionEndDisconnectTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("the late mode message borrows no writer"), F.Hooks.TakeOverCalls, 1);
     TestEqual(TEXT("the late mode message returned its slot"),
         FMtoUSessionEndTestAccess::IncomingQueued(*F.Source), 0);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUSessionEndResetMidReplyTest,
+    "MtoULiveLink.Linkage.SessionEnd.ResetMidReply",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUSessionEndResetMidReplyTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this))
+    {
+        return false;
+    }
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, true))
+    {
+        return false;
+    }
+    FString Error;
+    TestTrue(TEXT("linkage entry takes the writers over"), MtoURequestLinkageEnter(1, Error));
+    if (!Maya.ConfirmLinkage(*this, 1))
+    {
+        return false;
+    }
+    const uint64 SessionId = static_cast<uint64>(Maya.SessionId);
+
+    // Replies far beyond what the socket buffers hold stay in flight, the
+    // worker waiting for room to write the rest, for as long as Maya does not
+    // read.
+    constexpr int32 ReplyBytes = 1024 * 1024;
+    constexpr int32 ReplyCount = 32;
+    constexpr int64 InFlightBytes = int64(ReplyBytes) * ReplyCount;
+    auto QueueInFlight = [&]()
+    {
+        for (int32 Index = 0; Index < ReplyCount; ++Index)
+        {
+            TArray<uint8> Reply;
+            Reply.SetNumZeroed(ReplyBytes);
+            FMtoUSessionEndTestAccess::QueueReply(*F.Source, SessionId, MoveTemp(Reply));
+        }
+    };
+    auto ReplyInFlight = [&]()
+    {
+        PollUntil([&]() { F.Pump(); return false; }, 0.5);
+        uint32 Arrived = 0;
+        Maya.Socket->HasPendingData(Arrived);
+        return Arrived > 0 && Arrived < static_cast<uint32>(InFlightBytes);
+    };
+
+    // A slow reader is waited for: the session survives the backpressure and
+    // every reply arrives once Maya reads.
+    QueueInFlight();
+    TestTrue(TEXT("the replies are still in flight while Maya does not read"), ReplyInFlight());
+    TestEqual(TEXT("a slow reader keeps its session"),
+        static_cast<uint64>(MtoUGetLinkageView().Identity.SessionId), SessionId);
+    int64 Received = 0;
+    TestTrue(TEXT("every reply reaches the slow reader"), PollUntil([&]()
+    {
+        F.Pump();
+        uint8 Buffer[65536];
+        int32 Read = 0;
+        while (Maya.Socket->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read) && Read > 0)
+        {
+            Received += Read;
+        }
+        // Linkage replies queued meanwhile may follow them.
+        return Received >= InFlightBytes;
+    }, 10.0));
+    AddInfo(FString::Printf(TEXT("the slow reader received %lld bytes"), Received));
+    TestEqual(TEXT("the slow reader's session is still live"),
+        static_cast<uint64>(MtoUGetLinkageView().Identity.SessionId), SessionId);
+
+    // Maya resets the connection while the next replies are in flight: the
+    // worker leaves them and ends the session by the end contract.
+    QueueInFlight();
+    TestTrue(TEXT("the next replies are in flight at the reset"), ReplyInFlight());
+    Maya.Reset();
+    TestTrue(TEXT("the reset mid reply reaches the end contract"), F.WaitSessionOver());
+    PollUntil([&]() { F.Pump(); return false; }, 0.2);
+    TestEqual(TEXT("the borrowed writers were handed back once"), F.Hooks.RestoreCalls, 1);
+    const FMtoULinkageView Ended = MtoUGetLinkageView();
+    TestFalse(TEXT("the takeover is no longer held"), Ended.bTakeoverHeld);
+    TestTrue(TEXT("the session identity is cleared"),
+        Ended.Identity.SessionId == 0 && Ended.Identity.SetRevision == 0
+        && Ended.Identity.ModeRevision == 0);
+    TestTrue(TEXT("the actor shows the true disconnected state"),
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
+
+    // The worker is free again: the next Maya is accepted and greeted.
+    FMtoUSessionEndMaya Next(F);
+    TestTrue(TEXT("the next Maya is accepted after the reset"), Next.Connect(*this, false));
+    TestTrue(TEXT("the next Maya opens a new session"),
+        static_cast<uint64>(Next.SessionId) > SessionId);
     return true;
 }
 

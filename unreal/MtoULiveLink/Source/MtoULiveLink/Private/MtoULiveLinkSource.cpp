@@ -92,17 +92,26 @@ void CloseSocket(ISocketSubsystem& SocketSubsystem, FSocket*& Socket)
     }
 }
 
-bool SendPacket(FSocket& Socket, const TArray<uint8>& Packet, const TAtomic<bool>& bStopping)
+// A failed send is retried only while the socket cannot take more bytes yet;
+// any other error means the peer reset or aborted the connection. The
+// connection state cannot tell: it reports a reset socket as connected for
+// seconds after its last activity, and again whenever the socket polls ready.
+bool SendPacket(
+    ISocketSubsystem& SocketSubsystem,
+    FSocket& Socket,
+    const TArray<uint8>& Packet,
+    const TAtomic<bool>& bStopping)
 {
     int32 Offset = 0;
     while (Offset < Packet.Num() && !bStopping.Load())
     {
         int32 Sent = 0;
-        if (Socket.Send(Packet.GetData() + Offset, Packet.Num() - Offset, Sent) && Sent > 0)
+        const bool bSent = Socket.Send(Packet.GetData() + Offset, Packet.Num() - Offset, Sent);
+        if (bSent && Sent > 0)
         {
             Offset += Sent;
         }
-        else if (Socket.GetConnectionState() != SCS_Connected)
+        else if (!bSent && SocketSubsystem.GetLastErrorCode() != SE_EWOULDBLOCK)
         {
             return false;
         }
@@ -931,6 +940,7 @@ uint32 FMtoULiveLinkSource::Run()
         if (ClientSocket)
         {
             SendPacket(
+                *SocketSubsystem,
                 *ClientSocket,
                 FMtoUProtocol::EncodeError(Code, Message),
                 bStopRequested);
@@ -945,6 +955,7 @@ uint32 FMtoULiveLinkSource::Run()
         if (ClientSocket)
         {
             SendPacket(
+                *SocketSubsystem,
                 *ClientSocket,
                 FMtoUProtocol::EncodeError(Code, Message),
                 bStopRequested);
@@ -1116,6 +1127,7 @@ uint32 FMtoULiveLinkSource::Run()
                 if (ClientSocket)
                 {
                     SendPacket(
+                        *SocketSubsystem,
                         *Accepted,
                         FMtoUProtocol::EncodeError(
                             TEXT("SECOND_CLIENT_REJECTED"),
@@ -1161,7 +1173,7 @@ uint32 FMtoULiveLinkSource::Run()
                     continue;
                 }
                 bDidWork = true;
-                if (!SendPacket(*ClientSocket, Reply.Packet, bStopRequested))
+                if (!SendPacket(*SocketSubsystem, *ClientSocket, Reply.Packet, bStopRequested))
                 {
                     MarkDisconnected();
                     break;
@@ -1496,6 +1508,7 @@ uint32 FMtoULiveLinkSource::Run()
                                     ActiveSession, WorkerCacheUploadId);
                                 bDidWork = true;
                                 SendPacket(
+                                    *SocketSubsystem,
                                     *ClientSocket,
                                     FMtoUProtocol::EncodeError(
                                         ErrorCode,
