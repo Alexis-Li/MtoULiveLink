@@ -164,7 +164,4 @@ public:
      * of waiting for the next selection change.
      */
     static void RegisterLinkagePanelWidget(TWeakPtr<class SWidget> Widget);
-
-    /** Raised when the runtime published a new linkage view; the panel invalidates itself. */
-    static FSimpleMulticastDelegate& OnLinkageViewChanged();
 };

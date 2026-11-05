@@ -64,10 +64,43 @@ enum class EMtoUDisplayTarget : uint8
 };
 
 /**
+ * What the link currently says about one Binding actor: the outcome of the
+ * negotiation that last ran for it, or the end of its session. The detail
+ * text that goes with it (the failure of an `Error`) is separate and
+ * informational; nothing branches on it. Never serialized and never sent on
+ * the wire. `Disconnected` does not say whether the actor ever streamed;
+ * `EMtoULinkSessionState` does.
+ */
+UENUM()
+enum class EMtoUConnectionState : uint8
+{
+    /** No session streams to this actor: it never connected or its session ended. */
+    Disconnected,
+    /** A connection is negotiating this actor's Binding. */
+    Validating,
+    /** The actor streams as the primary character. */
+    Connected,
+    /** The actor streams as the second object of the set. */
+    ConnectedAsSecondObject,
+    /** Model preview streams, and only some Morph Targets match. */
+    ConnectedPartialMorph,
+    /** Model preview streams bones only; not valid for model acceptance. */
+    ConnectedBoneOnly,
+    /** Model preview was refused: no ready Generated Preview exists. */
+    PreviewNotReady,
+    /** Model preview was refused: no Morph Target is shared with Maya. */
+    PreviewMorphMismatch,
+    /** The actor was removed from the connected set while the connection went on. */
+    RemovedFromSet,
+    /** The negotiation failed; the detail text names why. */
+    Error
+};
+
+/**
  * Local session lifecycle of one Binding actor, owned by the actor and the
- * source that streams to it. The connection status string cannot express it:
- * an actor that never streamed and one whose session ended both report
- * "Disconnected". Never serialized and never sent on the wire.
+ * source that streams to it. The connection state cannot express it: an actor
+ * that never streamed and one whose session ended both report `Disconnected`.
+ * Never serialized and never sent on the wire.
  */
 UENUM()
 enum class EMtoULinkSessionState : uint8
@@ -147,10 +180,12 @@ public:
     virtual void BeginDestroy() override;
 
     void SetBinding(UMtoULiveLinkBinding* InBinding);
-    void SetConnectionStatus(const FString& InStatus);
+    /** The detail is the failure of an `Error`; the other states carry none. */
+    void SetConnectionState(EMtoUConnectionState InState, const FString& InDetail = FString());
     USkeletalMeshComponent* GetSkeletalMeshComponent() const { return SkeletalMeshComponent; }
     UMtoULiveLinkBinding* GetBinding() const { return Binding; }
-    const FString& GetConnectionStatus() const { return ConnectionStatus; }
+    EMtoUConnectionState GetConnectionState() const { return ConnectionState; }
+    const FString& GetConnectionDetail() const { return ConnectionDetail; }
 
     /** Whether this actor is idle, streaming, or past a session that ended. */
     EMtoULinkSessionState GetLinkSessionState() const { return LinkSessionState; }
@@ -347,7 +382,10 @@ private:
     EMtoUModelDiagnosticLevel ModelDiagnosticLevel = EMtoUModelDiagnosticLevel::None;
 
     UPROPERTY(VisibleAnywhere, Transient, Category = "MtoU_LiveLink")
-    FString ConnectionStatus = TEXT("Disconnected");
+    EMtoUConnectionState ConnectionState = EMtoUConnectionState::Disconnected;
+
+    UPROPERTY(VisibleAnywhere, Transient, Category = "MtoU_LiveLink")
+    FString ConnectionDetail;
 
     /**
      * Session bookkeeping kept off the wire and off the saved actor, so a

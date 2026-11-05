@@ -34,7 +34,9 @@
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
+#include "Misc/OutputDevice.h"
 #include "Misc/Paths.h"
+#include "Misc/ScopeExit.h"
 #include "ReferenceSkeleton.h"
 #include "Roles/LiveLinkAnimationRole.h"
 #include "Roles/LiveLinkAnimationTypes.h"
@@ -198,6 +200,18 @@ public:
     static int32 IncomingQueued(const FMtoULiveLinkSource& Source)
     {
         return Source.QueuedLinkageControls.Load();
+    }
+    // A control reply that was queued while its session still lived and that
+    // the worker has not taken yet when the session ends.
+    static void QueueReplyOfSession(
+        FMtoULiveLinkSource& Source, uint64 SessionId, const TArray<uint8>& Packet)
+    {
+        FMtoUOutgoing Reply;
+        Reply.SessionId = SessionId;
+        Reply.Packet = Packet;
+        Reply.bControl = true;
+        Source.AdmitOutgoingControl();
+        Source.OutgoingReplies.Enqueue(MoveTemp(Reply));
     }
     static bool TryAdmitOutgoing(FMtoULiveLinkSource& Source) { return Source.TryAdmitOutgoingControl(); }
     static void AdmitOutgoing(FMtoULiveLinkSource& Source) { Source.AdmitOutgoingControl(); }
@@ -513,6 +527,46 @@ AMtoULiveLinkActor* AddBoundActor(UWorld& World)
     }
     return Actor;
 }
+
+/**
+ * Records which Binding actors ask for a streaming session end, for tests that
+ * run without a session: what an actor operation asks for is observable here
+ * without a source. The probe is global, so the record lives exactly as long
+ * as this object.
+ */
+struct FMtoUSessionEndProbe
+{
+    TArray<TWeakObjectPtr<const AMtoULiveLinkActor>> Requesters;
+
+    FMtoUSessionEndProbe()
+    {
+        MtoUSetStreamingSessionEndProbe([this](const AMtoULiveLinkActor& Requester)
+        {
+            Requesters.Add(&Requester);
+        });
+    }
+    ~FMtoUSessionEndProbe()
+    {
+        MtoUSetStreamingSessionEndProbe(nullptr);
+    }
+    FMtoUSessionEndProbe(const FMtoUSessionEndProbe&) = delete;
+    FMtoUSessionEndProbe& operator=(const FMtoUSessionEndProbe&) = delete;
+
+    /** How many requests were made so far; a mark for RequestedSince. */
+    int32 Count() const { return Requesters.Num(); }
+    /** True when the actor asked after the mark. */
+    bool RequestedSince(int32 Mark, const AMtoULiveLinkActor& Actor) const
+    {
+        for (int32 Index = Mark; Index < Requesters.Num(); ++Index)
+        {
+            if (Requesters[Index].Get() == &Actor)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+};
 
 /** Explicit v10 pairing of one Binding actor with one Maya object id. */
 bool PairLinkageTarget(AMtoULiveLinkActor* Actor, const FString& ObjectId = TEXT("character"))
@@ -7196,7 +7250,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
         SkeletalMeshComponent
         && SkeletalMeshComponent->GetSkeletalMeshAsset() == VisibleTargetBefore);
     TestTrue(TEXT("model rejection keeps the actor disconnected from streaming"),
-        Actor && !Actor->GetConnectionStatus().Equals(TEXT("Connected"))
+        Actor && Actor->GetConnectionState() != EMtoUConnectionState::Connected
         && !Actor->GetPreviewReadiness().IsUsable());
     TestTrue(TEXT("a refused Model connection leaves readiness unmodified"),
         Actor && Actor->GetPreviewReadiness().State == EMtoUPreviewState::None
@@ -7278,7 +7332,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("bone-only ready reports zero accepted Morphs despite the full manifest"),
         FromUtf8(Payload).Contains(TEXT("\"accepted_morph_count\":0")));
     TestTrue(TEXT("bone-only result is visibly excluded from model acceptance"),
-        Actor && Actor->GetConnectionStatus().Contains(TEXT("not valid for model acceptance")));
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::ConnectedBoneOnly);
     TestEqual(TEXT("bone-only connection clears every Generated Morph"),
         SkeletalMeshComponent->GetMorphTarget(FName(TEXT("Unaccepted"))), 0.0f);
 
@@ -7337,7 +7391,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
         && FromUtf8(Payload).Contains(TEXT("\"workflow\":\"model\""))
         && FromUtf8(Payload).Contains(TEXT("\"accepted_morph_count\":0")));
     TestTrue(TEXT("empty-intersection connection is labelled a Bone-only comparison"),
-        Actor && Actor->GetConnectionStatus().Contains(TEXT("bone-only diagnostic"))
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::ConnectedBoneOnly
         && Actor->GetModelDiagnosticLevel() == EMtoUModelDiagnosticLevel::BoneOnly
         && Actor->GetModelDiagnostics().Contains(TEXT("ORANGE: Bone-only diagnostic")));
     DestroySocket(*SocketSubsystem, EmptyIntersectionClient);
@@ -7359,7 +7413,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
         && FromUtf8(Payload).Contains(TEXT("\"accepted_morph_count\":0")));
     TestTrue(TEXT("bone-driven outfit is not labelled an invalid diagnostic"),
         Actor
-        && Actor->GetConnectionStatus().Equals(TEXT("Connected"))
+        && Actor->GetConnectionState() == EMtoUConnectionState::Connected
         && Actor->GetPreviewReadiness().State == EMtoUPreviewState::Ready
         && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == GeneratedPreview);
     TestTrue(TEXT("bone-driven diagnostics report the declared-zero manifest"),
@@ -7454,7 +7508,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("partial Model coverage is a connection diagnostic that keeps readiness Ready"),
         Actor && Actor->GetPreviewReadiness().State == EMtoUPreviewState::Ready
         && Actor->GetModelDiagnosticLevel() == EMtoUModelDiagnosticLevel::Partial
-        && Actor->GetConnectionStatus().Contains(TEXT("partial Morph coverage")));
+        && Actor->GetConnectionState() == EMtoUConnectionState::ConnectedPartialMorph);
     TestTrue(TEXT("Model diagnostics report all five requested counts"),
         Actor && Actor->GetModelDiagnostics().Contains(TEXT("Maya current BlendShape count: 4"))
         && Actor->GetModelDiagnostics().Contains(TEXT("Model display Morph total: 4"))
@@ -7598,7 +7652,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
         && FromUtf8(Payload).Contains(TEXT("\"workflow\":\"animation\""))
         && FromUtf8(Payload).Contains(TEXT("\"target_morph_count\":1")));
     TestTrue(TEXT("animation connection marks the actor connected"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Connected")));
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     TestTrue(TEXT("Animation workflow restores the Driver Skeletal Mesh"),
         SkeletalMeshComponent
         && SkeletalMeshComponent->GetSkeletalMeshAsset() == VisibleTargetBefore);
@@ -7827,7 +7881,7 @@ bool FMtoUPreviewReadinessTest::RunTest(const FString& Parameters)
     USkeletalMesh* Retained = MakeTransientGeneratedPreview(Driver, *Actor);
     FMtoUPreviewReadinessTestAccess::Commit(*Actor, Retained, false, TEXT("ready"));
     Actor->ShowGeneratedPreview(false);
-    Actor->SetConnectionStatus(TEXT("Disconnected"));
+    Actor->SetConnectionState(EMtoUConnectionState::Disconnected);
     TestTrue(TEXT("disconnect preserves an unchanged ready Generated Preview for reuse"),
         Actor->GetPreviewReadiness().State == EMtoUPreviewState::Ready
         && Actor->GetPreviewReadiness().GeneratedPreview == Retained);
@@ -8122,7 +8176,7 @@ bool FMtoUSessionTerminationBoundaryTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("ready Model revision negotiates a streaming session"),
         NegotiateModelReady(Primary).Contains(TEXT("\"type\":\"ready\"")));
     TestTrue(TEXT("connected actor reports the live session"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Connected"))
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Connected
             && Actor->GetLinkSessionState() == EMtoULinkSessionState::Streaming);
 
     // ADR-0002 boundary: a relevant reimport of a Preview input ends the
@@ -8138,7 +8192,7 @@ bool FMtoUSessionTerminationBoundaryTest::RunTest(const FString& Parameters)
     });
     TestTrue(TEXT("source returns to listening after the boundary termination"), bReturnedToListening);
     TestTrue(TEXT("terminated actor shows the true disconnected state"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Disconnected"))
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Disconnected
             && Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
     const FMtoUPreviewReadiness AfterReimport = Actor->GetPreviewReadiness();
     TestTrue(TEXT("reimport invalidates the previous revision without a new Preview"),
@@ -8185,8 +8239,8 @@ bool FMtoUSessionTerminationBoundaryTest::RunTest(const FString& Parameters)
     DestroySocket(*SocketSubsystem, Second);
 
     // Late duplicate requests stay idempotent and never affect a later host.
-    MtoURequestStreamingSessionEnd();
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*Actor);
+    MtoURequestStreamingSessionEnd(*Actor);
     FSocket* AfterDestroyClient = ConnectLoopback(*SocketSubsystem, Port);
     TestNotNull(TEXT("post-destruction client connects"), AfterDestroyClient);
     // A destroyed target is refused before any pose work starts. The v10
@@ -8295,8 +8349,8 @@ bool FMtoUPieTargetPolicyTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("the editor Binding actor alone negotiates ready during PIE"),
         PieReply.Contains(TEXT("\"type\":\"ready\"")));
     TestTrue(TEXT("the editor actor is the connected target"),
-        EditorActor && EditorActor->GetConnectionStatus().Equals(TEXT("Connected"))
-        && PieActor && PieActor->GetConnectionStatus().Equals(TEXT("Disconnected")));
+        EditorActor && EditorActor->GetConnectionState() == EMtoUConnectionState::Connected
+        && PieActor && PieActor->GetConnectionState() == EMtoUConnectionState::Disconnected);
     DestroySocket(*SocketSubsystem, Client);
     TestTrue(TEXT("source returns to listening after the PIE-era session"),
         PollUntil([&]()
@@ -8454,7 +8508,7 @@ bool FMtoUWorldUnloadTerminationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("ready Model revision negotiates a streaming session"),
         NegotiateModelReady(Primary).Contains(TEXT("\"type\":\"ready\"")));
     TestTrue(TEXT("connected actor reports the live session"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Connected")));
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Connected);
 
     // One streamed reference-pose frame proves the session owns a live
     // Live Link subject, not merely a negotiated socket.
@@ -8533,12 +8587,12 @@ bool FMtoUWorldUnloadTerminationTest::RunTest(const FString& Parameters)
     });
     TestTrue(TEXT("the world unload leaves no active subject"), bUnloadCleanup);
     TestTrue(TEXT("the unloaded actor shows the true disconnected state"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Disconnected")));
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
 
     // Late duplicate termination requests stay idempotent, and once the
     // editor reaps the unloaded world the stale actor leaves no target.
-    MtoURequestStreamingSessionEnd();
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*Actor);
+    MtoURequestStreamingSessionEnd(*Actor);
     if (GEngine)
     {
         GEngine->DestroyWorldContext(World);
@@ -9760,6 +9814,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUCharacterPartLifecycleTest,
 bool FMtoUCharacterPartLifecycleTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    FMtoUSessionEndProbe Ends;
     UWorld* World = UWorld::CreateWorld(EWorldType::EditorPreview, false);
     TestNotNull(TEXT("preview world is created"), World);
     AMtoULiveLinkActor* Actor = World ? World->SpawnActor<AMtoULiveLinkActor>() : nullptr;
@@ -9797,7 +9852,7 @@ bool FMtoUCharacterPartLifecycleTest::RunTest(const FString& Parameters)
 
     // Display names and list position are pure presentation: neither a session
     // nor a display component may be rebuilt for them.
-    const uint64 EndsBeforeRename = MtoUGetStreamingSessionEndCount();
+    const int32 EndsBeforeRename = Ends.Count();
     Binding->AdditionalParts[0].PartName = TEXT("HeadMesh");
     Binding->AdditionalParts.Swap(0, 1);
     Actor->NotifyCharacterPartsChanged();
@@ -9806,19 +9861,19 @@ bool FMtoUCharacterPartLifecycleTest::RunTest(const FString& Parameters)
         && Actor->GetCharacterPartComponents()[0] == FirstComponent
         && FirstComponent->GetSkeletalMeshAsset() == Head);
     TestTrue(TEXT("renaming and reordering a part keeps the streaming session"),
-        MtoUGetStreamingSessionEndCount() == EndsBeforeRename);
+        Ends.Count() == EndsBeforeRename);
 
     // Enabling the parked part and disabling the displayed one swaps the
     // component set, and the old session can no longer reach the new one.
     Binding->AdditionalParts[0].bEnabled = true;
     Binding->AdditionalParts[1].bEnabled = false;
-    const uint64 EndsBeforeSwap = MtoUGetStreamingSessionEndCount();
+    const int32 EndsBeforeSwap = Ends.Count();
     Actor->NotifyCharacterPartsChanged();
     TestTrue(TEXT("enabling a part adds its component and drops the disabled one"),
         Actor->GetCharacterPartComponents().Num() == 1
         && Actor->GetCharacterPartComponents()[0]->PartMesh == Hair);
     TestTrue(TEXT("a composition change ends the streaming session"),
-        MtoUGetStreamingSessionEndCount() > EndsBeforeSwap);
+        Ends.Count() > EndsBeforeSwap && Ends.RequestedSince(EndsBeforeSwap, *Actor));
     TestTrue(TEXT("a replaced part is unregistered and left with no display"),
         !FirstComponent->IsRegistered()
         && FirstComponent->GetSkeletalMeshAsset() == nullptr);
@@ -9886,10 +9941,10 @@ bool FMtoUCharacterPartLifecycleTest::RunTest(const FString& Parameters)
     // A rebuilt part source can change its Skeleton, bones, Morph library, or
     // reference pose, so the negotiated composition is stale and the session
     // must end; the display component stays usable for the next connection.
-    const uint64 EndsBeforeRebuild = MtoUGetStreamingSessionEndCount();
+    const int32 EndsBeforeRebuild = Ends.Count();
     Replacement->GetOnMeshChanged().Broadcast();
     TestTrue(TEXT("a part source rebuild ends the streaming session"),
-        MtoUGetStreamingSessionEndCount() > EndsBeforeRebuild);
+        Ends.Count() > EndsBeforeRebuild && Ends.RequestedSince(EndsBeforeRebuild, *Actor));
     TestTrue(TEXT("a part source rebuild keeps the same display component"),
         Actor->GetCharacterPartComponents().Num() == 1
         && Actor->GetCharacterPartComponents()[0]->MatchesPart(
@@ -9911,6 +9966,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUCharacterPartTransactionsTest,
 bool FMtoUCharacterPartTransactionsTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    FMtoUSessionEndProbe Ends;
     // Ignored: the engine notes the context-free test world on actor teardown.
     AddExpectedMessagePlain(TEXT("World has no context"), ELogVerbosity::Warning,
         EAutomationExpectedMessageFlags::Contains, -1);
@@ -9996,7 +10052,7 @@ bool FMtoUCharacterPartTransactionsTest::RunTest(const FString& Parameters)
 
     // Adding a part through the asset editor: a composition change that ends
     // the session while the garment Preview revision survives.
-    const uint64 EndsBeforeAdd = MtoUGetStreamingSessionEndCount();
+    const int32 EndsBeforeAdd = Ends.Count();
     RunBindingEditTransaction(*Binding, *PartsProperty, [&]()
     {
         AddCharacterPart(*Binding, TEXT("Hair"), Hair);
@@ -10004,13 +10060,13 @@ bool FMtoUCharacterPartTransactionsTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("a part edit adds its display component"),
         Actor->GetCharacterPartComponents().Num(), 2);
     TestTrue(TEXT("a part edit ends the streaming session"),
-        MtoUGetStreamingSessionEndCount() > EndsBeforeAdd);
+        Ends.Count() > EndsBeforeAdd && Ends.RequestedSince(EndsBeforeAdd, *Actor));
     TestEqual(TEXT("a part edit reaches an actor with no construction rerun"),
         Detached->GetCharacterPartComponents().Num(), 2);
     TestTrue(TEXT("a part edit keeps the generated garment Preview ready"),
         Actor->GetPreviewReadiness().IsUsable()
         && Actor->GetPreviewReadiness().GeneratedPreview == Generated);
-    const uint64 EndsAfterAdd = MtoUGetStreamingSessionEndCount();
+    const int32 EndsAfterAdd = Ends.Count();
 
     // Undo of that addition is the transaction entry under test: the actors
     // must learn about the restored list rather than keeping the added part.
@@ -10022,11 +10078,11 @@ bool FMtoUCharacterPartTransactionsTest::RunTest(const FString& Parameters)
         Detached->GetCharacterPartComponents().Num() == 1
         && Detached->GetCharacterPartComponents()[0]->PartMesh == Head);
     TestTrue(TEXT("undo of a part edit ends the streaming session"),
-        MtoUGetStreamingSessionEndCount() > EndsAfterAdd);
+        Ends.Count() > EndsAfterAdd && Ends.RequestedSince(EndsAfterAdd, *Actor));
     TestTrue(TEXT("undo of a part edit keeps the Generated Preview ready"),
         Actor->GetPreviewReadiness().IsUsable()
         && Actor->GetPreviewReadiness().GeneratedPreview == Generated);
-    const uint64 EndsAfterUndo = MtoUGetStreamingSessionEndCount();
+    const int32 EndsAfterUndo = Ends.Count();
     TestTrue(TEXT("undo reaches the detached actor for the removal case"),
         Detached->GetCharacterPartComponents().Num() == 1);
 
@@ -10040,7 +10096,7 @@ bool FMtoUCharacterPartTransactionsTest::RunTest(const FString& Parameters)
         && CharacterPartMeshes(*Actor).Contains(Head)
         && CharacterPartMeshes(*Actor).Contains(Hair));
     TestTrue(TEXT("redo of a part edit ends the streaming session"),
-        MtoUGetStreamingSessionEndCount() > EndsAfterUndo);
+        Ends.Count() > EndsAfterUndo && Ends.RequestedSince(EndsAfterUndo, *Actor));
     TestTrue(TEXT("redo of a part edit keeps the Generated Preview ready"),
         Actor->GetPreviewReadiness().IsUsable()
         && Actor->GetPreviewReadiness().GeneratedPreview == Generated);
@@ -10074,7 +10130,7 @@ bool FMtoUCharacterPartTransactionsTest::RunTest(const FString& Parameters)
 
     // Renaming and reordering are presentation only: no component rebuild and
     // no session termination, before or after their undo.
-    const uint64 EndsBeforeRename = MtoUGetStreamingSessionEndCount();
+    const int32 EndsBeforeRename = Ends.Count();
     const TArray<TObjectPtr<UMtoUCharacterPartComponent>> ComponentsBeforeRename =
         Actor->GetCharacterPartComponents();
     RunBindingEditTransaction(*Binding, *PartsProperty, [&]()
@@ -10084,11 +10140,11 @@ bool FMtoUCharacterPartTransactionsTest::RunTest(const FString& Parameters)
     });
     TestTrue(TEXT("renaming and reordering a part rebuilds nothing"),
         Actor->GetCharacterPartComponents() == ComponentsBeforeRename
-        && MtoUGetStreamingSessionEndCount() == EndsBeforeRename);
+        && Ends.Count() == EndsBeforeRename);
     GEditor->UndoTransaction();
     TestTrue(TEXT("undo of a rename and reorder rebuilds nothing"),
         Actor->GetCharacterPartComponents() == ComponentsBeforeRename
-        && MtoUGetStreamingSessionEndCount() == EndsBeforeRename);
+        && Ends.Count() == EndsBeforeRename);
 
     // A Primary Driver restore is a Preview revision change, not a composition
     // change: the actors must invalidate readiness for it.
@@ -10123,6 +10179,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUPreviewInputRestoreTest,
 bool FMtoUPreviewInputRestoreTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    FMtoUSessionEndProbe Ends;
     ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
     TestNotNull(TEXT("platform socket subsystem is available"), SocketSubsystem);
     if (!SocketSubsystem)
@@ -10183,6 +10240,8 @@ bool FMtoUPreviewInputRestoreTest::RunTest(const FString& Parameters)
 
     TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
     const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
+    // The Binding actors ask the active source to end the connection.
+    const TSharedPtr<FMtoULiveLinkSource> PreviousSource = MtoUSetActiveSource(Source);
     TestTrue(TEXT("source reaches listening state"),
         WaitForStatus(Source, TEXT("Listening on")));
     const FString Init = FString::Printf(
@@ -10255,10 +10314,10 @@ bool FMtoUPreviewInputRestoreTest::RunTest(const FString& Parameters)
         ConnectAndNegotiate(Client) && Actor->GetPreviewReadiness().IsUsable()
         && Actor->GetPreviewReadiness().GeneratedPreview == EditedOverridePreview);
 
-    const uint64 EndsBeforeUndo = MtoUGetStreamingSessionEndCount();
+    const int32 EndsBeforeUndo = Ends.Count();
     GEditor->UndoTransaction();
     TestTrue(TEXT("undoing the override edit ends the session of the edited revision"),
-        Client && WaitForClose(*Client) && MtoUGetStreamingSessionEndCount() > EndsBeforeUndo);
+        Client && WaitForClose(*Client) && Ends.RequestedSince(EndsBeforeUndo, *Actor));
     DestroySocket(*SocketSubsystem, Client);
     const FMtoUPreviewReadiness AfterUndo = Actor->GetPreviewReadiness();
     TestTrue(TEXT("undoing the override edit invalidates its Generated Preview"),
@@ -10277,13 +10336,14 @@ bool FMtoUPreviewInputRestoreTest::RunTest(const FString& Parameters)
         *Actor, EditedOverridePreview, false, TEXT("redo fixture preview"));
     TestTrue(TEXT("the redo fixture is ready again"),
         ConnectAndNegotiate(Client) && Actor->GetPreviewReadiness().IsUsable());
-    const uint64 EndsBeforeRedo = MtoUGetStreamingSessionEndCount();
+    const int32 EndsBeforeRedo = Ends.Count();
     GEditor->RedoTransaction();
     TestTrue(TEXT("redoing the override edit ends that session and invalidates the Preview"),
-        Client && WaitForClose(*Client) && MtoUGetStreamingSessionEndCount() > EndsBeforeRedo
+        Client && WaitForClose(*Client) && Ends.RequestedSince(EndsBeforeRedo, *Actor)
         && !Actor->GetPreviewReadiness().IsUsable());
     DestroySocket(*SocketSubsystem, Client);
 
+    MtoUSetActiveSource(PreviousSource);
     Source->StopListener();
     LiveLinkClient.RemoveSource(Source);
     World->DestroyWorld(false);
@@ -11028,6 +11088,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoULoadedCharacterPartTransactionsTest,
 bool FMtoULoadedCharacterPartTransactionsTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
+    FMtoUSessionEndProbe Ends;
     FString MapPath, BindingPath;
     if (!FParse::Value(FCommandLine::Get(), TEXT("MtoULoadedCharacterMap="), MapPath)
         || !FParse::Value(FCommandLine::Get(), TEXT("MtoUCharacterPartsBinding="), BindingPath))
@@ -11071,7 +11132,7 @@ bool FMtoULoadedCharacterPartTransactionsTest::RunTest(const FString& Parameters
     // own undo notification; a construction rerun is not available here because
     // the level is not part of the asset transaction.
     Binding->SetFlags(RF_Transactional);
-    const uint64 EndsBeforeEdit = MtoUGetStreamingSessionEndCount();
+    const int32 EndsBeforeEdit = Ends.Count();
     RunBindingEditTransaction(*Binding, *PartsProperty, [&]()
     {
         for (FMtoUCharacterPart& Part : Binding->AdditionalParts)
@@ -11086,15 +11147,15 @@ bool FMtoULoadedCharacterPartTransactionsTest::RunTest(const FString& Parameters
     TestEqual(TEXT("an asset transaction disables the part on the placed actor"),
         Actor->GetCharacterPartComponents().Num(), LoadedParts - 1);
     TestTrue(TEXT("an asset transaction ends the streaming session"),
-        MtoUGetStreamingSessionEndCount() > EndsBeforeEdit);
-    const uint64 EndsAfterEdit = MtoUGetStreamingSessionEndCount();
+        Ends.Count() > EndsBeforeEdit && Ends.RequestedSince(EndsBeforeEdit, *Actor));
+    const int32 EndsAfterEdit = Ends.Count();
 
     GEditor->UndoTransaction();
     TestTrue(TEXT("undo restores the disabled part on the placed actor"),
         Actor->GetCharacterPartComponents().Num() == LoadedParts
         && CharacterPartMeshes(*Actor) == LoadedMeshes);
     TestTrue(TEXT("undo of an asset transaction ends the streaming session"),
-        MtoUGetStreamingSessionEndCount() > EndsAfterEdit);
+        Ends.Count() > EndsAfterEdit && Ends.RequestedSince(EndsAfterEdit, *Actor));
     GEditor->RedoTransaction();
     TestEqual(TEXT("redo disables the part again on the placed actor"),
         Actor->GetCharacterPartComponents().Num(), LoadedParts - 1);
@@ -11996,6 +12057,9 @@ struct FMtoULinkageTestHooks
     int32 TakeOverCalls = 0;
     int32 RestoreCalls = 0;
     bool bTakeOverSucceeds = true;
+    // The editor cannot hand the writers back: the restore reports this.
+    bool bRestoreSucceeds = true;
+    FString RestoreResidual = TEXT("BP_SequencePlayer transform track: still muted");
     FString TakeOverErrorCode = TEXT("WRITER_NOT_ISOLATABLE");
     int32 ViewChanges = 0;
     FMtoULinkageView LastView;
@@ -12082,6 +12146,12 @@ struct FMtoULinkageTestHooks
             ++RestoreCalls;
             OutError.Reset();
             OutErrorCode.Reset();
+            if (!bRestoreSucceeds)
+            {
+                OutError = RestoreResidual;
+                OutErrorCode = TEXT("RECOVERY_REFUSED");
+                return false;
+            }
             return true;
         };
         Hooks.ValidateTakeover = [this](FString& OutReason) -> bool
@@ -12638,9 +12708,11 @@ bool FMtoUControlBudgetEndedSessionsTest::RunTest(const FString& Parameters)
         TEXT("INVALID_MESSAGE"), TEXT("a reply of an ended session"));
     const TArray<uint8> Hello = LinkageHelloPacket();
 
-    // Each connection greets and ends; the editor keeps answering after the
-    // disconnect, and those replies carry the ended session. Together they are
-    // more than the control queue holds.
+    // Each connection greets and ends. Replies the worker had not taken when
+    // its session ended stay queued until the next connection begins; together
+    // they are more than the control queue holds. The editor keeps answering
+    // after the disconnect too, but those replies are dropped before they take
+    // a slot (R-002).
     constexpr int32 Cycles = 4;
     constexpr int32 StalePerCycle = 6;
     static_assert(Cycles * StalePerCycle > FMtoUProtocol::MaxControlQueue,
@@ -12661,6 +12733,13 @@ bool FMtoUControlBudgetEndedSessionsTest::RunTest(const FString& Parameters)
         TestTrue(*(Label + TEXT(" greeting is answered")),
             Reader.Next(*Client, TEXT("hello_ack"), Payload, Pump));
         TestFalse(*(Label + TEXT(" is not refused")), Reader.OtherTypes.Contains(TEXT("error")));
+        uint64 EndedSessionId = 0;
+        TSharedPtr<FJsonObject> Ack;
+        if (JsonObjectFromBytes(Payload, Ack))
+        {
+            EndedSessionId = static_cast<uint64>(Ack->GetNumberField(TEXT("session_id")));
+        }
+        TestTrue(*(Label + TEXT(" names its session")), EndedSessionId > 0);
         // The replies of the earlier sessions were dropped when this
         // connection began, and the dropped ones returned their slots.
         TestEqual(*(Label + TEXT(" holds no slot of an ended session")),
@@ -12677,8 +12756,16 @@ bool FMtoUControlBudgetEndedSessionsTest::RunTest(const FString& Parameters)
             FMtoUControlBudgetTestAccess::SendControl(Source, StalePacket);
         }
         Source.Update();
-        // Nobody is connected, so the replies wait for the next connection.
-        TestEqual(*(Label + TEXT(" leaves its replies queued")),
+        // The session is over, so a reply for it is dropped, not queued.
+        TestEqual(*(Label + TEXT(" queues no reply of an ended session")),
+            FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+        // Nobody is connected, so the replies queued before the end wait for
+        // the next connection.
+        for (int32 Reply = 0; Reply < StalePerCycle; ++Reply)
+        {
+            FMtoUControlBudgetTestAccess::QueueReplyOfSession(Source, EndedSessionId, StalePacket);
+        }
+        TestEqual(*(Label + TEXT(" leaves its undelivered replies queued")),
             FMtoUControlBudgetTestAccess::OutgoingQueued(Source), StalePerCycle);
     }
 
@@ -15469,11 +15556,22 @@ bool FMtoULinkageObjectSetTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("linkage continues"), RemovedView.Mode, FString(TEXT("linkage")));
     Pump();
     TestTrue(TEXT("the second subject left the stream"), SubjectCurve(TEXT("MtoU_Secondary")) < 0.0f);
-    TestEqual(TEXT("the second actor reports its removal"),
-        Prop->GetConnectionStatus(), FString(TEXT("Removed from the set")));
+    TestTrue(TEXT("the second actor reports its removal"),
+        Prop->GetConnectionState() == EMtoUConnectionState::RemovedFromSet);
     TestFalse(TEXT("the removed actor stops evaluating any subject"),
         Prop->IsInLiveLinkSet() || Evaluates(Prop));
     TestTrue(TEXT("the primary keeps evaluating its subject"), Evaluates(Hero));
+    // The same removal again changes nothing: the object is gone, so its
+    // writers are not handed back a second time and the set stays as it is.
+    const TArray<uint8> RemoveAgain = Packet(FString::Printf(
+        TEXT("{\"type\":\"remove_object\",\"session_id\":%d,\"object_id\":\"secondary\","
+             "\"set_revision\":3,\"detail\":\"again\"}"), SessionId));
+    SendBytes(*Client, RemoveAgain.GetData(), RemoveAgain.Num());
+    TestTrue(TEXT("a second removal of the same object is refused"),
+        Reader.Next(*Client, TEXT("error"), Payload, Pump));
+    TestEqual(TEXT("a second removal restores nothing again"), RestoredObjects, 1);
+    TestEqual(TEXT("a second removal leaves the set revision"),
+        MtoUGetLinkageView().Identity.SetRevision, 2);
 
     // A target issued for the old set before the removal may still be on the
     // wire; the next one names the new set.
@@ -15571,6 +15669,1251 @@ bool FMtoULinkageObjectSetTest::RunTest(const FString& Parameters)
     LiveLinkClient.RemoveSource(Source);
     World->DestroyWorld(false);
     GEngine->DestroyWorldContext(World);
+    return true;
+}
+// ---------------------------------------------------------------------------
+// Session end contract (Issue #13): one end for a disconnect, a removed
+// source, an end request and a greeting-phase end, and end requests that name
+// the session and the actor that asks.
+// ---------------------------------------------------------------------------
+
+// Injects what a late message of an ended session looks like, through the
+// queues the worker fills. It reads and writes nothing else of the source.
+class FMtoUSessionEndTestAccess
+{
+public:
+    // The end the game thread runs again for a session it already ended.
+    static void EndAgain(FMtoULiveLinkSource& Source, uint64 SessionId)
+    {
+        Source.EndStreamingSessionOnGameThread(SessionId);
+    }
+    // The second disconnect notice `Run()` leaves behind when the worker stops.
+    static void QueueDisconnect(FMtoULiveLinkSource& Source, uint64 SessionId)
+    {
+        Source.DisconnectedSessions.Enqueue(SessionId);
+    }
+    // An end request that arrives for a session the worker may have left.
+    static void RequestEndOf(FMtoULiveLinkSource& Source, uint64 SessionId)
+    {
+        Source.RequestSessionEndOnGameThread(SessionId);
+    }
+    static void QueueHello(FMtoULiveLinkSource& Source, uint64 SessionId)
+    {
+        FMtoUPendingHello Hello;
+        Hello.SessionId = SessionId;
+        Hello.Message.Host = TEXT("late maya");
+        Source.AdmitLinkageControl();
+        Source.PendingHellos.Enqueue(MoveTemp(Hello));
+    }
+    static void QueueModeLinkage(FMtoULiveLinkSource& Source, int32 SessionId, int32 ModeRevision)
+    {
+        FMtoUPendingLinkageControl Control;
+        Control.Kind = FMtoUPendingLinkageControl::EKind::Mode;
+        Control.Mode.SessionId = SessionId;
+        Control.Mode.ModeRevision = ModeRevision;
+        Control.Mode.Mode = TEXT("linkage");
+        Control.Mode.Control = TEXT("unreal");
+        Control.Mode.Transition = TEXT("ready");
+        Control.IntakeOrder = ++Source.NextTimeControlOrder;
+        const uint64 Order = Control.IntakeOrder;
+        Source.AdmitLinkageControl();
+        Source.PendingLinkageControls.Enqueue(MoveTemp(Control));
+        Source.PublishedTimeControlOrder.Store(Order);
+    }
+    static void QueueLeave(FMtoULiveLinkSource& Source, int32 SessionId, int32 ModeRevision)
+    {
+        FMtoUPendingLinkageControl Control;
+        Control.Kind = FMtoUPendingLinkageControl::EKind::LeaveLinkage;
+        Control.LeaveLinkage.SessionId = SessionId;
+        Control.LeaveLinkage.ModeRevision = ModeRevision;
+        Control.LeaveLinkage.Target = TEXT("end");
+        Control.IntakeOrder = ++Source.NextTimeControlOrder;
+        const uint64 Order = Control.IntakeOrder;
+        Source.WorkerLinkageLeavesPending += 1;
+        Source.AdmitLinkageControl();
+        Source.PendingLinkageControls.Enqueue(MoveTemp(Control));
+        Source.PublishedTimeControlOrder.Store(Order);
+    }
+    static int32 IncomingQueued(const FMtoULiveLinkSource& Source)
+    {
+        return Source.QueuedLinkageControls.Load();
+    }
+};
+
+namespace
+{
+/**
+ * A source, one paired Binding actor and the linkage hooks stub, for the
+ * session end regressions. Every fixture owns an Editor world of its own.
+ */
+struct FMtoUSessionEndFixture
+{
+    ISocketSubsystem* Sockets = nullptr;
+    ILiveLinkClient* LiveLink = nullptr;
+    uint16 Port = 0;
+    UWorld* World = nullptr;
+    AMtoULiveLinkActor* Actor = nullptr;
+    TArray<TWeakObjectPtr<AMtoULiveLinkActor>> Placed;
+    TSharedPtr<FMtoULiveLinkSource> Source;
+    FGuid SourceGuid;
+    TSharedPtr<FMtoULiveLinkSource> PreviousSource;
+    bool bSourceActive = false;
+    FMtoULinkageTestHooks Hooks;
+    FString Bones;
+
+    bool Open(FAutomationTestBase& Test, bool bPairActor = true)
+    {
+        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+        Sockets = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+        Test.TestNotNull(TEXT("platform socket subsystem is available"), Sockets);
+        IModularFeatures& Features = IModularFeatures::Get();
+        if (!Sockets || !Features.IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName))
+        {
+            return false;
+        }
+        LiveLink = &Features.GetModularFeature<ILiveLinkClient>(ILiveLinkClient::ModularFeatureName);
+        FSocket* Reservation = BindLoopback(*Sockets, 0, true);
+        Test.TestNotNull(TEXT("test port can be reserved"), Reservation);
+        if (!Reservation)
+        {
+            return false;
+        }
+        TSharedRef<FInternetAddr> ReservedAddress = Sockets->CreateInternetAddr();
+        Reservation->GetAddress(*ReservedAddress);
+        Port = static_cast<uint16>(ReservedAddress->GetPort());
+        DestroySocket(*Sockets, Reservation);
+
+        World = UWorld::CreateWorld(EWorldType::Editor, false);
+        Test.TestNotNull(TEXT("editor world is created"), World);
+        if (!World || !GEngine)
+        {
+            return false;
+        }
+        FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Editor);
+        WorldContext.SetCurrentWorld(World);
+        World->InitializeActorsForPlay(FURL());
+        Actor = Place();
+        Test.TestNotNull(TEXT("placed binding actor is created"), Actor);
+        const USkeletalMesh* Mesh = Actor
+            ? Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() : nullptr;
+        if (!Mesh)
+        {
+            return false;
+        }
+        Bones = ReferenceSkeletonBonesJson(Mesh->GetRefSkeleton());
+        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+
+        Source = MakeShared<FMtoULiveLinkSource>(Port);
+        SourceGuid = LiveLink->AddSource(Source.ToSharedRef());
+        PreviousSource = MtoUSetActiveSource(Source);
+        bSourceActive = true;
+        Test.TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
+        if (bPairActor)
+        {
+            Test.TestTrue(TEXT("the actor is paired with the Maya object"), PairLinkageTarget(Actor));
+        }
+        Hooks.Install();
+        MtoUSetLinkageHooks(Hooks.Hooks);
+        return Test.TestTrue(TEXT("source reaches listening state"),
+            WaitForStatus(Source.ToSharedRef(), TEXT("Listening on")));
+    }
+
+    /** Places another Binding actor in the fixture's world. */
+    AMtoULiveLinkActor* Place(UWorld* In = nullptr)
+    {
+        AMtoULiveLinkActor* NewActor = AddBoundActor(In ? *In : *World);
+        if (NewActor)
+        {
+            Placed.Add(NewActor);
+            NewActor->PostRegisterAllComponents();
+        }
+        return NewActor;
+    }
+
+    void Pump()
+    {
+        Source->Update();
+        LiveLink->ForceTick();
+    }
+
+    /** True once a session's end reached the game thread (its identity is gone). */
+    bool WaitSessionOver(double TimeoutSeconds = 5.0)
+    {
+        return PollUntil([this]()
+        {
+            Pump();
+            return MtoUGetLinkageView().Identity.SessionId == 0;
+        }, TimeoutSeconds);
+    }
+
+    TArray<uint8> InitPacket(const TCHAR* SetObjects = TEXT("[\"character\"]")) const
+    {
+        return Packet(FString::Printf(
+            TEXT("{\"type\":\"init\",\"revision\":9,\"version\":11,\"object_id\":\"character\","
+                 "\"set_revision\":1,\"space_revision\":1,\"set_objects\":%s,\"workflow\":\"animation\","
+                 "\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
+            SetObjects, *Bones));
+    }
+
+    bool HasSubject() const
+    {
+        for (const FLiveLinkSubjectKey& Key : LiveLink->GetSubjects(true, false))
+        {
+            if (Key.Source == SourceGuid)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void Close()
+    {
+        MtoUSetLinkageHooks(FMtoULinkageHooks());
+        if (bSourceActive)
+        {
+            for (const TWeakObjectPtr<AMtoULiveLinkActor>& Each : Placed)
+            {
+                if (Each.IsValid())
+                {
+                    MtoUClearLinkageTarget(*Each);
+                }
+            }
+            MtoUSetActiveSource(PreviousSource);
+            bSourceActive = false;
+        }
+        if (Source.IsValid())
+        {
+            Source->StopListener();
+            if (LiveLink)
+            {
+                LiveLink->RemoveSource(Source.ToSharedRef());
+            }
+            Source.Reset();
+        }
+        if (World)
+        {
+            World->DestroyWorld(false);
+            if (GEngine)
+            {
+                GEngine->DestroyWorldContext(World);
+            }
+            World = nullptr;
+        }
+        // Binding actors of a destroyed world stay discoverable until they are
+        // collected, and the socket fixtures that run next count them.
+        Placed.Reset();
+        Actor = nullptr;
+        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    }
+};
+
+/**
+ * Counts the warnings the linkage session logs while it lives. The counter is
+ * atomic, so the device can take calls from any thread at once; the log
+ * redirector then hands it every record on the logging thread, at the moment
+ * it is logged. A device that cannot is buffered and, with a dedicated log
+ * thread, receives its records later: a count read in between would miss them.
+ */
+class FMtoULinkageWarningCapture final : public FOutputDevice
+{
+public:
+    FMtoULinkageWarningCapture() { GLog->AddOutputDevice(this); }
+    ~FMtoULinkageWarningCapture() override { GLog->RemoveOutputDevice(this); }
+    int32 Count() const { return Warnings.Load(); }
+
+    virtual bool CanBeUsedOnMultipleThreads() const override { return true; }
+
+    virtual void Serialize(
+        const TCHAR* Message, ELogVerbosity::Type Verbosity, const FName& Category) override
+    {
+        if (Verbosity <= ELogVerbosity::Warning && Category == FName(TEXT("LogMtoULinkageSession")))
+        {
+            Warnings.IncrementExchange();
+        }
+    }
+
+private:
+    TAtomic<int32> Warnings{0};
+};
+
+/** One fake Maya connection to the fixture's source. */
+struct FMtoUSessionEndMaya
+{
+    FMtoUSessionEndFixture& Fixture;
+    FSocket* Socket = nullptr;
+    FMtoULinkageReplyReader Reader;
+    int32 SessionId = 0;
+
+    explicit FMtoUSessionEndMaya(FMtoUSessionEndFixture& InFixture) : Fixture(InFixture) {}
+    ~FMtoUSessionEndMaya() { Drop(); }
+    FMtoUSessionEndMaya(const FMtoUSessionEndMaya&) = delete;
+    FMtoUSessionEndMaya& operator=(const FMtoUSessionEndMaya&) = delete;
+
+    // Maya hangs up. It reads what Unreal still has in flight first: the
+    // worker writes a reply to a vanished peer in a loop that only the
+    // connection state can end, so a hang-up with a reply pending would test
+    // that loop, not the session end.
+    void Drop()
+    {
+        if (Socket)
+        {
+            PollUntil([this]()
+            {
+                Pump();
+                uint8 Buffer[65536];
+                int32 Read = 0;
+                if (Socket->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read) && Read > 0)
+                {
+                    Reader.Decoder.Append(Buffer, Read);
+                }
+                return false;
+            }, 0.15);
+            DestroySocket(*Fixture.Sockets, Socket);
+        }
+    }
+    void Pump() { Fixture.Pump(); }
+
+    /** Connects and greets; negotiates the character as well when asked. */
+    bool Connect(FAutomationTestBase& Test, bool bNegotiate)
+    {
+        Socket = ConnectLoopback(*Fixture.Sockets, Fixture.Port);
+        if (!Test.TestNotNull(TEXT("Maya connects"), Socket))
+        {
+            return false;
+        }
+        const TArray<uint8> Hello = LinkageHelloPacket();
+        if (!Test.TestTrue(TEXT("the greeting is sent"),
+                SendBytes(*Socket, Hello.GetData(), Hello.Num())))
+        {
+            return false;
+        }
+        TArray<uint8> Payload;
+        TSharedPtr<FJsonObject> Ack;
+        if (!Test.TestTrue(TEXT("the greeting is answered"),
+                Reader.Next(*Socket, TEXT("hello_ack"), Payload, [this]() { Pump(); }, 5.0))
+            || !Test.TestTrue(TEXT("the greeting answer is JSON"), JsonObjectFromBytes(Payload, Ack)))
+        {
+            return false;
+        }
+        SessionId = static_cast<int32>(Ack->GetNumberField(TEXT("session_id")));
+        Test.TestTrue(TEXT("the greeting names one session"), SessionId >= 1);
+        return !bNegotiate || Negotiate(Test);
+    }
+
+    bool Negotiate(FAutomationTestBase& Test, const TCHAR* SetObjects = TEXT("[\"character\"]"))
+    {
+        const TArray<uint8> Init = Fixture.InitPacket(SetObjects);
+        TArray<uint8> Payload;
+        return Test.TestTrue(TEXT("init is sent"), SendBytes(*Socket, Init.GetData(), Init.Num()))
+            && Test.TestTrue(TEXT("negotiation reaches ready"),
+                Reader.Next(*Socket, TEXT("ready"), Payload, [this]() { Pump(); }, 5.0));
+    }
+
+    /** Maya's confirmation of the transition Unreal started. */
+    bool ConfirmLinkage(FAutomationTestBase& Test, int32 ModeRevision)
+    {
+        const TArray<uint8> Ready = Packet(FString::Printf(
+            TEXT("{\"type\":\"mode\",\"session_id\":%d,\"mode_revision\":%d,\"mode\":\"linkage\","
+                 "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"following\"}"),
+            SessionId, ModeRevision));
+        return Test.TestTrue(TEXT("Maya's mode statement is sent"),
+                SendBytes(*Socket, Ready.GetData(), Ready.Num()))
+            && Test.TestTrue(TEXT("Maya's confirmation opens the pose gate"), PollUntil([this]()
+            {
+                Pump();
+                const FMtoULinkageView View = MtoUGetLinkageView();
+                return View.Mode == TEXT("linkage") && !View.bTransitioning;
+            }, 5.0));
+    }
+
+    /** True once the worker closed this connection. */
+    bool PeerClosed(double TimeoutSeconds = 5.0, bool bPumpSource = true)
+    {
+        return Socket && PollUntil([this, bPumpSource]()
+        {
+            if (bPumpSource)
+            {
+                Pump();
+            }
+            uint8 Probe[1024];
+            int32 Read = 0;
+            return !Socket->Recv(Probe, UE_ARRAY_COUNT(Probe), Read);
+        }, TimeoutSeconds);
+    }
+
+    /** True while the connection stays open for the whole window. */
+    bool StaysOpen(double Seconds = 0.4)
+    {
+        return Socket && !PeerClosed(Seconds);
+    }
+};
+
+/**
+ * An explicit Refresh that fails at once: its start asks the boundary to end
+ * the session, and the failure leaves the actor ready for the next one.
+ */
+void StartAndFailRefresh(AMtoULiveLinkActor& Actor)
+{
+    FMtoUPreviewReadinessTestAccess::Begin(Actor);
+    FMtoUPreviewReadinessTestAccess::Fail(
+        Actor, EMtoUPreviewBuildStage::Preflight, TEXT("test refresh"));
+}
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUSessionEndDisconnectTest,
+    "MtoULiveLink.Linkage.SessionEnd.Disconnect",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUSessionEndDisconnectTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this))
+    {
+        return false;
+    }
+    USkeletalMeshComponent* Display = F.Actor->GetSkeletalMeshComponent();
+    TestTrue(TEXT("the display ticks on its own before linkage"), Display->IsComponentTickEnabled());
+
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, true))
+    {
+        return false;
+    }
+    FString Error;
+    TestTrue(TEXT("linkage entry takes the writers over"), MtoURequestLinkageEnter(1, Error));
+    if (!Maya.ConfirmLinkage(*this, 1))
+    {
+        return false;
+    }
+    F.Pump();
+    const FMtoULinkageView Held = MtoUGetLinkageView();
+    TestTrue(TEXT("the takeover is held in linkage mode"),
+        Held.bTakeoverHeld && Held.Mode == TEXT("linkage")
+        && Held.Identity.SessionId == Maya.SessionId);
+    TestEqual(TEXT("the writers were taken over once"), F.Hooks.TakeOverCalls, 1);
+    TestFalse(TEXT("linkage holds the display's own tick"), Display->IsComponentTickEnabled());
+    TestTrue(TEXT("the session publishes its Live Link subject"), F.HasSubject());
+    TestTrue(TEXT("the actor reports the live session"),
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
+    const uint64 SessionId = static_cast<uint64>(Maya.SessionId);
+
+    // The worker disconnect is one of the ways a session ends.
+    Maya.Drop();
+    TestTrue(TEXT("the disconnect reaches the end contract"), F.WaitSessionOver());
+    TestEqual(TEXT("the borrowed writers were handed back once"), F.Hooks.RestoreCalls, 1);
+    const FMtoULinkageView Ended = MtoUGetLinkageView();
+    TestFalse(TEXT("the takeover is no longer held"), Ended.bTakeoverHeld);
+    TestTrue(TEXT("the mode returns to realtime under Maya"),
+        Ended.Mode == TEXT("realtime") && Ended.Control == TEXT("maya") && !Ended.bTransitioning);
+    TestTrue(TEXT("the session identity is cleared"),
+        Ended.Identity.SessionId == 0 && Ended.Identity.SetRevision == 0
+        && Ended.Identity.ModeRevision == 0);
+    TestTrue(TEXT("a restored takeover reports no residual"),
+        Ended.RecoveryResidual.IsEmpty() && Ended.ErrorCode.IsEmpty()
+        && Ended.Detail.Contains(TEXT("the linkage takeover was restored")));
+    TestTrue(TEXT("the display's own tick is given back"), Display->IsComponentTickEnabled());
+    F.LiveLink->ForceTick();
+    TestFalse(TEXT("the session's Live Link subject is removed"), F.HasSubject());
+    TestTrue(TEXT("the actor shows the true disconnected state"),
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
+    TestTrue(TEXT("the actor knows its session ended"),
+        F.Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
+    TestFalse(TEXT("the actor leaves the Live Link set"), F.Actor->IsInLiveLinkSet());
+
+    // A second end of the same session changes nothing: no state text, no
+    // hook, no packet.
+    const FString StatusBefore = F.Source->GetSourceStatus().ToString();
+    FMtoUSessionEndTestAccess::EndAgain(*F.Source, SessionId);
+    FMtoUSessionEndTestAccess::QueueDisconnect(*F.Source, SessionId);
+    F.Pump();
+    TestEqual(TEXT("a second end restores nothing again"), F.Hooks.RestoreCalls, 1);
+    TestEqual(TEXT("a second end takes nothing over"), F.Hooks.TakeOverCalls, 1);
+    TestEqual(TEXT("a second end leaves the source status"),
+        F.Source->GetSourceStatus().ToString(), StatusBefore);
+    TestEqual(TEXT("a second end queues no reply"),
+        FMtoUControlBudgetTestAccess::OutgoingQueued(*F.Source), 0);
+
+    // Linkage cannot be entered for a session that is over.
+    TestFalse(TEXT("entering linkage after the end is refused"), MtoURequestLinkageEnter(2, Error));
+    TestEqual(TEXT("the refusal names the frozen code"),
+        MtoUGetLinkageView().ErrorCode, FString(TEXT("LINKAGE_NOT_ACTIVE")));
+    TestEqual(TEXT("the refused entry borrows no writer"), F.Hooks.TakeOverCalls, 1);
+    // A mode message of the ended session still waiting in the intake is
+    // dropped before it can borrow one.
+    FMtoUSessionEndTestAccess::QueueModeLinkage(*F.Source, static_cast<int32>(SessionId), 5);
+    TestFalse(TEXT("entering linkage behind a late mode message is refused"),
+        MtoURequestLinkageEnter(2, Error));
+    TestEqual(TEXT("the late mode message borrows no writer"), F.Hooks.TakeOverCalls, 1);
+    TestEqual(TEXT("the late mode message returned its slot"),
+        FMtoUSessionEndTestAccess::IncomingQueued(*F.Source), 0);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUSessionEndSourceRemovedTest,
+    "MtoULiveLink.Linkage.SessionEnd.SourceRemoved",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUSessionEndSourceRemovedTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this))
+    {
+        return false;
+    }
+    USkeletalMeshComponent* Display = F.Actor->GetSkeletalMeshComponent();
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, true))
+    {
+        return false;
+    }
+    FString Error;
+    TestTrue(TEXT("linkage entry takes the writers over"), MtoURequestLinkageEnter(1, Error));
+    if (!Maya.ConfirmLinkage(*this, 1))
+    {
+        return false;
+    }
+    F.Pump();
+    TestTrue(TEXT("the takeover is held"), MtoUGetLinkageView().bTakeoverHeld);
+    TestFalse(TEXT("linkage holds the display's own tick"), Display->IsComponentTickEnabled());
+    TestTrue(TEXT("the session publishes its Live Link subject"), F.HasSubject());
+
+    // Removing the source in the Live Link window (or closing the editor)
+    // asks it to shut down.
+    const int32 QueuedBeforeShutdown = FMtoUControlBudgetTestAccess::OutgoingQueued(*F.Source);
+    TestTrue(TEXT("the source accepts the shutdown"), F.Source->RequestSourceShutdown());
+    // Nothing updates a removed source any more, so the shutdown itself must
+    // have run the end contract: no Update runs before the checks below.
+    TestTrue(TEXT("the connection is closed"), Maya.PeerClosed(5.0, false));
+    TestEqual(TEXT("the borrowed writers were handed back once"), F.Hooks.RestoreCalls, 1);
+    const FMtoULinkageView Ended = MtoUGetLinkageView();
+    TestFalse(TEXT("the takeover is no longer held"), Ended.bTakeoverHeld);
+    TestTrue(TEXT("the mode returns to realtime under Maya"),
+        Ended.Mode == TEXT("realtime") && Ended.Control == TEXT("maya") && !Ended.bTransitioning);
+    TestEqual(TEXT("the session identity is cleared"), Ended.Identity.SessionId, 0);
+    TestTrue(TEXT("a restored takeover reports no residual"),
+        Ended.RecoveryResidual.IsEmpty() && Ended.ErrorCode.IsEmpty());
+    TestTrue(TEXT("the display's own tick is given back"), Display->IsComponentTickEnabled());
+    TestTrue(TEXT("the actor shows the true disconnected state"),
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
+    TestTrue(TEXT("the actor knows its session ended"),
+        F.Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
+    TestFalse(TEXT("the actor leaves the Live Link set"), F.Actor->IsInLiveLinkSet());
+    // The shutdown answers nobody: it queues nothing for the dead connection.
+    TestTrue(TEXT("the shutdown queues no reply"),
+        FMtoUControlBudgetTestAccess::OutgoingQueued(*F.Source) <= QueuedBeforeShutdown);
+    // The disconnect notice the stopped worker leaves behind is absorbed.
+    F.Source->Update();
+    TestEqual(TEXT("the worker's own notice restores nothing again"), F.Hooks.RestoreCalls, 1);
+    TestEqual(TEXT("the worker's own notice leaves the session cleared"),
+        MtoUGetLinkageView().Identity.SessionId, 0);
+    // The Live Link client removes the source's subjects itself.
+    F.LiveLink->RemoveSource(F.Source.ToSharedRef());
+    TestTrue(TEXT("removing the source removes its subject"), PollUntil([&F]()
+    {
+        F.LiveLink->ForceTick();
+        return !F.HasSubject();
+    }, 5.0));
+
+    // The shutdown can come twice (the source is removed, then destroyed).
+    F.Source->StopListener();
+    TestEqual(TEXT("a second shutdown restores nothing again"), F.Hooks.RestoreCalls, 1);
+    TestEqual(TEXT("a second shutdown takes nothing over"), F.Hooks.TakeOverCalls, 1);
+    Maya.Drop();
+    F.Close();
+
+    // ---- the editor closes -------------------------------------------------
+    // Its module detaches the linkage hooks (after handing the writers back)
+    // before the source shuts down, so the source ends a session whose
+    // takeover is still recorded with no hook left to call.
+    FMtoUSessionEndFixture Closing;
+    ON_SCOPE_EXIT { Closing.Close(); };
+    if (!Closing.Open(*this))
+    {
+        return false;
+    }
+    FMtoUSessionEndMaya ClosingMaya(Closing);
+    if (!ClosingMaya.Connect(*this, true))
+    {
+        return false;
+    }
+    FString ClosingError;
+    TestTrue(TEXT("linkage entry takes the writers over"), MtoURequestLinkageEnter(1, ClosingError));
+    if (!ClosingMaya.ConfirmLinkage(*this, 1))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the takeover is held"), MtoUGetLinkageView().bTakeoverHeld);
+    MtoUSetLinkageHooks(FMtoULinkageHooks());
+    FMtoULinkageWarningCapture Warnings;
+    TestTrue(TEXT("the source accepts the shutdown"), Closing.Source->RequestSourceShutdown());
+    const FMtoULinkageView Closed = MtoUGetLinkageView();
+    TestEqual(TEXT("the closed editor holds no session"), Closed.Identity.SessionId, 0);
+    TestTrue(TEXT("the closed editor holds no takeover and no residual"),
+        !Closed.bTakeoverHeld && Closed.RecoveryResidual.IsEmpty() && Closed.ErrorCode.IsEmpty()
+        && Closed.Mode == TEXT("realtime"));
+    TestEqual(TEXT("no hook was left to call"), Closing.Hooks.RestoreCalls, 0);
+    TestTrue(TEXT("the actor shows the true disconnected state"),
+        Closing.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected
+        && Closing.Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
+    TestEqual(TEXT("the source reports a plain stop"),
+        Closing.Source->GetSourceStatus().ToString(), FString(TEXT("Stopped")));
+    TestEqual(TEXT("ending a session without hooks logs no warning"), Warnings.Count(), 0);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUSessionEndGreetingPhaseTest,
+    "MtoULiveLink.Linkage.SessionEnd.GreetingPhase",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUSessionEndGreetingPhaseTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this))
+    {
+        return false;
+    }
+    // Only Maya's greeting arrived: the linkage session holds the session
+    // identity, the game thread negotiated nothing yet. The editor can already
+    // take the paired target over.
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, false))
+    {
+        return false;
+    }
+    FString Error;
+    TestTrue(TEXT("linkage entry takes the writers over before any init"),
+        MtoURequestLinkageEnter(1, Error));
+    F.Pump();
+    const FMtoULinkageView Greeted = MtoUGetLinkageView();
+    TestTrue(TEXT("the takeover is held by the greeted session"),
+        Greeted.bTakeoverHeld && Greeted.Identity.SessionId == Maya.SessionId);
+    const uint64 SessionId = static_cast<uint64>(Maya.SessionId);
+
+    Maya.Drop();
+    TestTrue(TEXT("the disconnect reaches the end contract"), F.WaitSessionOver());
+    TestEqual(TEXT("the writers the greeting phase borrowed were handed back"),
+        F.Hooks.RestoreCalls, 1);
+    const FMtoULinkageView Ended = MtoUGetLinkageView();
+    TestFalse(TEXT("the takeover is no longer held"), Ended.bTakeoverHeld);
+    TestTrue(TEXT("the mode returns to realtime under Maya"),
+        Ended.Mode == TEXT("realtime") && Ended.Control == TEXT("maya"));
+    TestTrue(TEXT("the greeting phase leaves no residual"),
+        Ended.RecoveryResidual.IsEmpty() && Ended.ErrorCode.IsEmpty());
+
+    // A second end of the same session changes nothing.
+    const FString StatusBefore = F.Source->GetSourceStatus().ToString();
+    FMtoUSessionEndTestAccess::EndAgain(*F.Source, SessionId);
+    FMtoUSessionEndTestAccess::QueueDisconnect(*F.Source, SessionId);
+    F.Pump();
+    TestEqual(TEXT("a second end restores nothing again"), F.Hooks.RestoreCalls, 1);
+    TestEqual(TEXT("a second end leaves the source status"),
+        F.Source->GetSourceStatus().ToString(), StatusBefore);
+
+    // The next connection finds nothing left over from the greeting phase.
+    FMtoUSessionEndMaya Next(F);
+    if (!Next.Connect(*this, false))
+    {
+        return false;
+    }
+    const FMtoULinkageView Again = MtoUGetLinkageView();
+    TestTrue(TEXT("the next session starts clean"),
+        Again.Identity.SessionId == Next.SessionId && !Again.bTakeoverHeld
+        && Again.RecoveryResidual.IsEmpty() && Again.ErrorCode.IsEmpty());
+    TestEqual(TEXT("the next session restores nothing it did not borrow"), F.Hooks.RestoreCalls, 1);
+
+    // Removing the source in the greeting phase hands the writers back too.
+    TestTrue(TEXT("linkage entry takes the writers over again"),
+        MtoURequestLinkageEnter(1, Error));
+    const int32 QueuedBeforeShutdown = FMtoUControlBudgetTestAccess::OutgoingQueued(*F.Source);
+    F.Source->StopListener();
+    TestEqual(TEXT("the removed source handed the writers back"), F.Hooks.RestoreCalls, 2);
+    const FMtoULinkageView Removed = MtoUGetLinkageView();
+    TestTrue(TEXT("the removed source holds no session"),
+        Removed.Identity.SessionId == 0 && !Removed.bTakeoverHeld);
+    TestTrue(TEXT("the removed source queues no reply"),
+        FMtoUControlBudgetTestAccess::OutgoingQueued(*F.Source) <= QueuedBeforeShutdown);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUSessionEndResidualTest,
+    "MtoULiveLink.Linkage.SessionEnd.RecoveryResidual",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUSessionEndResidualTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    // The failed restore is reported once, when the session ends; a later
+    // session carries that report without logging it again.
+    AddExpectedMessagePlain(TEXT("could not be restored"), ELogVerbosity::Warning,
+        EAutomationExpectedMessageFlags::Contains, 1);
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this))
+    {
+        return false;
+    }
+    F.Hooks.bRestoreSucceeds = false;
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, true))
+    {
+        return false;
+    }
+    FString Error;
+    TestTrue(TEXT("linkage entry takes the writers over"), MtoURequestLinkageEnter(1, Error));
+    if (!Maya.ConfirmLinkage(*this, 1))
+    {
+        return false;
+    }
+    Maya.Drop();
+    TestTrue(TEXT("the disconnect reaches the end contract"), F.WaitSessionOver());
+    TestEqual(TEXT("the editor was asked to hand the writers back"), F.Hooks.RestoreCalls, 1);
+
+    const FMtoULinkageView Ended = MtoUGetLinkageView();
+    TestEqual(TEXT("the view keeps the refusal code"), Ended.ErrorCode, FString(TEXT("RECOVERY_REFUSED")));
+    TestEqual(TEXT("the view names what could not be restored"),
+        Ended.RecoveryResidual, F.Hooks.RestoreResidual);
+    TestFalse(TEXT("a failed restore is not reported as restored"),
+        Ended.bWritersRestored || Ended.Detail.Contains(TEXT("the linkage takeover was restored")));
+    TestFalse(TEXT("the takeover is no longer borrowed"), Ended.bTakeoverHeld);
+    TestEqual(TEXT("the session identity is cleared"), Ended.Identity.SessionId, 0);
+    TestTrue(TEXT("the actor reports the error"),
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Error
+        && F.Actor->GetConnectionDetail() == F.Hooks.RestoreResidual);
+    TestTrue(TEXT("the source status names the residual"),
+        F.Source->GetSourceStatus().ToString().Contains(F.Hooks.RestoreResidual));
+    TestTrue(TEXT("the actor leaves the Live Link set"), !F.Actor->IsInLiveLinkSet());
+
+    // The next session is told: its view keeps the residual instead of
+    // starting as if nothing had been left behind.
+    FMtoUSessionEndMaya Next(F);
+    if (!Next.Connect(*this, true))
+    {
+        return false;
+    }
+    const FMtoULinkageView Carried = MtoUGetLinkageView();
+    TestTrue(TEXT("the next session starts with the report"),
+        Carried.Identity.SessionId == Next.SessionId
+        && Carried.ErrorCode == TEXT("RECOVERY_REFUSED")
+        && Carried.RecoveryResidual == F.Hooks.RestoreResidual);
+
+    // Once the editor hands the writers back, the report is closed.
+    F.Hooks.bRestoreSucceeds = true;
+    TestTrue(TEXT("linkage entry takes the writers over again"), MtoURequestLinkageEnter(1, Error));
+    if (!Next.ConfirmLinkage(*this, 1))
+    {
+        return false;
+    }
+    const bool bPreviewEnded = MtoURequestLinkageLeave(TEXT("end"), 2, Error);
+    TestTrue(*FString::Printf(TEXT("ending the preview hands the writers back (%s)"), *Error),
+        bPreviewEnded);
+    const FMtoULinkageView Closed = MtoUGetLinkageView();
+    TestTrue(TEXT("a restored takeover closes the report"),
+        Closed.RecoveryResidual.IsEmpty() && Closed.ErrorCode.IsEmpty() && Closed.bWritersRestored);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUSessionEndLinkageSessionTest,
+    "MtoULiveLink.Linkage.SessionEnd.LinkageSession",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUSessionEndLinkageSessionTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    // BeginSession of the failed hand-back (1), EndSession of the second
+    // failure (2) and the EndSession that follows the failed leave (3); the
+    // sessions that carry a report on do not log it again.
+    AddExpectedMessagePlain(TEXT("could not be restored"), ELogVerbosity::Warning,
+        EAutomationExpectedMessageFlags::Contains, 3);
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false);
+    TestNotNull(TEXT("editor world is created"), World);
+    if (!World || !GEngine)
+    {
+        return false;
+    }
+    FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Editor);
+    WorldContext.SetCurrentWorld(World);
+    World->InitializeActorsForPlay(FURL());
+    AMtoULiveLinkActor* Actor = AddBoundActor(*World);
+    TestNotNull(TEXT("placed binding actor is created"), Actor);
+    if (!Actor)
+    {
+        World->DestroyWorld(false);
+        GEngine->DestroyWorldContext(World);
+        return false;
+    }
+    Actor->PostRegisterAllComponents();
+
+    FMtoULinkageSession Session;
+    int32 Sent = 0;
+    Session.SendReply = [&Sent](TArray<uint8>&&, bool) { ++Sent; };
+    FMtoULinkageTestHooks Hooks;
+    Hooks.Install();
+    Session.SetHooks(Hooks.Hooks);
+    FString PairError;
+    FString PairCode;
+    TestTrue(TEXT("the actor is paired"), Session.PairTarget(*Actor, TEXT("character"), PairError, PairCode));
+    FString Error;
+    FString Code;
+
+    // ---- a new session finds the writers an earlier one still borrows -----
+    Session.BeginSession(1);
+    TestTrue(TEXT("session 1 takes the writers over"), Session.RequestEnter(1, Error, Code));
+    TestTrue(TEXT("session 1 holds the takeover"), Session.GetView().bTakeoverHeld);
+    Session.BeginSession(2);
+    TestEqual(TEXT("the new session handed the borrowed writers back first"), Hooks.RestoreCalls, 1);
+    FMtoULinkageView View = Session.GetView();
+    TestTrue(TEXT("the new session starts clean after a good hand-back"),
+        View.Identity.SessionId == 2 && !View.bTakeoverHeld && View.Mode == TEXT("realtime")
+        && View.RecoveryResidual.IsEmpty() && View.ErrorCode.IsEmpty());
+
+    // ---- a hand-back that fails is reported to the new session ------------
+    Hooks.bRestoreSucceeds = false;
+    TestTrue(TEXT("session 2 takes the writers over"), Session.RequestEnter(1, Error, Code));
+    Session.BeginSession(3);
+    TestEqual(TEXT("the new session asked the editor again"), Hooks.RestoreCalls, 2);
+    View = Session.GetView();
+    TestTrue(TEXT("the reset did not erase the report"),
+        View.Identity.SessionId == 3 && View.ErrorCode == TEXT("RECOVERY_REFUSED")
+        && View.RecoveryResidual == Hooks.RestoreResidual && !View.bWritersRestored
+        && !View.bTakeoverHeld);
+    Session.BeginSession(4);
+    View = Session.GetView();
+    TestTrue(TEXT("a report nobody resolved reaches the next session too"),
+        View.Identity.SessionId == 4 && View.ErrorCode == TEXT("RECOVERY_REFUSED")
+        && View.RecoveryResidual == Hooks.RestoreResidual);
+    TestEqual(TEXT("the carried report asks the editor for nothing more"), Hooks.RestoreCalls, 2);
+
+    // ---- the end of a session clears its identity -------------------------
+    Hooks.bRestoreSucceeds = true;
+    TestTrue(TEXT("session 4 takes the writers over"), Session.RequestEnter(1, Error, Code));
+    Session.EndSession();
+    View = Session.GetView();
+    TestEqual(TEXT("the end restored the writers"), Hooks.RestoreCalls, 3);
+    TestTrue(TEXT("the end clears the identity and the mode"),
+        View.Identity.SessionId == 0 && View.Identity.SetRevision == 0
+        && View.Identity.ModeRevision == 0 && View.Mode == TEXT("realtime")
+        && View.Control == TEXT("maya") && !View.bTransitioning && !View.bTakeoverHeld);
+    TestTrue(TEXT("a restored takeover leaves no report"),
+        View.RecoveryResidual.IsEmpty() && View.Detail.Contains(TEXT("the linkage takeover was restored")));
+    const int32 TakeOversBefore = Hooks.TakeOverCalls;
+    TestFalse(TEXT("an ended session cannot be entered"), Session.RequestEnter(9, Error, Code));
+    TestEqual(TEXT("the refusal names the frozen code"), Code, FString(TEXT("LINKAGE_NOT_ACTIVE")));
+    TestEqual(TEXT("the refused entry borrows no writer"), Hooks.TakeOverCalls, TakeOversBefore);
+
+    // ---- an end whose restore fails keeps the report ----------------------
+    Hooks.bRestoreSucceeds = false;
+    Session.BeginSession(5);
+    TestTrue(TEXT("session 5 takes the writers over"), Session.RequestEnter(1, Error, Code));
+    Session.EndSession();
+    View = Session.GetView();
+    TestEqual(TEXT("the end kept the refusal code"), View.ErrorCode, FString(TEXT("RECOVERY_REFUSED")));
+    TestEqual(TEXT("the end names what could not be restored"), View.RecoveryResidual, Hooks.RestoreResidual);
+    TestFalse(TEXT("the end does not claim a restore"),
+        View.bWritersRestored || View.Detail.Contains(TEXT("the linkage takeover was restored")));
+    TestEqual(TEXT("the end clears the identity"), View.Identity.SessionId, 0);
+
+    // ---- an end request belongs to the session whose restore failed -------
+    Session.BeginSession(6);
+    TestTrue(TEXT("session 6 takes the writers over"), Session.RequestEnter(1, Error, Code));
+    FMtoULeaveLinkageMessage Leave;
+    Leave.SessionId = 6;
+    Leave.ModeRevision = 2;
+    Leave.Target = TEXT("end");
+    Session.NoteLeaveLinkage(Leave, 0.0);
+    TestEqual(TEXT("a failed restore asks to end its own session"), Session.ConsumeSessionEndRequest(), 6);
+    TestEqual(TEXT("the request is consumed once"), Session.ConsumeSessionEndRequest(), 0);
+    Hooks.bRestoreSucceeds = false;
+    TestTrue(TEXT("session 6 takes the writers over again"), Session.RequestEnter(3, Error, Code));
+    Leave.ModeRevision = 4;
+    Session.NoteLeaveLinkage(Leave, 0.0);
+    Session.EndSession();
+    Session.BeginSession(7);
+    TestEqual(TEXT("an ended session's request never reaches the next one"),
+        Session.ConsumeSessionEndRequest(), 0);
+
+    Session.SetHooks(FMtoULinkageHooks());
+    Session.ClearTarget(*Actor);
+    World->DestroyWorld(false);
+    GEngine->DestroyWorldContext(World);
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUSessionEndRequestIdentityTest,
+    "MtoULiveLink.Source.SessionEndRequest.Identity",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this))
+    {
+        return false;
+    }
+    FMtoUSessionEndProbe Ends;
+
+    // ---- no session is current: the request leaves nothing behind ---------
+    AMtoULiveLinkActor* Idle = F.Place();
+    TestNotNull(TEXT("another binding actor is placed"), Idle);
+    StartAndFailRefresh(*F.Actor);
+    StartAndFailRefresh(*Idle);
+    TestTrue(TEXT("the refreshes asked the boundary"),
+        Ends.RequestedSince(0, *F.Actor) && Ends.RequestedSince(0, *Idle));
+
+    // ---- a negotiated session ends for its participating actor only -------
+    {
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, true))
+        {
+            return false;
+        }
+        TestTrue(TEXT("requests made earlier left nothing that ends this session"), Maya.StaysOpen());
+        TestTrue(TEXT("the participating actor streams"),
+            F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
+
+        // Placing a Binding actor, refreshing and deleting actors that take no
+        // part keep the session.
+        AMtoULiveLinkActor* Newcomer = F.Place();
+        TestNotNull(TEXT("a new binding actor is placed"), Newcomer);
+        TestTrue(TEXT("placing a new actor keeps the session"), Maya.StaysOpen());
+        StartAndFailRefresh(*Newcomer);
+        TestTrue(TEXT("refreshing an actor that takes no part keeps the session"), Maya.StaysOpen());
+        Idle->NotifyBindingInputsChanged();
+        Newcomer->NotifySourceAssetChanged(
+            Newcomer->GetBinding() ? Newcomer->GetBinding()->SkeletalMesh.Get() : nullptr, TEXT("test"));
+        TestTrue(TEXT("changing the inputs of an actor that takes no part keeps the session"),
+            Maya.StaysOpen());
+        Newcomer->Destroy();
+        Idle->Destroy();
+        TestTrue(TEXT("deleting actors that take no part keeps the session"), Maya.StaysOpen());
+        TestTrue(TEXT("the session identity is untouched"),
+            MtoUGetLinkageView().Identity.SessionId == Maya.SessionId
+            && F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
+
+        // A world that holds none of the participating actors unloads.
+        UWorld* OtherWorld = UWorld::CreateWorld(EWorldType::Editor, false);
+        TestNotNull(TEXT("another editor world is created"), OtherWorld);
+        if (OtherWorld)
+        {
+            TestNotNull(TEXT("it holds a binding actor"), F.Place(OtherWorld));
+            MtoUNotifyEditorWorldCleanup(OtherWorld, true, true);
+            TestTrue(TEXT("unloading a world of non-participating actors keeps the session"),
+                Maya.StaysOpen());
+            OtherWorld->DestroyWorld(false);
+        }
+
+        // The same operation on the participating actor ends the session.
+        const int32 Mark = Ends.Count();
+        StartAndFailRefresh(*F.Actor);
+        TestTrue(TEXT("refreshing the participating actor asked the boundary"),
+            Ends.RequestedSince(Mark, *F.Actor));
+        TestTrue(TEXT("refreshing the participating actor ends the session"), Maya.PeerClosed());
+        TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
+        TestTrue(TEXT("the participating actor shows the true disconnected state"),
+            F.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
+    }
+
+    // ---- deleting the participating actor ends it too ---------------------
+    AMtoULiveLinkActor* Second = F.Place();
+    TestNotNull(TEXT("a second participating actor is placed"), Second);
+    MtoUClearLinkageTarget(*F.Actor);
+    TestTrue(TEXT("the second actor is paired instead"), PairLinkageTarget(Second));
+    {
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, true))
+        {
+            return false;
+        }
+        TestTrue(TEXT("the session streams the paired actor"),
+            Second->GetConnectionState() == EMtoUConnectionState::Connected);
+        TestTrue(TEXT("the unpaired actor takes no part"), F.Actor->GetConnectionState() != EMtoUConnectionState::Connected);
+        F.Actor->NotifyBindingInputsChanged();
+        TestTrue(TEXT("changing an actor outside the set keeps the session"), Maya.StaysOpen());
+        Second->Destroy();
+        TestTrue(TEXT("deleting the participating actor ends the session"), Maya.PeerClosed());
+        TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
+    }
+
+    // ---- a world unload ends the session of its participating actor -------
+    TestTrue(TEXT("the first actor is paired again"), PairLinkageTarget(F.Actor));
+    {
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, true))
+        {
+            return false;
+        }
+        MtoUNotifyEditorWorldCleanup(F.World, true, true);
+        TestTrue(TEXT("unloading the participating actor's world ends the session"), Maya.PeerClosed());
+        TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
+    }
+
+    // ---- while the set is still being negotiated, any actor ends it -------
+    {
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, false))
+        {
+            return false;
+        }
+        TestTrue(TEXT("the primary of a two-object set negotiates"),
+            Maya.Negotiate(*this, TEXT("[\"character\",\"secondary\"]")));
+        TestTrue(TEXT("the set is not complete yet"), Maya.StaysOpen(0.2));
+        AMtoULiveLinkActor* Outsider = F.Place();
+        TestNotNull(TEXT("an actor that takes no part is placed"), Outsider);
+        TestTrue(TEXT("a change while the set is negotiated ends the negotiation"), Maya.PeerClosed());
+        TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
+    }
+    {
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, false))
+        {
+            return false;
+        }
+        TestTrue(TEXT("a greeted connection stays open"), Maya.StaysOpen(0.2));
+        AMtoULiveLinkActor* Outsider = F.Place();
+        TestNotNull(TEXT("an actor that takes no part is placed"), Outsider);
+        TestTrue(TEXT("a change after the greeting ends the negotiation"), Maya.PeerClosed());
+        TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
+    }
+
+    // ---- after all these ends, the next connection is untouched -----------
+    {
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, true))
+        {
+            return false;
+        }
+        TestTrue(TEXT("a new session after the ends negotiates and stays open"), Maya.StaysOpen());
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUSessionEndLateMessagesTest,
+    "MtoULiveLink.Source.SessionEndRequest.LateMessages",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUSessionEndLateMessagesTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    bool bDeferred = false;
+    ON_SCOPE_EXIT
+    {
+        if (bDeferred)
+        {
+            MtoUSetDeferStreamingSessionEndCleanup(false);
+        }
+        F.Close();
+    };
+    if (!F.Open(*this))
+    {
+        return false;
+    }
+    const TArray<uint8> ErrorPacket = FMtoUProtocol::EncodeError(
+        TEXT("INVALID_MESSAGE"), TEXT("a reply of an ended session"));
+
+    // ---- an end request closes the session for everything that follows ----
+    // The worker keeps the connection open, as it does for a moment after
+    // every real request, so Maya's messages still arrive.
+    uint64 FirstSession = 0;
+    {
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, true))
+        {
+            return false;
+        }
+        FirstSession = static_cast<uint64>(Maya.SessionId);
+        MtoUSetDeferStreamingSessionEndCleanup(true);
+        bDeferred = true;
+        StartAndFailRefresh(*F.Actor);
+
+        // Maya, which has not seen the end yet, starts linkage and answers.
+        const TArray<uint8> Mode = Packet(FString::Printf(
+            TEXT("{\"type\":\"mode\",\"session_id\":%d,\"mode_revision\":1,\"mode\":\"linkage\","
+                 "\"control\":\"unreal\",\"transition\":\"ready\",\"detail\":\"late\"}"),
+            Maya.SessionId));
+        TestTrue(TEXT("the late mode message is sent"), SendBytes(*Maya.Socket, Mode.GetData(), Mode.Num()));
+        // The editor keeps answering as well: more replies than the queue holds.
+        for (int32 Reply = 0; Reply < 2 * FMtoUProtocol::MaxControlQueue + 1; ++Reply)
+        {
+            FMtoUControlBudgetTestAccess::SendControl(*F.Source, ErrorPacket);
+        }
+        PollUntil([&F]() { F.Pump(); return false; }, 0.4);
+        TestEqual(TEXT("the late mode message borrowed no writer"), F.Hooks.TakeOverCalls, 0);
+        TestEqual(TEXT("the ended session queues no reply"),
+            FMtoUControlBudgetTestAccess::OutgoingQueued(*F.Source), 0);
+        TestFalse(TEXT("the ended session reports no overflow"),
+            F.Source->GetSourceStatus().ToString().Contains(TEXT("overflow")));
+        TArray<uint8> Reply;
+        TestFalse(TEXT("nothing answers the late messages"),
+            Maya.Reader.Next(*Maya.Socket, TEXT("mode_state"), Reply, [&F]() { F.Pump(); }, 0.2));
+        TestFalse(TEXT("no refusal answers the late messages"),
+            Maya.Reader.OtherTypes.Contains(TEXT("error")));
+        TestEqual(TEXT("the late messages returned their slots"),
+            FMtoUSessionEndTestAccess::IncomingQueued(*F.Source), 0);
+
+        // The held cleanup is released: the worker closes the connection.
+        MtoUSetDeferStreamingSessionEndCleanup(false);
+        bDeferred = false;
+        TestTrue(TEXT("the worker closes the ended session"), Maya.PeerClosed());
+        TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
+        TestEqual(TEXT("the late messages borrowed no writer"), F.Hooks.TakeOverCalls, 0);
+    }
+
+    // ---- an init that arrives after the request never negotiates ----------
+    {
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, false))
+        {
+            return false;
+        }
+        MtoUSetDeferStreamingSessionEndCleanup(true);
+        bDeferred = true;
+        StartAndFailRefresh(*F.Actor);
+        const TArray<uint8> Init = F.InitPacket();
+        TestTrue(TEXT("the late init is sent"), SendBytes(*Maya.Socket, Init.GetData(), Init.Num()));
+        TArray<uint8> Payload;
+        TestFalse(TEXT("the init of an ended session is not negotiated"),
+            Maya.Reader.Next(*Maya.Socket, TEXT("ready"), Payload, [&F]() { F.Pump(); }, 0.4));
+        TestFalse(TEXT("the actor never joined the ended session"),
+            F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
+        MtoUSetDeferStreamingSessionEndCleanup(false);
+        bDeferred = false;
+        TestTrue(TEXT("the worker closes the ended session"), Maya.PeerClosed());
+        TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
+    }
+
+    // ---- a request for an old session does not end the new one ------------
+    // The request reaches the worker queue while the connection it names is
+    // already gone; the worker serves another connection when it reads it.
+    {
+        FMtoUSessionEndMaya First(F);
+        if (!First.Connect(*this, true))
+        {
+            return false;
+        }
+        const uint64 OldSession = static_cast<uint64>(First.SessionId);
+        MtoUSetDeferStreamingSessionEndCleanup(true);
+        bDeferred = true;
+        StartAndFailRefresh(*F.Actor);
+        First.Drop();
+        TestTrue(TEXT("the old connection ends on its own"), F.WaitSessionOver());
+
+        FMtoUSessionEndMaya Second(F);
+        if (!Second.Connect(*this, true))
+        {
+            return false;
+        }
+        TestTrue(TEXT("the new session is a newer one"), static_cast<uint64>(Second.SessionId) > OldSession);
+        MtoUSetDeferStreamingSessionEndCleanup(false);
+        bDeferred = false;
+        TestTrue(TEXT("the request for the old session did not close the new one"), Second.StaysOpen(0.6));
+        TestEqual(TEXT("the new session is still the live one"),
+            MtoUGetLinkageView().Identity.SessionId, Second.SessionId);
+
+        // The same holds for a request, a greeting and a mode message of the
+        // old session that reach the game thread late.
+        FMtoUSessionEndTestAccess::RequestEndOf(*F.Source, OldSession);
+        FMtoUSessionEndTestAccess::QueueHello(*F.Source, OldSession);
+        FMtoUSessionEndTestAccess::QueueModeLinkage(*F.Source, static_cast<int32>(OldSession), 7);
+        FMtoUSessionEndTestAccess::QueueLeave(*F.Source, static_cast<int32>(OldSession), 8);
+        TestTrue(TEXT("late requests and messages of an old session keep the new one"),
+            Second.StaysOpen(0.4));
+        TestEqual(TEXT("the late messages borrowed no writer"), F.Hooks.TakeOverCalls, 0);
+        TestEqual(TEXT("the late messages returned their slots"),
+            FMtoUSessionEndTestAccess::IncomingQueued(*F.Source), 0);
+        TestEqual(TEXT("the late leave was counted"), F.Source->GetPendingLeaveCount(), 0);
+        TestEqual(TEXT("the new session keeps its identity"),
+            MtoUGetLinkageView().Identity.SessionId, Second.SessionId);
+        TestTrue(TEXT("the new session still streams"),
+            F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUControlBudgetDisconnectedRepliesTest,
+    "MtoULiveLink.Linkage.ControlBudget.DisconnectedReplies",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUControlBudgetDisconnectedRepliesTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUControlBudgetFixture Fixture;
+    if (!Fixture.Open(*this))
+    {
+        Fixture.Close();
+        return false;
+    }
+    FMtoULiveLinkSource& Source = *Fixture.Source;
+    const auto Pump = [&]() { Source.Update(); };
+    const TArray<uint8> Hello = LinkageHelloPacket();
+    const TArray<uint8> Reply = FMtoUProtocol::EncodeError(
+        TEXT("INVALID_MESSAGE"), TEXT("a control reply of the ended connection"));
+
+    // A connection greets and goes away; the editor goes on answering it.
+    {
+        FSocket* Client = ConnectLoopback(*Fixture.SocketSubsystem, Fixture.Port);
+        TestNotNull(TEXT("the first connection connects"), Client);
+        if (!Client)
+        {
+            Fixture.Close();
+            return false;
+        }
+        FMtoULinkageReplyReader Reader;
+        TestTrue(TEXT("the greeting is sent"), SendBytes(*Client, Hello.GetData(), Hello.Num()));
+        TArray<uint8> Payload;
+        TestTrue(TEXT("the greeting is answered"), Reader.Next(*Client, TEXT("hello_ack"), Payload, Pump));
+        DestroySocket(*Fixture.SocketSubsystem, Client);
+    }
+    TestTrue(TEXT("the connection ends"), PollUntil([&]()
+    {
+        Source.Update();
+        return Source.GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+    }, 5.0));
+
+    // No client takes the queue, so the 17th reply used to set the overflow
+    // status and queue a refusal of its own.
+    constexpr int32 Replies = 3 * FMtoUProtocol::MaxControlQueue;
+    for (int32 Index = 0; Index < Replies; ++Index)
+    {
+        FMtoUControlBudgetTestAccess::SendControl(Source, Reply);
+    }
+    Source.Update();
+    const FString Status = Source.GetSourceStatus().ToString();
+    TestFalse(TEXT("no overflow is reported while nobody is connected"),
+        Status.Contains(TEXT("Linkage control queue overflow.")));
+    TestEqual(TEXT("the replies of the ended session took no slot"),
+        FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+
+    // The next connection handshakes normally and meets no refusal.
+    FSocket* Next = ConnectLoopback(*Fixture.SocketSubsystem, Fixture.Port);
+    TestNotNull(TEXT("the next connection connects"), Next);
+    if (Next)
+    {
+        FMtoULinkageReplyReader Reader;
+        TestTrue(TEXT("the next greeting is sent"), SendBytes(*Next, Hello.GetData(), Hello.Num()));
+        TArray<uint8> Payload;
+        TestTrue(TEXT("the next greeting is answered"),
+            Reader.Next(*Next, TEXT("hello_ack"), Payload, Pump));
+        TArray<uint8> Refusal;
+        TestFalse(TEXT("no refusal waits for the next connection"),
+            Reader.Next(*Next, TEXT("error"), Refusal, Pump, 0.3));
+        TestFalse(TEXT("the handshake met no other refusal"),
+            Reader.OtherTypes.Contains(TEXT("error")));
+        TestEqual(TEXT("the next connection holds no slot"),
+            FMtoUControlBudgetTestAccess::OutgoingQueued(Source), 0);
+        DestroySocket(*Fixture.SocketSubsystem, Next);
+    }
+    Fixture.Close();
     return true;
 }
 #endif

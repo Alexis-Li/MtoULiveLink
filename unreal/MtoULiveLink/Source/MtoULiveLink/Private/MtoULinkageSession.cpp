@@ -12,6 +12,8 @@
 
 #include "Engine/World.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogMtoULinkageSession, Log, All);
+
 namespace
 {
 /** One placed Editor-world Binding actor is the only pairable target. */
@@ -53,10 +55,6 @@ bool MtoUSharesAnchor(const FTransform& Primary, const FTransform& Other, FStrin
     return false;
 }
 
-// The one module-level hooks seam. A source that starts before the editor
-// registered adopts them, so the registration order never loses a hook.
-static FMtoULinkageHooks GMtoULinkageHooks;
-
 // One listener serves the Editor session, so the pairing registry is
 // process-wide: the user's pairing of a Binding actor with one Maya object id
 // survives a source restart (module reload, automation host) instead of
@@ -73,7 +71,6 @@ double FMtoULinkageSession::Now()
 void FMtoULinkageSession::SetHooks(const FMtoULinkageHooks& InHooks)
 {
     Hooks = InHooks;
-    GMtoULinkageHooks = InHooks;
 }
 
 bool FMtoULinkageSession::PairTarget(
@@ -250,6 +247,18 @@ FMtoULinkageView FMtoULinkageSession::GetView() const
 
 void FMtoULinkageSession::BeginSession(int32 InSessionId)
 {
+    // A session that ended without handing everything back (a greeting-phase
+    // end, a restore that failed) must neither lose the writers it still
+    // borrows nor hide what it could not restore from the session that
+    // replaces it: hand the writers back first, reset the state, and only then
+    // write the residual, or the reset would erase the report.
+    if (bWritersBorrowed)
+    {
+        FString Restored;
+        RestoreBorrowedWriters(Restored);
+    }
+    const FString Leftover = RecoveryResidual;
+
     SessionId = InSessionId;
     ResetScheduleStats();
     bIssueOpen = false;
@@ -265,7 +274,7 @@ void FMtoULinkageSession::BeginSession(int32 InSessionId)
     ModeRevision = 0;
     bTransitioning = false;
     bWritersBorrowed = false;
-    bSessionEndRequested = false;
+    SessionEndRequestedFor = 0;
     Issued.Reset();
     Desired.Reset();
     TransportSerial = 0;
@@ -288,6 +297,10 @@ void FMtoULinkageSession::BeginSession(int32 InSessionId)
     RefusedMessage.Reset();
     Error.Reset();
     ErrorCode.Reset();
+    if (!Leftover.IsEmpty())
+    {
+        ReportResidual(Leftover, TEXT("A new session began"));
+    }
     PublishView();
 }
 
@@ -295,17 +308,22 @@ void FMtoULinkageSession::EndSession()
 {
     // The takeover is keyed on what is actually borrowed, not on the mode: a
     // disconnect while the writers are muted must hand them back even when the
-    // session already returned to realtime.
+    // session already returned to realtime. A restore that failed earlier
+    // (RestoreBorrowedWriters clears the borrowed flag either way) left its
+    // residual behind, and it counts here as well.
     if (bWritersBorrowed)
     {
-        FString Residual;
-        RestoreBorrowedWriters(Residual);
-        if (!Residual.IsEmpty())
-        {
-            Error = Residual;
-            ErrorCode = TEXT("RECOVERY_REFUSED");
-        }
+        FString Restored;
+        RestoreBorrowedWriters(Restored);
     }
+    const FString Residual = RecoveryResidual;
+
+    // The session's identity goes with it: nothing that names it can be
+    // answered or entered any more, and a request to end it is spent.
+    SessionId = 0;
+    SetRevision = 0;
+    SpaceRevision = 1;
+    SessionObjectId.Reset();
     Mode = TEXT("realtime");
     Control = TEXT("maya");
     ModeRevision = 0;
@@ -318,8 +336,36 @@ void FMtoULinkageSession::EndSession()
     SetObjectIds.Reset();
     PendingRemovalObjectId.Reset();
     PendingRemovalSetRevision = 0;
-    Detail = TEXT("Disconnected; the linkage takeover was restored.");
+    SessionEndRequestedFor = 0;
+    OfferedTransferIds.Reset();
+    if (Residual.IsEmpty())
+    {
+        Detail = TEXT("Disconnected; the linkage takeover was restored.");
+    }
+    else
+    {
+        // Never claim a restore that did not happen: the residual stays in the
+        // view for the operator.
+        ReportResidual(Residual, TEXT("Disconnected"));
+    }
     PublishView();
+}
+
+void FMtoULinkageSession::ReportResidual(const FString& Residual, const TCHAR* Context)
+{
+    RecoveryResidual = Residual;
+    bWritersRestored = false;
+    Error = Residual;
+    ErrorCode = TEXT("RECOVERY_REFUSED");
+    Detail = FString::Printf(
+        TEXT("%s; the linkage takeover could not be restored: %s"), Context, *Residual);
+    // A residual is logged once, when the restore that left it is reported; the
+    // sessions that carry the report on do not repeat it.
+    if (!bResidualLogged)
+    {
+        bResidualLogged = true;
+        UE_LOG(LogMtoULinkageSession, Warning, TEXT("%s"), *Detail);
+    }
 }
 
 void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello)
@@ -693,7 +739,7 @@ void FMtoULinkageSession::NoteLeaveLinkage(
         Detail = Residual;
         Error = Residual;
         ErrorCode = TEXT("RECOVERY_REFUSED");
-        bSessionEndRequested = true;
+        SessionEndRequestedFor = SessionId;
     }
     else
     {
@@ -1058,7 +1104,7 @@ bool FMtoULinkageSession::RequestLeave(
         Detail = Residual;
         Error = Residual;
         ErrorCode = TEXT("RECOVERY_REFUSED");
-        bSessionEndRequested = true;
+        SessionEndRequestedFor = SessionId;
     }
     else
     {
@@ -1413,6 +1459,13 @@ bool FMtoULinkageSession::BeginTakeover(
     {
         Hooks.GetAnchor(TakeoverAnchor);
     }
+    // This takeover answers for its own writers: what an earlier restore could
+    // not hand back, and the error that reported it, stop being open here.
+    if (ErrorCode == TEXT("RECOVERY_REFUSED"))
+    {
+        Error.Reset();
+        ErrorCode.Reset();
+    }
     RecoveryResidual.Reset();
     Mode = TEXT("linkage");
     Control = TEXT("unreal");
@@ -1514,6 +1567,7 @@ void FMtoULinkageSession::RestoreBorrowedWriters(FString& OutResidual)
     }
     bWritersRestored = OutResidual.IsEmpty();
     RecoveryResidual = OutResidual;
+    bResidualLogged = false;
 }
 
 void FMtoULinkageSession::EndIssueRecord(const TCHAR* Outcome, double NowSeconds)
@@ -1624,11 +1678,11 @@ void FMtoULinkageSession::PublishView()
     }
 }
 
-bool FMtoULinkageSession::ConsumeSessionEndRequest()
+int32 FMtoULinkageSession::ConsumeSessionEndRequest()
 {
-    const bool bRequested = bSessionEndRequested;
-    bSessionEndRequested = false;
-    return bRequested;
+    const int32 Requested = SessionEndRequestedFor;
+    SessionEndRequestedFor = 0;
+    return Requested;
 }
 
 // ---------------------------------------------------------------------------
@@ -1639,7 +1693,6 @@ bool FMtoULinkageSession::ConsumeSessionEndRequest()
 
 void MtoUSetLinkageHooks(const FMtoULinkageHooks& Hooks)
 {
-    GMtoULinkageHooks = Hooks;
     if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
     {
         Source->GetLinkageSession().SetHooks(Hooks);

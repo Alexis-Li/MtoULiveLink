@@ -853,65 +853,108 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
         return false;
     }
 
-    // Every connection status the source publishes must reach the same single
-    // readout with a state and a next step, and the raw message must stay
-    // visible whenever it says more than the state already does.
+    // Every connection state must reach the same single readout with a Chinese
+    // headline of its own, a state and a next step. A state with a detail (the
+    // failure behind an error) keeps that detail visible in the diagnostics; the
+    // other states carry the whole status in the headline.
+    static const FString SkeletonFailure(TEXT("the Maya and Unreal skeletons do not match."));
     struct FCase
     {
-        const TCHAR* Status;
+        EMtoUConnectionState State;
+        const TCHAR* Detail;
+        const TCHAR* Headline;
         FMtoULiveLinkActorDetails::ESeverity Severity;
-        bool bShowsDetail;
     };
     const FCase Cases[] = {
-        { TEXT(""), FMtoULiveLinkActorDetails::ESeverity::Neutral, false },
-        { TEXT("Disconnected"), FMtoULiveLinkActorDetails::ESeverity::Neutral, false },
-        { TEXT("Validating"), FMtoULiveLinkActorDetails::ESeverity::Info, false },
-        { TEXT("Connected"), FMtoULiveLinkActorDetails::ESeverity::Success, false },
-        { TEXT("Connected: partial Morph coverage"),
-            FMtoULiveLinkActorDetails::ESeverity::Warning, true },
-        { TEXT("Connected: bone-only diagnostic; not valid for model acceptance"),
-            FMtoULiveLinkActorDetails::ESeverity::Warning, true },
-        { TEXT("Preview not ready"), FMtoULiveLinkActorDetails::ESeverity::Warning, true },
-        { TEXT("Preview morph mismatch"), FMtoULiveLinkActorDetails::ESeverity::Error, true },
-        { TEXT("Error: the Maya and Unreal skeletons do not match."),
-            FMtoULiveLinkActorDetails::ESeverity::Error, true },
+        { EMtoUConnectionState::Disconnected, TEXT(""), TEXT("未连接"),
+            FMtoULiveLinkActorDetails::ESeverity::Neutral },
+        { EMtoUConnectionState::Validating, TEXT(""), TEXT("连接中"),
+            FMtoULiveLinkActorDetails::ESeverity::Info },
+        { EMtoUConnectionState::Connected, TEXT(""), TEXT("已连接"),
+            FMtoULiveLinkActorDetails::ESeverity::Success },
+        { EMtoUConnectionState::ConnectedAsSecondObject, TEXT(""), TEXT("已连接（副对象）"),
+            FMtoULiveLinkActorDetails::ESeverity::Success },
+        { EMtoUConnectionState::ConnectedPartialMorph, TEXT(""), TEXT("已连接（部分 Morph）"),
+            FMtoULiveLinkActorDetails::ESeverity::Warning },
+        { EMtoUConnectionState::ConnectedBoneOnly, TEXT(""), TEXT("已连接（仅骨骼）"),
+            FMtoULiveLinkActorDetails::ESeverity::Warning },
+        { EMtoUConnectionState::PreviewNotReady, TEXT(""), TEXT("未连接（预览未就绪）"),
+            FMtoULiveLinkActorDetails::ESeverity::Warning },
+        { EMtoUConnectionState::PreviewMorphMismatch, TEXT(""), TEXT("连接出错（Morph 不匹配）"),
+            FMtoULiveLinkActorDetails::ESeverity::Error },
+        // A secondary object that left the set while the connection went on is
+        // a known state, not an unknown one.
+        { EMtoUConnectionState::RemovedFromSet, TEXT(""), TEXT("已移出对象集合"),
+            FMtoULiveLinkActorDetails::ESeverity::Neutral },
+        { EMtoUConnectionState::Error, *SkeletonFailure, TEXT("连接出错"),
+            FMtoULiveLinkActorDetails::ESeverity::Error },
     };
+    FString BaselineDiagnostics;
+    bool bHaveBaseline = false;
     for (const FCase& Case : Cases)
     {
-        ReadoutActor->SetConnectionStatus(Case.Status);
+        const FString Name = UEnum::GetValueAsString(Case.State);
+        ReadoutActor->SetConnectionState(Case.State, Case.Detail);
         const FMtoULiveLinkActorDetails::FStatusView View =
             FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor);
-        TestFalse(FString::Printf(TEXT("status '%s' names the state"), Case.Status),
+        TestEqual(FString::Printf(TEXT("%s has its own Chinese headline"), *Name),
+            View.Connection.ToString(), FString(Case.Headline));
+        TestFalse(FString::Printf(TEXT("%s never reads as an unknown status"), *Name),
+            View.State.ToString().Contains(TEXT("状态未知")));
+        TestFalse(FString::Printf(TEXT("%s names the state"), *Name),
             View.State.ToString().TrimStartAndEnd().IsEmpty());
-        TestFalse(FString::Printf(TEXT("status '%s' names the next step"), Case.Status),
+        TestFalse(FString::Printf(TEXT("%s names the next step"), *Name),
             View.NextStep.ToString().TrimStartAndEnd().IsEmpty());
-        TestFalse(FString::Printf(TEXT("status '%s' names the display source"), Case.Status),
+        TestFalse(FString::Printf(TEXT("%s names the display source"), *Name),
             View.Display.ToString().TrimStartAndEnd().IsEmpty());
-        TestTrue(FString::Printf(TEXT("status '%s' reports its own severity"), Case.Status),
+        TestTrue(FString::Printf(TEXT("%s reports its own severity"), *Name),
             View.Severity == Case.Severity);
-        // The raw message reaches the copyable diagnostics whenever it says
-        // more than the headline already does, and stays out of it when the
-        // headline already carries the whole status.
-        if (Case.Status[0] != 0)
+        // The detail reaches the copyable diagnostics, and a state without one
+        // adds nothing to them: they read exactly as they do for the first
+        // state, which carries no detail either.
+        const FString Diagnostics = View.RawDiagnostics.ToString();
+        if (FString(Case.Detail).IsEmpty())
         {
-            TestEqual(
-                FString::Printf(TEXT("status '%s' keeps the raw message in the diagnostics"),
-                    Case.Status),
-                View.RawDiagnostics.ToString().Contains(Case.Status), Case.bShowsDetail);
+            if (!bHaveBaseline)
+            {
+                BaselineDiagnostics = Diagnostics;
+                bHaveBaseline = true;
+            }
+            TestEqual(FString::Printf(TEXT("%s adds nothing to the diagnostics"), *Name),
+                Diagnostics, BaselineDiagnostics);
+        }
+        else
+        {
+            TestTrue(FString::Printf(TEXT("%s keeps its detail in the diagnostics"), *Name),
+                Diagnostics.Contains(Case.Detail));
         }
     }
 
     // A blocking error keeps its own text instead of a generic headline.
-    ReadoutActor->SetConnectionStatus(TEXT("Error: the Maya and Unreal skeletons do not match."));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Error, SkeletonFailure);
     TestTrue(TEXT("a connection error keeps its own message"),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).RawDiagnostics.ToString()
             .Contains(TEXT("skeletons do not match")));
 
+    // The curated rows own the status text, so the raw properties are hidden by
+    // name: both names must still be the actor's.
+    TestTrue(TEXT("the panel hides the state property by its real name"),
+        FindFProperty<FProperty>(AMtoULiveLinkActor::StaticClass(), TEXT("ConnectionState")) != nullptr
+        && FindFProperty<FProperty>(AMtoULiveLinkActor::StaticClass(), TEXT("ConnectionDetail")) != nullptr);
+
+    // A state replaces the detail of the one before it.
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Error, SkeletonFailure);
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Connected);
+    TestTrue(TEXT("a later state carries no detail of an earlier error"),
+        ReadoutActor->GetConnectionDetail().IsEmpty()
+            && !FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).RawDiagnostics.ToString()
+                .Contains(SkeletonFailure));
+
     // Distinct states cannot read as the same status.
-    ReadoutActor->SetConnectionStatus(TEXT("Connected"));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Connected);
     const FString ConnectedState =
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).State.ToString();
-    ReadoutActor->SetConnectionStatus(TEXT("Disconnected"));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Disconnected);
     TestTrue(TEXT("a disconnect reads differently from a connection"),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).State.ToString() != ConnectedState);
 
@@ -927,7 +970,7 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("the presenter starts from the actor's current state"),
         Presenter.Get().State.ToString(),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).State.ToString());
-    ReadoutActor->SetConnectionStatus(TEXT("Connected"));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Connected);
     TestEqual(TEXT("the presenter follows a connection change"),
         Presenter.Get().State.ToString(),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).State.ToString());
@@ -947,7 +990,7 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
         "coincide within 0.0200 of the Preview scale, so the choice is ambiguous. "
         "Remove one duplicate or pin the intended imported slots with Driver Garment Slot Override.");
     Ambiguous.Summary = Ambiguous.Diagnostics;
-    ReadoutActor->SetConnectionStatus(TEXT("Disconnected"));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Disconnected);
     const FMtoULiveLinkActorDetails::FStatusView AmbiguousView =
         FMtoULiveLinkActorDetails::MakeStatusViewForReadiness(ReadoutActor, Ambiguous);
     TestEqual(TEXT("failed Preview has its own status"), AmbiguousView.Preview.ToString(),
@@ -988,14 +1031,14 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("a new build does not retain the previous Preview error"),
         BuildingView.RawDiagnostics.ToString().Contains(Ambiguous.Diagnostics));
 
-    // A session that ends and a session that never started publish the same
-    // "Disconnected" string; the actor's session lifecycle separates them. The
+    // A session that ends and a session that never started leave the same
+    // Disconnected state; the actor's session lifecycle separates them. The
     // transitions below are the ones MtoULiveLinkSource itself performs.
-    ReadoutActor->SetConnectionStatus(TEXT("Disconnected"));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Disconnected);
     TestEqual(TEXT("a link that never streamed reads as not connected"),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).Connection.ToString(),
         FString(TEXT("未连接")));
-    ReadoutActor->SetConnectionStatus(TEXT("Connected"));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Connected);
     ReadoutActor->NoteSessionStreaming();
     TestEqual(TEXT("a negotiated session reads as connected"),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).Connection.ToString(),
@@ -1006,7 +1049,7 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
     FMtoULiveLinkActorDetails::FStatusPresenter InterruptPresenter(ReadoutActor);
     TestEqual(TEXT("the cached presenter starts on the connected headline"),
         InterruptPresenter.Get().Connection.ToString(), FString(TEXT("已连接")));
-    ReadoutActor->SetConnectionStatus(TEXT("Disconnected"));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Disconnected);
     ReadoutActor->NoteSessionEnded();
     const FMtoULiveLinkActorDetails::FStatusView InterruptedView =
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor);
@@ -1022,7 +1065,7 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
             && InterruptPresenter.Get().State.ToString() == InterruptedView.State.ToString());
 
     // Reconnecting the same actor reports a live session again.
-    ReadoutActor->SetConnectionStatus(TEXT("Connected"));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Connected);
     ReadoutActor->NoteSessionStreaming();
     TestEqual(TEXT("a reconnected session reads as connected again"),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).Connection.ToString(),
@@ -1034,7 +1077,7 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
     TestNotNull(TEXT("a second status actor is created"), NeverStreamedActor);
     if (NeverStreamedActor)
     {
-        NeverStreamedActor->SetConnectionStatus(TEXT("Disconnected"));
+        NeverStreamedActor->SetConnectionState(EMtoUConnectionState::Disconnected);
         NeverStreamedActor->NoteSessionEnded();
         TestEqual(TEXT("a session that never streamed leaves the actor idle"),
             FMtoULiveLinkActorDetails::MakeStatusView(NeverStreamedActor).Connection.ToString(),
@@ -1048,43 +1091,45 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
     QualityWarning.State = EMtoUPreviewState::Warning;
     struct FLadderCase
     {
-        const TCHAR* Status;
+        EMtoUConnectionState State;
         EMtoUPreviewState Preview;
         const TCHAR* NextStep;
         const TCHAR* Summary;
     };
     const FLadderCase LadderCases[] = {
-        { TEXT("Error: the Maya and Unreal skeletons do not match."),
+        { EMtoUConnectionState::Error,
             EMtoUPreviewState::Warning, TEXT("检查连接诊断，然后在 Maya 中重新连接。"),
             TEXT("连接出错") },
-        { TEXT("Preview morph mismatch"), EMtoUPreviewState::Warning,
+        { EMtoUConnectionState::PreviewMorphMismatch, EMtoUPreviewState::Warning,
             TEXT("检查连接诊断，然后在 Maya 中重新连接。"), TEXT("连接出错") },
-        { TEXT("Connected"), EMtoUPreviewState::Warning,
+        { EMtoUConnectionState::Connected, EMtoUPreviewState::Warning,
             TEXT("预览可用；请先检查高级诊断中的质量警告。"), TEXT("质量警告") },
-        { TEXT("Validating"), EMtoUPreviewState::Warning,
+        { EMtoUConnectionState::Validating, EMtoUPreviewState::Warning,
             TEXT("预览可用；请先检查高级诊断中的质量警告。"), TEXT("质量警告") },
-        { TEXT("Error: the Maya and Unreal skeletons do not match."),
+        { EMtoUConnectionState::Error,
             EMtoUPreviewState::Error, TEXT("查看错误详情，修正输入后重新刷新预览。"),
             TEXT("预览生成失败") },
     };
     for (const FLadderCase& Case : LadderCases)
     {
-        ReadoutActor->SetConnectionStatus(Case.Status);
+        const FString Name = UEnum::GetValueAsString(Case.State);
+        ReadoutActor->SetConnectionState(Case.State, Case.State == EMtoUConnectionState::Error
+            ? SkeletonFailure : FString());
         FMtoUPreviewReadiness LadderReadiness = QualityWarning;
         LadderReadiness.State = Case.Preview;
         const FMtoULiveLinkActorDetails::FStatusView LadderView =
             FMtoULiveLinkActorDetails::MakeStatusViewForReadiness(
                 ReadoutActor, LadderReadiness);
         TestEqual(
-            FString::Printf(TEXT("'%s' names the blocking problem in the next step"), Case.Status),
+            FString::Printf(TEXT("%s names the blocking problem in the next step"), *Name),
             LadderView.NextStep.ToString(), FString(Case.NextStep));
-        TestTrue(FString::Printf(TEXT("'%s' names the same problem in the summary"), Case.Status),
+        TestTrue(FString::Printf(TEXT("%s names the same problem in the summary"), *Name),
             LadderView.Summary.ToString().Contains(Case.Summary));
     }
 
     // Both axes stay visible under one blocking problem, and the row takes its
     // severity from the blocker rather than from the quality warning.
-    ReadoutActor->SetConnectionStatus(TEXT("Error: the Maya and Unreal skeletons do not match."));
+    ReadoutActor->SetConnectionState(EMtoUConnectionState::Error, SkeletonFailure);
     const FMtoULiveLinkActorDetails::FStatusView WarningErrorView =
         FMtoULiveLinkActorDetails::MakeStatusViewForReadiness(ReadoutActor, QualityWarning);
     TestTrue(TEXT("the Preview warning and the connection failure stay independent"),
@@ -1300,7 +1345,7 @@ bool FMtoUPreviewLifecycleTest::RunTest(const FString& Parameters)
         ReloadedActor->Destroy();
     }
 
-    Actor->SetConnectionStatus(TEXT("Disconnected"));
+    Actor->SetConnectionState(EMtoUConnectionState::Disconnected);
     TestTrue(TEXT("disconnect keeps the Generated Preview"),
         Actor->GetPreviewReadiness().IsUsable());
     TestTrue(TEXT("disconnect preserves the Generated Preview display target"),
@@ -4202,6 +4247,9 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("ephemeral listening port is reported"), Port > 0);
     TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
     const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
+    // The Binding actors end a connection through the active source.
+    const TSharedPtr<FMtoULiveLinkSource> PreviousActiveSource = MtoUSetActiveSource(Source);
+    ON_SCOPE_EXIT { MtoUSetActiveSource(PreviousActiveSource); };
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     const FLiveLinkSubjectKey LiveSubjectKey(SourceGuid, FName(TEXT("MtoU_Character")));
     TestTrue(TEXT("source reaches listening state"),
@@ -4324,7 +4372,7 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("animation connection selects the Driver display"),
         Actor->GetDisplayTarget() == EMtoUDisplayTarget::Driver
             && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == Driver
-            && Actor->GetConnectionStatus().Contains(TEXT("Connected")));
+            && Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     const TArray<uint8> AnimFrame = PacketFor(FrameJsonFor(*TestSkeleton, FVector(11.0, 12.0, 13.0), TEXT("[]")));
     TestTrue(TEXT("animation frame is sent"), AnimClient && SendBytes(*AnimClient, AnimFrame.GetData(), AnimFrame.Num()));
     FVector AnimRoot = FVector::ZeroVector;
@@ -4440,7 +4488,7 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("animation refresh keeps usable readiness and Generated Preview display"),
         Actor->GetPreviewReadiness().IsUsable()
             && Actor->GetDisplayTarget() == EMtoUDisplayTarget::GeneratedPreview
-            && Actor->GetConnectionStatus().Contains(TEXT("Disconnected")));
+            && Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
     DestroySocket(AnimClient);
     FSocket* AnimReconnect = ConnectClient();
     TestNotNull(TEXT("animation reconnects explicitly"), AnimReconnect);
@@ -4519,7 +4567,7 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
             && FMtoURefreshEndsSessionTestAccess::Session(*Source) == ComparisonSession
             && Actor->GetSkeletalMeshComponent()->GetAnimInstance() == ComparisonAnimInstance
             && Actor->GetPreviewReadiness().GeneratedPreview == AnimRefreshedMesh
-            && Actor->GetConnectionStatus().Contains(TEXT("Connected")));
+            && Actor->GetConnectionState() == EMtoUConnectionState::ConnectedPartialMorph);
         FMtoULiveLinkActorDetails::HandleGarmentComparisonClicked(Actor);
         TestTrue(TEXT("Details restores Generated Preview in the same session"),
             Actor->GetDisplayTarget() == EMtoUDisplayTarget::GeneratedPreview
@@ -4755,7 +4803,7 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("failing animation session selects the Driver display"),
         Actor->GetDisplayTarget() == EMtoUDisplayTarget::Driver
             && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == Driver
-            && Actor->GetConnectionStatus().Contains(TEXT("Connected")));
+            && Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     UStaticMesh* AnimMisalignedPreview = MakePreview(*Driver, *WorldPackage, false, false, false, true);
     TestNotNull(TEXT("misaligned animation-failure preview is created"), AnimMisalignedPreview);
     TStrongObjectPtr<UStaticMesh> AnimMisalignedGuard(AnimMisalignedPreview);
@@ -4941,6 +4989,9 @@ bool FMtoUMayaRefreshPeerTest::RunTest(const FString& Parameters)
     TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
     const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
     PeerSource = Source;
+    // The Binding actors end a connection through the active source.
+    const TSharedPtr<FMtoULiveLinkSource> PreviousActiveSource = MtoUSetActiveSource(Source);
+    ON_SCOPE_EXIT { MtoUSetActiveSource(PreviousActiveSource); };
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     const FLiveLinkSubjectKey LiveSubjectKey(SourceGuid, FName(TEXT("MtoU_Character")));
     auto WriteCommand = [&](const FString& Action, int32 Time)
@@ -5049,7 +5100,7 @@ bool FMtoUMayaRefreshPeerTest::RunTest(const FString& Parameters)
                     // drains the ended session, after the refresh itself.
                     Source->Update();
                     LiveLinkClient.ForceTick();
-                    bPeerDisconnected = Actor->GetConnectionStatus().Contains(TEXT("Disconnected"));
+                    bPeerDisconnected = Actor->GetConnectionState() == EMtoUConnectionState::Disconnected;
                     WriteCommand(TEXT("reconnect"), 0);
                     bReconnectCommanded = true;
                     Stage = 4;
@@ -5369,6 +5420,9 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
     TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
     const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
     GuardSource = Source;
+    // The Binding actors end a connection through the active source.
+    const TSharedPtr<FMtoULiveLinkSource> PreviousActiveSource = MtoUSetActiveSource(Source);
+    ON_SCOPE_EXIT { MtoUSetActiveSource(PreviousActiveSource); };
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     const FLiveLinkSubjectKey LiveSubjectKey(SourceGuid, FName(TEXT("MtoU_Character")));
     TestTrue(TEXT("source reaches listening state"),
@@ -5454,7 +5508,7 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("animation ready selects the Driver display"),
         FromUtf8(Payload).Contains(TEXT("\"type\":\"ready\""))
             && Actor->GetDisplayTarget() == EMtoUDisplayTarget::Driver
-            && Actor->GetConnectionStatus().Contains(TEXT("Connected")));
+            && Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     TestEqual(TEXT("a negotiated session reads as connected"),
         FMtoULiveLinkActorDetails::MakeStatusView(Actor).Connection.ToString(),
         FString(TEXT("已连接")));
@@ -5492,7 +5546,7 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
         PollUntil([&]()
         {
             Source->Update();
-            return Actor->GetConnectionStatus().Contains(TEXT("Disconnected"))
+            return Actor->GetConnectionState() == EMtoUConnectionState::Disconnected
                 && Actor->GetDisplayTarget() == EMtoUDisplayTarget::GeneratedPreview
                 && Actor->GetPreviewReadiness().GeneratedPreview != nullptr
                 && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == Actor->GetPreviewReadiness().GeneratedPreview;
@@ -5527,7 +5581,7 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
         PollUntil([&]()
         {
             Source->Update();
-            return Actor->GetConnectionStatus().Contains(TEXT("Disconnected"));
+            return Actor->GetConnectionState() == EMtoUConnectionState::Disconnected;
         }));
     TestEqual(TEXT("a peer disconnect reads as interrupted"),
         FMtoULiveLinkActorDetails::MakeStatusView(Actor).Connection.ToString(),
@@ -5914,6 +5968,9 @@ struct FMtoUComparisonNaturalTickState
     ISocketSubsystem* SocketSubsystem = nullptr;
     FSocket* Client = nullptr;
     TSharedPtr<FMtoULiveLinkSource> Source;
+    // The source the editor had before this test made its own the active one.
+    TSharedPtr<FMtoULiveLinkSource> PreviousActiveSource;
+    bool bActiveSourceSet = false;
     UWorld* EditorWorld = nullptr;
     AMtoULiveLinkActor* Actor = nullptr;
     TStrongObjectPtr<UMtoULiveLinkBinding> BindingGuard;
@@ -6304,6 +6361,9 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
 
         TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
         State->Source = Source;
+        // The Binding actor ends a connection through the active source.
+        State->PreviousActiveSource = MtoUSetActiveSource(Source);
+        State->bActiveSourceSet = true;
         const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
         Self->TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
         Self->TestTrue(TEXT("source reaches listening state"), ComparisonPollUntil(
@@ -6344,7 +6404,7 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
             Actor->GetPreviewReadiness().IsUsable());
         Self->TestTrue(FString::Printf(
                 TEXT("the accepted Preview Morph set is the Generated, Driver, and part union (reply %s, status %s)"),
-                *Reply.Left(512), *Actor->GetConnectionStatus()),
+                *Reply.Left(512), *UEnum::GetValueAsString(Actor->GetConnectionState())),
             Reply.Contains(TEXT("\"type\":\"ready\""))
             && Reply.Contains(TEXT("\"target_morph_count\":5"))
             && Reply.Contains(TEXT("\"accepted_morph_count\":3")));
@@ -6408,7 +6468,7 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
         Self->TestTrue(TEXT("the Details control shows the original garment without replacing the Preview"),
             Actor->GetDisplayTarget() == EMtoUDisplayTarget::OriginalGarment
             && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == State->PreviewMesh
-            && Actor->GetConnectionStatus().Contains(TEXT("Connected")));
+            && Actor->GetConnectionState() == EMtoUConnectionState::ConnectedPartialMorph);
         Self->TestTrue(TEXT("the Generated garment is hidden and the whole original character is displayed"),
             !Actor->GetSkeletalMeshComponent()->IsMaterialSectionShown(0, 0)
             && !Actor->GetSkeletalMeshComponent()->IsMaterialSectionShown(1, 0)
@@ -6607,6 +6667,12 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
     // leave no trace in the real editor world.
     ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, OverrideName]()
     {
+        if (State->bActiveSourceSet)
+        {
+            MtoUSetActiveSource(State->PreviousActiveSource);
+            State->PreviousActiveSource.Reset();
+            State->bActiveSourceSet = false;
+        }
         if (State->Source.IsValid())
         {
             State->Source->StopListener();

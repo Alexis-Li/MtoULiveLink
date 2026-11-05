@@ -43,37 +43,47 @@ bool AMtoULiveLinkActor::ShouldTickIfViewportsOnly() const
 
 FMtoUCachePlaybackView AMtoULiveLinkActor::GetCachePlaybackView() const
 {
-    return MtoUGetActorCachePlaybackView(*this);
+    if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
+    {
+        return Source->GetActorCachePlaybackView(*this);
+    }
+    return FMtoUCachePlaybackView();
 }
 
 bool AMtoULiveLinkActor::StartCachedPlayback()
 {
-    return MtoUStartActorCachedPlayback(*this);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->StartActorCachedPlayback(*this);
 }
 
 bool AMtoULiveLinkActor::StopCachedPlayback()
 {
-    return MtoUStopActorCachedPlayback(*this);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->StopActorCachedPlayback(*this);
 }
 
 bool AMtoULiveLinkActor::PauseCachedPlayback()
 {
-    return MtoUPauseActorCachedPlayback(*this);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->PauseActorCachedPlayback(*this);
 }
 
 bool AMtoULiveLinkActor::ResumeCachedPlayback()
 {
-    return MtoUResumeActorCachedPlayback(*this);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->ResumeActorCachedPlayback(*this);
 }
 
 bool AMtoULiveLinkActor::SeekCachedPlayback(int32 SourceFrame)
 {
-    return MtoUSeekActorCachedPlayback(*this, SourceFrame);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->SeekActorCachedPlayback(*this, SourceFrame);
 }
 
 bool AMtoULiveLinkActor::SetCachedLoopEnabled(bool bEnabled)
 {
-    return MtoUSetActorCachedLoop(*this, bEnabled);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->SetActorCachedLoop(*this, bEnabled);
 }
 
 void AMtoULiveLinkActor::OnConstruction(const FTransform& Transform)
@@ -110,7 +120,7 @@ void AMtoULiveLinkActor::PostDuplicate(bool bDuplicateForPIE)
 
 void AMtoULiveLinkActor::Destroyed()
 {
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReleaseGeneratedPreview();
     Super::Destroyed();
 }
@@ -130,7 +140,7 @@ void AMtoULiveLinkActor::SetBinding(UMtoULiveLinkBinding* InBinding)
         return;
     }
 
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReleaseGeneratedPreview();
     Binding = InBinding;
     EnterUnrefreshedReadiness(TEXT("Run Refresh Preview to prepare the current Binding inputs."));
@@ -146,9 +156,10 @@ void AMtoULiveLinkActor::SetBinding(UMtoULiveLinkBinding* InBinding)
     RefreshBinding();
 }
 
-void AMtoULiveLinkActor::SetConnectionStatus(const FString& InStatus)
+void AMtoULiveLinkActor::SetConnectionState(EMtoUConnectionState InState, const FString& InDetail)
 {
-    ConnectionStatus = InStatus;
+    ConnectionState = InState;
+    ConnectionDetail = InDetail;
 }
 
 void AMtoULiveLinkActor::NoteSessionStreaming()
@@ -191,7 +202,7 @@ bool AMtoULiveLinkActor::BeginPreviewBuild()
     // also the synchronous publish gate: old queued frames and cached
     // commands fail closed from here, without waiting for the worker to
     // close the socket. A rejected reentrant start above never terminates.
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReleaseGeneratedPreview();
     HideDisplay();
     PreviewState = EMtoUPreviewState::Building;
@@ -310,7 +321,7 @@ void AMtoULiveLinkActor::EnterUnrefreshedReadiness(const FString& Message)
 
 void AMtoULiveLinkActor::NotifyGeneratedPreviewDeleted()
 {
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     InvalidateGeneratedPreview(TEXT("Generated Preview deleted. Run Refresh Preview to rebuild it."));
     PreviewSummary.Reset();
     ShowDriverMesh();
@@ -318,7 +329,7 @@ void AMtoULiveLinkActor::NotifyGeneratedPreviewDeleted()
 
 void AMtoULiveLinkActor::NotifyTransientPreviewReleased()
 {
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReleaseGeneratedPreview();
     EnterUnrefreshedReadiness(TEXT("The transient Generated Preview was released. Run Refresh Preview."));
 }
@@ -357,7 +368,7 @@ void AMtoULiveLinkActor::ShowGeneratedPreview(bool bBoneOnlyDiagnostic)
     SkeletalMeshComponent->ClearMorphTargets();
     if (bBoneOnlyDiagnostic)
     {
-        ConnectionStatus = TEXT("Connected: bone-only diagnostic; not valid for model acceptance");
+        SetConnectionState(EMtoUConnectionState::ConnectedBoneOnly);
     }
 }
 
@@ -412,7 +423,7 @@ void AMtoULiveLinkActor::NotifyBindingInputsChanged()
     // Primary Driver and Preview inputs are the Preview revision, but they also
     // change which parts resolve, so the composition is republished here too.
     SyncCharacterComposition();
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     RebindInputNotifications();
     InvalidateGeneratedPreview(TEXT("Binding inputs changed. Run Refresh Preview."));
     ReapplyDisplayTarget();
@@ -453,7 +464,7 @@ void AMtoULiveLinkActor::NotifySourceAssetChanged(const UObject* Asset, const FS
     // One terminal boundary for every relevant Preview revision change
     // (ADR-0002): the active session ends before the revision is dirtied,
     // and only an explicit Refresh plus a fresh connection can stream again.
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     InvalidateGeneratedPreview(FString::Printf(
         TEXT("%s changed (%s). Run Refresh Preview."), *Asset->GetName(), *Reason));
     // A rebuilt Primary Driver can also change whether an Additional Part is
@@ -665,7 +676,7 @@ void AMtoULiveLinkActor::SyncCharacterComposition()
     // the negotiated composition: the running session must end before its
     // frames and cached commands can reach the new component set. Removing the
     // Primary Driver removes the whole character, parts included.
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReconcileCharacterPartComponents(Composition);
     // The component set changed, so its source observations and its display
     // follow here instead of in every caller.
@@ -883,7 +894,7 @@ void AMtoULiveLinkActor::HandleCharacterPartMeshChanged()
     // and let the components and sources resynchronize. The garment Preview
     // revision depends on the Primary Driver and the imported Preview, never
     // on a part, so readiness survives.
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     SyncCharacterComposition();
 }
 

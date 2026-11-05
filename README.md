@@ -344,10 +344,13 @@ import it again, or click **移除参考** to continue without it.
 | Auto garment selection rejects an intentionally reduced mesh | Inspect the source for duplicates or mixed garment/body slots. If the reduction is intentional, set **Driver Garment Slot Override** on the Binding to the garment's separate slots, then refresh and inspect the result. |
 | BlendShapes do not appear | Check **Transfer BS**, matching names, the selected outfit, and the connection diagnostics. Refresh the Model preview after changing its source assets. |
 | Camera linkage often shows Maya 跟不上 with a lag | In Maya open **Windows > Settings/Preferences > Plug-in Manager** (Chinese UI: **窗口 > 设置/首选项 > 插件管理器**), clear **Auto load** for the plug-ins you do not use, for example MASH, XGen (`xgenToolkit`), GPU Cache, Scene Assembly, LookdevX and Type, then restart Maya. Plug-ins a scene needs are still loaded when you open it. |
-| Connection ends after a change | Reconnect after changing the outfit, mode, **Transfer BS**, or the character parts. Refreshing also disconnects the session. After changing or reimporting the Primary Driver or the Preview Static Mesh, or changing **Driver Garment Slot Override**, refresh the Model preview and reconnect. Undo/Redo of these changes follows the same rule. |
+| Connection ends after a change | Reconnect after changing the outfit, mode, **Transfer BS**, or the character parts. Only refreshing an actor that takes part in the connection disconnects it; while Maya is still connecting and the object set is being negotiated, a change to any Binding Actor ends that connection and you reconnect. After changing or reimporting the Primary Driver or the Preview Static Mesh, or changing **Driver Garment Slot Override**, refresh the Model preview and reconnect. Undo/Redo of these changes follows the same rule. |
 
-Keep the Binding Actor and its level loaded while previewing; deleting the actor
-or unloading its level ends the connection.
+Keep the Binding Actor that takes part in the connection and its level loaded
+while previewing; deleting that actor or unloading its level ends the connection.
+Placing, refreshing or deleting a Binding Actor that does not take part does not,
+except while Maya is still connecting and the object set is being negotiated: then a
+change to any Binding Actor ends that connection, so reconnect.
 
 ## License
 

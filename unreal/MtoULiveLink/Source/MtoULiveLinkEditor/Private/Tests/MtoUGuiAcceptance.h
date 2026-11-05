@@ -37,6 +37,21 @@
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Text/STextBlock.h"
 
+/** True while a session streams to the actor, whatever Morph coverage it negotiated. */
+inline bool MtoUActorIsConnected(const AMtoULiveLinkActor& Actor)
+{
+    switch (Actor.GetConnectionState())
+    {
+    case EMtoUConnectionState::Connected:
+    case EMtoUConnectionState::ConnectedAsSecondObject:
+    case EMtoUConnectionState::ConnectedPartialMorph:
+    case EMtoUConnectionState::ConnectedBoneOnly:
+        return true;
+    default:
+        return false;
+    }
+}
+
 /**
  * Shared pieces of the opt-in acceptance tests that drive a real Maya GUI
  * through `maya_gui_linkage_driver.py` and render the Binding Actor's Details.
