@@ -97,7 +97,7 @@ public:
         {
             const FMtoUCachePlaybackView Cache = Actor.IsValid() ? Actor->GetCachePlaybackView() : FMtoUCachePlaybackView();
             const FString Message = FString::Printf(TEXT("Step '%s' timed out; actor=%s cache=%s frames=%d current=%d; Maya: %s"),
-                *Steps[Step].Name, Actor.IsValid() ? *Actor->GetConnectionStatus() : TEXT("none"),
+                *Steps[Step].Name, Actor.IsValid() ? *UEnum::GetValueAsString(Actor->GetConnectionState()) : TEXT("none"),
                 *CacheStateName(Cache.State), Cache.FrameCount, Cache.CurrentSourceFrame, *MayaPanel());
             Test->AddError(Message);
             Log(TEXT("TIMEOUT ") + Message);
@@ -171,7 +171,7 @@ private:
 
     bool Connected() const
     {
-        return MayaConnected() && Actor.IsValid() && Actor->GetConnectionStatus().StartsWith(TEXT("Connected"));
+        return MayaConnected() && Actor.IsValid() && MtoUActorIsConnected(*Actor);
     }
 
     /** Sends one command once per step and reports whether Maya finished it. */

@@ -7249,7 +7249,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
         SkeletalMeshComponent
         && SkeletalMeshComponent->GetSkeletalMeshAsset() == VisibleTargetBefore);
     TestTrue(TEXT("model rejection keeps the actor disconnected from streaming"),
-        Actor && !Actor->GetConnectionStatus().Equals(TEXT("Connected"))
+        Actor && Actor->GetConnectionState() != EMtoUConnectionState::Connected
         && !Actor->GetPreviewReadiness().IsUsable());
     TestTrue(TEXT("a refused Model connection leaves readiness unmodified"),
         Actor && Actor->GetPreviewReadiness().State == EMtoUPreviewState::None
@@ -7331,7 +7331,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("bone-only ready reports zero accepted Morphs despite the full manifest"),
         FromUtf8(Payload).Contains(TEXT("\"accepted_morph_count\":0")));
     TestTrue(TEXT("bone-only result is visibly excluded from model acceptance"),
-        Actor && Actor->GetConnectionStatus().Contains(TEXT("not valid for model acceptance")));
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::ConnectedBoneOnly);
     TestEqual(TEXT("bone-only connection clears every Generated Morph"),
         SkeletalMeshComponent->GetMorphTarget(FName(TEXT("Unaccepted"))), 0.0f);
 
@@ -7390,7 +7390,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
         && FromUtf8(Payload).Contains(TEXT("\"workflow\":\"model\""))
         && FromUtf8(Payload).Contains(TEXT("\"accepted_morph_count\":0")));
     TestTrue(TEXT("empty-intersection connection is labelled a Bone-only comparison"),
-        Actor && Actor->GetConnectionStatus().Contains(TEXT("bone-only diagnostic"))
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::ConnectedBoneOnly
         && Actor->GetModelDiagnosticLevel() == EMtoUModelDiagnosticLevel::BoneOnly
         && Actor->GetModelDiagnostics().Contains(TEXT("ORANGE: Bone-only diagnostic")));
     DestroySocket(*SocketSubsystem, EmptyIntersectionClient);
@@ -7412,7 +7412,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
         && FromUtf8(Payload).Contains(TEXT("\"accepted_morph_count\":0")));
     TestTrue(TEXT("bone-driven outfit is not labelled an invalid diagnostic"),
         Actor
-        && Actor->GetConnectionStatus().Equals(TEXT("Connected"))
+        && Actor->GetConnectionState() == EMtoUConnectionState::Connected
         && Actor->GetPreviewReadiness().State == EMtoUPreviewState::Ready
         && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == GeneratedPreview);
     TestTrue(TEXT("bone-driven diagnostics report the declared-zero manifest"),
@@ -7507,7 +7507,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("partial Model coverage is a connection diagnostic that keeps readiness Ready"),
         Actor && Actor->GetPreviewReadiness().State == EMtoUPreviewState::Ready
         && Actor->GetModelDiagnosticLevel() == EMtoUModelDiagnosticLevel::Partial
-        && Actor->GetConnectionStatus().Contains(TEXT("partial Morph coverage")));
+        && Actor->GetConnectionState() == EMtoUConnectionState::ConnectedPartialMorph);
     TestTrue(TEXT("Model diagnostics report all five requested counts"),
         Actor && Actor->GetModelDiagnostics().Contains(TEXT("Maya current BlendShape count: 4"))
         && Actor->GetModelDiagnostics().Contains(TEXT("Model display Morph total: 4"))
@@ -7651,7 +7651,7 @@ bool FMtoUWorkflowNegotiationTest::RunTest(const FString& Parameters)
         && FromUtf8(Payload).Contains(TEXT("\"workflow\":\"animation\""))
         && FromUtf8(Payload).Contains(TEXT("\"target_morph_count\":1")));
     TestTrue(TEXT("animation connection marks the actor connected"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Connected")));
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     TestTrue(TEXT("Animation workflow restores the Driver Skeletal Mesh"),
         SkeletalMeshComponent
         && SkeletalMeshComponent->GetSkeletalMeshAsset() == VisibleTargetBefore);
@@ -7880,7 +7880,7 @@ bool FMtoUPreviewReadinessTest::RunTest(const FString& Parameters)
     USkeletalMesh* Retained = MakeTransientGeneratedPreview(Driver, *Actor);
     FMtoUPreviewReadinessTestAccess::Commit(*Actor, Retained, false, TEXT("ready"));
     Actor->ShowGeneratedPreview(false);
-    Actor->SetConnectionStatus(TEXT("Disconnected"));
+    Actor->SetConnectionState(EMtoUConnectionState::Disconnected);
     TestTrue(TEXT("disconnect preserves an unchanged ready Generated Preview for reuse"),
         Actor->GetPreviewReadiness().State == EMtoUPreviewState::Ready
         && Actor->GetPreviewReadiness().GeneratedPreview == Retained);
@@ -8175,7 +8175,7 @@ bool FMtoUSessionTerminationBoundaryTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("ready Model revision negotiates a streaming session"),
         NegotiateModelReady(Primary).Contains(TEXT("\"type\":\"ready\"")));
     TestTrue(TEXT("connected actor reports the live session"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Connected"))
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Connected
             && Actor->GetLinkSessionState() == EMtoULinkSessionState::Streaming);
 
     // ADR-0002 boundary: a relevant reimport of a Preview input ends the
@@ -8191,7 +8191,7 @@ bool FMtoUSessionTerminationBoundaryTest::RunTest(const FString& Parameters)
     });
     TestTrue(TEXT("source returns to listening after the boundary termination"), bReturnedToListening);
     TestTrue(TEXT("terminated actor shows the true disconnected state"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Disconnected"))
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Disconnected
             && Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
     const FMtoUPreviewReadiness AfterReimport = Actor->GetPreviewReadiness();
     TestTrue(TEXT("reimport invalidates the previous revision without a new Preview"),
@@ -8348,8 +8348,8 @@ bool FMtoUPieTargetPolicyTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("the editor Binding actor alone negotiates ready during PIE"),
         PieReply.Contains(TEXT("\"type\":\"ready\"")));
     TestTrue(TEXT("the editor actor is the connected target"),
-        EditorActor && EditorActor->GetConnectionStatus().Equals(TEXT("Connected"))
-        && PieActor && PieActor->GetConnectionStatus().Equals(TEXT("Disconnected")));
+        EditorActor && EditorActor->GetConnectionState() == EMtoUConnectionState::Connected
+        && PieActor && PieActor->GetConnectionState() == EMtoUConnectionState::Disconnected);
     DestroySocket(*SocketSubsystem, Client);
     TestTrue(TEXT("source returns to listening after the PIE-era session"),
         PollUntil([&]()
@@ -8507,7 +8507,7 @@ bool FMtoUWorldUnloadTerminationTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("ready Model revision negotiates a streaming session"),
         NegotiateModelReady(Primary).Contains(TEXT("\"type\":\"ready\"")));
     TestTrue(TEXT("connected actor reports the live session"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Connected")));
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Connected);
 
     // One streamed reference-pose frame proves the session owns a live
     // Live Link subject, not merely a negotiated socket.
@@ -8586,7 +8586,7 @@ bool FMtoUWorldUnloadTerminationTest::RunTest(const FString& Parameters)
     });
     TestTrue(TEXT("the world unload leaves no active subject"), bUnloadCleanup);
     TestTrue(TEXT("the unloaded actor shows the true disconnected state"),
-        Actor && Actor->GetConnectionStatus().Equals(TEXT("Disconnected")));
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
 
     // Late duplicate termination requests stay idempotent, and once the
     // editor reaps the unloaded world the stale actor leaves no target.
@@ -15555,8 +15555,8 @@ bool FMtoULinkageObjectSetTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("linkage continues"), RemovedView.Mode, FString(TEXT("linkage")));
     Pump();
     TestTrue(TEXT("the second subject left the stream"), SubjectCurve(TEXT("MtoU_Secondary")) < 0.0f);
-    TestEqual(TEXT("the second actor reports its removal"),
-        Prop->GetConnectionStatus(), FString(TEXT("Removed from the set")));
+    TestTrue(TEXT("the second actor reports its removal"),
+        Prop->GetConnectionState() == EMtoUConnectionState::RemovedFromSet);
     TestFalse(TEXT("the removed actor stops evaluating any subject"),
         Prop->IsInLiveLinkSet() || Evaluates(Prop));
     TestTrue(TEXT("the primary keeps evaluating its subject"), Evaluates(Hero));
@@ -16066,8 +16066,8 @@ bool FMtoUSessionEndDisconnectTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("the writers were taken over once"), F.Hooks.TakeOverCalls, 1);
     TestFalse(TEXT("linkage holds the display's own tick"), Display->IsComponentTickEnabled());
     TestTrue(TEXT("the session publishes its Live Link subject"), F.HasSubject());
-    TestEqual(TEXT("the actor reports the live session"),
-        F.Actor->GetConnectionStatus(), FString(TEXT("Connected")));
+    TestTrue(TEXT("the actor reports the live session"),
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     const uint64 SessionId = static_cast<uint64>(Maya.SessionId);
 
     // The worker disconnect is one of the ways a session ends.
@@ -16087,8 +16087,8 @@ bool FMtoUSessionEndDisconnectTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("the display's own tick is given back"), Display->IsComponentTickEnabled());
     F.LiveLink->ForceTick();
     TestFalse(TEXT("the session's Live Link subject is removed"), F.HasSubject());
-    TestEqual(TEXT("the actor shows the true disconnected state"),
-        F.Actor->GetConnectionStatus(), FString(TEXT("Disconnected")));
+    TestTrue(TEXT("the actor shows the true disconnected state"),
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
     TestTrue(TEXT("the actor knows its session ended"),
         F.Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
     TestFalse(TEXT("the actor leaves the Live Link set"), F.Actor->IsInLiveLinkSet());
@@ -16168,8 +16168,8 @@ bool FMtoUSessionEndSourceRemovedTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("a restored takeover reports no residual"),
         Ended.RecoveryResidual.IsEmpty() && Ended.ErrorCode.IsEmpty());
     TestTrue(TEXT("the display's own tick is given back"), Display->IsComponentTickEnabled());
-    TestEqual(TEXT("the actor shows the true disconnected state"),
-        F.Actor->GetConnectionStatus(), FString(TEXT("Disconnected")));
+    TestTrue(TEXT("the actor shows the true disconnected state"),
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
     TestTrue(TEXT("the actor knows its session ended"),
         F.Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
     TestFalse(TEXT("the actor leaves the Live Link set"), F.Actor->IsInLiveLinkSet());
@@ -16314,8 +16314,8 @@ bool FMtoUSessionEndResidualTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("the takeover is no longer borrowed"), Ended.bTakeoverHeld);
     TestEqual(TEXT("the session identity is cleared"), Ended.Identity.SessionId, 0);
     TestTrue(TEXT("the actor reports the error"),
-        F.Actor->GetConnectionStatus().StartsWith(TEXT("Error:"))
-        && F.Actor->GetConnectionStatus().Contains(F.Hooks.RestoreResidual));
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Error
+        && F.Actor->GetConnectionDetail() == F.Hooks.RestoreResidual);
     TestTrue(TEXT("the source status names the residual"),
         F.Source->GetSourceStatus().ToString().Contains(F.Hooks.RestoreResidual));
     TestTrue(TEXT("the actor leaves the Live Link set"), !F.Actor->IsInLiveLinkSet());
@@ -16508,8 +16508,8 @@ bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
             return false;
         }
         TestTrue(TEXT("requests made earlier left nothing that ends this session"), Maya.StaysOpen());
-        TestEqual(TEXT("the participating actor streams"),
-            F.Actor->GetConnectionStatus(), FString(TEXT("Connected")));
+        TestTrue(TEXT("the participating actor streams"),
+            F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
 
         // Placing a Binding actor, refreshing and deleting actors that take no
         // part keep the session.
@@ -16528,7 +16528,7 @@ bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("deleting actors that take no part keeps the session"), Maya.StaysOpen());
         TestTrue(TEXT("the session identity is untouched"),
             MtoUGetLinkageView().Identity.SessionId == Maya.SessionId
-            && F.Actor->GetConnectionStatus() == TEXT("Connected"));
+            && F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
 
         // A world that holds none of the participating actors unloads.
         UWorld* OtherWorld = UWorld::CreateWorld(EWorldType::Editor, false);
@@ -16549,8 +16549,8 @@ bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
             Ends.RequestedSince(Mark, *F.Actor));
         TestTrue(TEXT("refreshing the participating actor ends the session"), Maya.PeerClosed());
         TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
-        TestEqual(TEXT("the participating actor shows the true disconnected state"),
-            F.Actor->GetConnectionStatus(), FString(TEXT("Disconnected")));
+        TestTrue(TEXT("the participating actor shows the true disconnected state"),
+            F.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
     }
 
     // ---- deleting the participating actor ends it too ---------------------
@@ -16565,8 +16565,8 @@ bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
             return false;
         }
         TestTrue(TEXT("the session streams the paired actor"),
-            Second->GetConnectionStatus() == TEXT("Connected"));
-        TestTrue(TEXT("the unpaired actor takes no part"), F.Actor->GetConnectionStatus() != TEXT("Connected"));
+            Second->GetConnectionState() == EMtoUConnectionState::Connected);
+        TestTrue(TEXT("the unpaired actor takes no part"), F.Actor->GetConnectionState() != EMtoUConnectionState::Connected);
         F.Actor->NotifyBindingInputsChanged();
         TestTrue(TEXT("changing an actor outside the set keeps the session"), Maya.StaysOpen());
         Second->Destroy();
@@ -16715,7 +16715,7 @@ bool FMtoUSessionEndLateMessagesTest::RunTest(const FString& Parameters)
         TestFalse(TEXT("the init of an ended session is not negotiated"),
             Maya.Reader.Next(*Maya.Socket, TEXT("ready"), Payload, [&F]() { F.Pump(); }, 0.4));
         TestFalse(TEXT("the actor never joined the ended session"),
-            F.Actor->GetConnectionStatus() == TEXT("Connected"));
+            F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
         MtoUSetDeferStreamingSessionEndCleanup(false);
         bDeferred = false;
         TestTrue(TEXT("the worker closes the ended session"), Maya.PeerClosed());
@@ -16764,8 +16764,8 @@ bool FMtoUSessionEndLateMessagesTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("the late leave was counted"), F.Source->GetPendingLeaveCount(), 0);
         TestEqual(TEXT("the new session keeps its identity"),
             MtoUGetLinkageView().Identity.SessionId, Second.SessionId);
-        TestEqual(TEXT("the new session still streams"),
-            F.Actor->GetConnectionStatus(), FString(TEXT("Connected")));
+        TestTrue(TEXT("the new session still streams"),
+            F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     }
     return true;
 }

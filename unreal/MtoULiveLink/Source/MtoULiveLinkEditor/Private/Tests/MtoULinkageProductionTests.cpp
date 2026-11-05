@@ -317,7 +317,7 @@ public:
                 *Steps[Step].Name, *TimeoutView.Mode, TimeoutView.bConverged ? 1 : 0,
                 *TimeoutView.TargetEvalId.Right(12), TimeoutView.TargetDisplayFrame,
                 *TimeoutView.AppliedEvalId.Right(12), TimeoutView.AppliedDisplayFrame, *TimeoutView.Detail.Left(200),
-                *MtoUGetLinkageView().Error, Actor.IsValid() ? *Actor->GetConnectionStatus() : TEXT("none"),
+                *MtoUGetLinkageView().Error, Actor.IsValid() ? *UEnum::GetValueAsString(Actor->GetConnectionState()) : TEXT("none"),
                 *MayaSummary());
             Test->AddError(Message);
             Log(TEXT("TIMEOUT ") + Message);
@@ -350,7 +350,8 @@ public:
                 return true;
             }
         }
-        const FString Status = Actor.IsValid() ? Actor->GetConnectionStatus() : FString(TEXT("no actor"));
+        const FString Status = Actor.IsValid()
+            ? UEnum::GetValueAsString(Actor->GetConnectionState()) : FString(TEXT("no actor"));
         if (Status != LastStatus)
         {
             Log(FString::Printf(TEXT("actor status '%s' -> '%s' during step '%s'"),
@@ -360,7 +361,7 @@ public:
         if (HasSecondary())
         {
             const FString SecondaryStatus = SecondaryActor.IsValid()
-                ? SecondaryActor->GetConnectionStatus() : FString(TEXT("no actor"));
+                ? UEnum::GetValueAsString(SecondaryActor->GetConnectionState()) : FString(TEXT("no actor"));
             if (SecondaryStatus != LastSecondaryStatus)
             {
                 Log(FString::Printf(TEXT("second actor status '%s' -> '%s' during step '%s'"),
@@ -495,12 +496,12 @@ private:
     {
         bool bConnected = false;
         if (!MayaResult.IsValid() || !MayaResult->TryGetBoolField(TEXT("connected"), bConnected) || !bConnected
-            || !Actor.IsValid() || !Actor->GetConnectionStatus().StartsWith(TEXT("Connected")))
+            || !Actor.IsValid() || !MtoUActorIsConnected(*Actor))
         {
             return false;
         }
         return !HasSecondary() || (SecondaryActor.IsValid()
-            && SecondaryActor->GetConnectionStatus().StartsWith(TEXT("Connected"))
+            && MtoUActorIsConnected(*SecondaryActor)
             && MayaSetHasSecondary());
     }
 
@@ -3178,7 +3179,7 @@ private:
             Log(TEXT("[set] wrong skeleton refusal dialog: ") + Text.Left(600));
             Test->TestTrue(TEXT("the wrong skeleton is refused by name"), Text.Contains(TEXT("SKELETON_MISMATCH")));
             Test->TestFalse(TEXT("the second target of the wrong skeleton never connects"),
-                SecondaryActor->GetConnectionStatus().StartsWith(TEXT("Connected")) && NegotiatedObjects() == 2);
+                MtoUActorIsConnected(*SecondaryActor) && NegotiatedObjects() == 2);
             RefusalPhase = 0;
             return true;
         });
@@ -3423,13 +3424,14 @@ private:
     /** The changed object ends the whole set: neither actor stays connected, and Maya finished tearing its session down. */
     bool SetEnded(const FString& What)
     {
-        if (MayaConnected() || MayaSessionOpen() || Actor->GetConnectionStatus().StartsWith(TEXT("Connected"))
-            || SecondaryActor->GetConnectionStatus().StartsWith(TEXT("Connected")))
+        if (MayaConnected() || MayaSessionOpen() || MtoUActorIsConnected(*Actor)
+            || MtoUActorIsConnected(*SecondaryActor))
         {
             return false;
         }
-        Log(FString::Printf(TEXT("%s: the set ended (UE '%s' / '%s')"), *What, *Actor->GetConnectionStatus(),
-            *SecondaryActor->GetConnectionStatus()));
+        Log(FString::Printf(TEXT("%s: the set ended (UE '%s' / '%s')"), *What,
+            *UEnum::GetValueAsString(Actor->GetConnectionState()),
+            *UEnum::GetValueAsString(SecondaryActor->GetConnectionState())));
         Test->TestFalse(*(What + TEXT(" leaves no object streaming")),
             Actor->IsInLiveLinkSet() || SecondaryActor->IsInLiveLinkSet());
         RefusalPhase = 0;
@@ -3738,8 +3740,9 @@ private:
                 TEXT("connected %d, second %d, UE '%s' / '%s'"),
                 *What, RefusalPhase, OnceId, Ack, MayaSessionOpen() ? 1 : 0, bMayaConnected ? 1 : 0,
                 MayaSetHasSecondary() ? 1 : 0,
-                Actor.IsValid() ? *Actor->GetConnectionStatus() : TEXT("no actor"),
-                SecondaryActor.IsValid() ? *SecondaryActor->GetConnectionStatus() : TEXT("no actor")));
+                Actor.IsValid() ? *UEnum::GetValueAsString(Actor->GetConnectionState()) : TEXT("no actor"),
+                SecondaryActor.IsValid()
+                    ? *UEnum::GetValueAsString(SecondaryActor->GetConnectionState()) : TEXT("no actor")));
             bReconnectWaitLogged = true;
         }
         // A set that is connected before 连接 was clicked is the result
@@ -3778,8 +3781,9 @@ private:
         ReconnectWaitStarted = 0.0;
         PairAgain();
         Log(FString::Printf(TEXT("%s: the set connected again with %d objects (UE '%s' / '%s')"), *What,
-            NegotiatedObjects(), *Actor->GetConnectionStatus(),
-            SecondaryActor.IsValid() ? *SecondaryActor->GetConnectionStatus() : TEXT("no second object")));
+            NegotiatedObjects(), *UEnum::GetValueAsString(Actor->GetConnectionState()),
+            SecondaryActor.IsValid()
+                ? *UEnum::GetValueAsString(SecondaryActor->GetConnectionState()) : TEXT("no second object")));
         Test->TestEqual(*(What + TEXT(": every object negotiates")), NegotiatedObjects(), HasSecondary() ? 2 : 1);
         RefusalPhase = 0;
         return true;
@@ -4333,8 +4337,11 @@ private:
                 WritersMutedIn(SecondaryWriterTracks, false, *(Tag + TEXT("second after the removal"))));
             // The Binding Actor's display only ever shows Live Link; out of the
             // set it shows its Binding without a stream, like a disconnected actor.
-            Test->TestEqual(*(Tag + TEXT("the second actor says it left the set")),
-                SecondaryActor->GetConnectionStatus(), FString(TEXT("Removed from the set")));
+            Test->TestTrue(*(Tag + TEXT("the second actor says it left the set")),
+                SecondaryActor->GetConnectionState() == EMtoUConnectionState::RemovedFromSet);
+            Test->TestEqual(*(Tag + TEXT("the Details panel says so in Chinese")),
+                FMtoULiveLinkActorDetails::MakeStatusView(SecondaryActor).Connection.ToString(),
+                FString(TEXT("已移出对象集合")));
             Test->TestTrue(*(Tag + TEXT("the restore left nothing behind")), View.RecoveryResidual.IsEmpty());
             RefusalPhase = 0;
             return true;

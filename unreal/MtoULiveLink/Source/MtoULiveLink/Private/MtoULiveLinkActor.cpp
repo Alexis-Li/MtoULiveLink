@@ -43,37 +43,47 @@ bool AMtoULiveLinkActor::ShouldTickIfViewportsOnly() const
 
 FMtoUCachePlaybackView AMtoULiveLinkActor::GetCachePlaybackView() const
 {
-    return MtoUGetActorCachePlaybackView(*this);
+    if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
+    {
+        return Source->GetActorCachePlaybackView(*this);
+    }
+    return FMtoUCachePlaybackView();
 }
 
 bool AMtoULiveLinkActor::StartCachedPlayback()
 {
-    return MtoUStartActorCachedPlayback(*this);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->StartActorCachedPlayback(*this);
 }
 
 bool AMtoULiveLinkActor::StopCachedPlayback()
 {
-    return MtoUStopActorCachedPlayback(*this);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->StopActorCachedPlayback(*this);
 }
 
 bool AMtoULiveLinkActor::PauseCachedPlayback()
 {
-    return MtoUPauseActorCachedPlayback(*this);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->PauseActorCachedPlayback(*this);
 }
 
 bool AMtoULiveLinkActor::ResumeCachedPlayback()
 {
-    return MtoUResumeActorCachedPlayback(*this);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->ResumeActorCachedPlayback(*this);
 }
 
 bool AMtoULiveLinkActor::SeekCachedPlayback(int32 SourceFrame)
 {
-    return MtoUSeekActorCachedPlayback(*this, SourceFrame);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->SeekActorCachedPlayback(*this, SourceFrame);
 }
 
 bool AMtoULiveLinkActor::SetCachedLoopEnabled(bool bEnabled)
 {
-    return MtoUSetActorCachedLoop(*this, bEnabled);
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source.IsValid() && Source->SetActorCachedLoop(*this, bEnabled);
 }
 
 void AMtoULiveLinkActor::OnConstruction(const FTransform& Transform)
@@ -146,9 +156,10 @@ void AMtoULiveLinkActor::SetBinding(UMtoULiveLinkBinding* InBinding)
     RefreshBinding();
 }
 
-void AMtoULiveLinkActor::SetConnectionStatus(const FString& InStatus)
+void AMtoULiveLinkActor::SetConnectionState(EMtoUConnectionState InState, const FString& InDetail)
 {
-    ConnectionStatus = InStatus;
+    ConnectionState = InState;
+    ConnectionDetail = InDetail;
 }
 
 void AMtoULiveLinkActor::NoteSessionStreaming()
@@ -357,7 +368,7 @@ void AMtoULiveLinkActor::ShowGeneratedPreview(bool bBoneOnlyDiagnostic)
     SkeletalMeshComponent->ClearMorphTargets();
     if (bBoneOnlyDiagnostic)
     {
-        ConnectionStatus = TEXT("Connected: bone-only diagnostic; not valid for model acceptance");
+        SetConnectionState(EMtoUConnectionState::ConnectedBoneOnly);
     }
 }
 

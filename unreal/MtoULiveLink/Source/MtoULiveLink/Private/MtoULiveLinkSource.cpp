@@ -161,69 +161,6 @@ TWeakPtr<FMtoULiveLinkSource> MtoUGetActiveLinkageSource()
     return GActiveSource;
 }
 
-FMtoUCachePlaybackView MtoUGetActorCachePlaybackView(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->GetActorCachePlaybackView(Actor);
-    }
-    return FMtoUCachePlaybackView();
-}
-
-bool MtoUStartActorCachedPlayback(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->StartActorCachedPlayback(Actor);
-    }
-    return false;
-}
-
-bool MtoUStopActorCachedPlayback(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->StopActorCachedPlayback(Actor);
-    }
-    return false;
-}
-
-bool MtoUPauseActorCachedPlayback(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->PauseActorCachedPlayback(Actor);
-    }
-    return false;
-}
-
-bool MtoUResumeActorCachedPlayback(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->ResumeActorCachedPlayback(Actor);
-    }
-    return false;
-}
-
-bool MtoUSeekActorCachedPlayback(const AMtoULiveLinkActor& Actor, int32 SourceFrame)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->SeekActorCachedPlayback(Actor, SourceFrame);
-    }
-    return false;
-}
-
-bool MtoUSetActorCachedLoop(const AMtoULiveLinkActor& Actor, bool bEnabled)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->SetActorCachedLoop(Actor, bEnabled);
-    }
-    return false;
-}
-
 void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester)
 {
     check(IsInGameThread());
@@ -778,11 +715,11 @@ void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool
         HoldLinkageDisplaysOnGameThread(false);
         RestoreGeneration.Reset();
         PendingApplication.Reset();
-        const FString Disconnected(TEXT("Disconnected"));
         for (FMtoUSessionObject& Object : SessionObjects)
         {
             Released.AddUnique(Object.Actor);
-            ReleaseSessionObjectOnGameThread(Object, Disconnected, !bListenerStopped);
+            ReleaseSessionObjectOnGameThread(
+                Object, EMtoUConnectionState::Disconnected, !bListenerStopped);
         }
         // An actor whose object was refused or is not negotiated yet took part
         // too: it leaves the connection the same way.
@@ -795,7 +732,7 @@ void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool
                     Released.Add(Participant);
                     Actor->ReleaseLiveLinkSubject();
                     Actor->ReapplyDisplayTarget();
-                    Actor->SetConnectionStatus(Disconnected);
+                    Actor->SetConnectionState(EMtoUConnectionState::Disconnected);
                     Actor->NoteSessionEnded();
                 }
             }
@@ -822,7 +759,7 @@ void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool
         {
             if (AMtoULiveLinkActor* Actor = Participant.Get())
             {
-                Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Residual));
+                Actor->SetConnectionState(EMtoUConnectionState::Error, Residual);
             }
         }
     }
@@ -1821,7 +1758,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             const FString Details = FString::Printf(
                 TEXT("%s stands %s %s; the targets of one set share one placement."),
                 *Actor->GetName(), *Difference, *PrimaryActor->GetName());
-            Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Details));
+            Actor->SetConnectionState(EMtoUConnectionState::Error, Details);
             EnqueueErrorOnGameThread(
                 TEXT("ANCHOR_MISMATCH"),
                 TEXT("The second object's Binding actor does not share the primary placement."),
@@ -1831,7 +1768,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     }
 
     ParticipatingActors.Add(Actor);
-    Actor->SetConnectionStatus(TEXT("Validating"));
+    Actor->SetConnectionState(EMtoUConnectionState::Validating);
 
     // One user-facing text for every invalid-Binding refusal.
     const TCHAR* const InvalidBindingMessage =
@@ -1841,7 +1778,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     {
         const FString Details = FString::Printf(
             TEXT("%s has no MtoU_LiveLink Binding."), *Actor->GetName());
-        Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Details));
+        Actor->SetConnectionState(EMtoUConnectionState::Error, Details);
         EnqueueErrorOnGameThread(
             FMtoUCompositionFailures::InvalidBinding,
             InvalidBindingMessage,
@@ -1856,7 +1793,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             TEXT("%s character composition is not usable:\n%s"),
             *Actor->GetName(),
             *Composition.Diagnostics);
-        Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Details));
+        Actor->SetConnectionState(EMtoUConnectionState::Error, Details);
         EnqueueErrorOnGameThread(
             Composition.FailureCategory,
             Composition.FailureCategory == FMtoUCompositionFailures::SkeletonMismatch
@@ -1877,7 +1814,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
         const FString Details = FString::Printf(
             TEXT("%s has no ready Generated Preview Skeletal Mesh. Run Refresh Preview in Unreal before connecting in the Model workflow."),
             *Actor->GetName());
-        Actor->SetConnectionStatus(TEXT("Preview not ready"));
+        Actor->SetConnectionState(EMtoUConnectionState::PreviewNotReady);
         EnqueueErrorOnGameThread(
             TEXT("PREVIEW_NOT_READY"),
             TEXT("The Model workflow requires a ready Generated Preview Skeletal Mesh."),
@@ -1916,7 +1853,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             TEXT("%s skeleton cannot be mapped:\n%s"),
             *Actor->GetName(),
             *Outcome.TechnicalDetails());
-        Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Details));
+        Actor->SetConnectionState(EMtoUConnectionState::Error, Details);
         EnqueueErrorOnGameThread(
             Outcome.FailureCategory,
             bPrimary
@@ -1997,7 +1934,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             *Actor->GetName(),
             Outcome.MayaOnlyMorphNames.Num(),
             Outcome.UnrealOnlyMorphNames.Num());
-        Actor->SetConnectionStatus(TEXT("Preview morph mismatch"));
+        Actor->SetConnectionState(EMtoUConnectionState::PreviewMorphMismatch);
         EnqueueErrorOnGameThread(
             TEXT("PREVIEW_MORPH_MISMATCH"),
             TEXT("Model preview with BS transmission requires at least one accepted Morph Target."),
@@ -2088,11 +2025,13 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     {
         Actor->ShowDriverMesh();
     }
-    Actor->SetConnectionStatus(bBoneOnlySession
-        ? TEXT("Connected: bone-only diagnostic; not valid for model acceptance")
+    Actor->SetConnectionState(bBoneOnlySession
+        ? EMtoUConnectionState::ConnectedBoneOnly
         : bPartialMorphCoverage
-            ? TEXT("Connected: partial Morph coverage")
-            : bPrimary ? TEXT("Connected") : TEXT("Connected as the second object"));
+            ? EMtoUConnectionState::ConnectedPartialMorph
+            : bPrimary
+                ? EMtoUConnectionState::Connected
+                : EMtoUConnectionState::ConnectedAsSecondObject);
     Actor->NoteSessionStreaming();
     SetEditorViewportRealtimeOverride(true);
 
@@ -2394,7 +2333,7 @@ void FMtoULiveLinkSource::RemoveSecondaryObjectOnGameThread(
                 }
             }
         }
-        ReleaseSessionObjectOnGameThread(Removed, TEXT("Removed from the set"));
+        ReleaseSessionObjectOnGameThread(Removed, EMtoUConnectionState::RemovedFromSet);
     }
     NegotiatedSetRevision = SetRevision;
     // 4. The new set is confirmed; the worker stops expecting the object's
@@ -2469,7 +2408,7 @@ void FMtoULiveLinkSource::NotePairingChangedOnGameThread()
 }
 
 void FMtoULiveLinkSource::ReleaseSessionObjectOnGameThread(
-    FMtoUSessionObject& Object, const FString& ActorStatus, bool bRemoveSubject)
+    FMtoUSessionObject& Object, EMtoUConnectionState ActorState, bool bRemoveSubject)
 {
     check(IsInGameThread());
     if (bRemoveSubject && Client && SourceGuid.IsValid())
@@ -2480,7 +2419,7 @@ void FMtoULiveLinkSource::ReleaseSessionObjectOnGameThread(
     {
         Actor->ReleaseLiveLinkSubject();
         Actor->ReapplyDisplayTarget();
-        Actor->SetConnectionStatus(ActorStatus);
+        Actor->SetConnectionState(ActorState);
         Actor->NoteSessionEnded();
     }
 }

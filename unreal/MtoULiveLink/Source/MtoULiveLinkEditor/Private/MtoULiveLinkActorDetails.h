@@ -120,7 +120,8 @@ public:
             EMtoUPreviewBuildStage Stage = EMtoUPreviewBuildStage::None;
             FString PreviewDiagnostics;
             FString PreviewSummary;
-            FString Connection;
+            EMtoUConnectionState Connection = EMtoUConnectionState::Disconnected;
+            FString ConnectionDetail;
             EMtoULinkSessionState Session = EMtoULinkSessionState::Idle;
             FString ModelDiagnostics;
             FString CharacterDiagnostics;

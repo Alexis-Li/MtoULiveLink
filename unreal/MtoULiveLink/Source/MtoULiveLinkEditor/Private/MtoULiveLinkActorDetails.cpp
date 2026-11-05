@@ -35,20 +35,6 @@ namespace
 {
 using ESeverity = FMtoULiveLinkActorDetails::ESeverity;
 
-/** The user-facing meaning of the source's connection status string. */
-enum class EMtoUConnectionState : uint8
-{
-    /** No session yet, or a status this build does not classify. */
-    Unknown,
-    Disconnected,
-    Validating,
-    NotReady,
-    Partial,
-    BoneOnly,
-    Connected,
-    Error
-};
-
 FText StageText(EMtoUPreviewBuildStage Stage)
 {
     switch (Stage)
@@ -155,46 +141,6 @@ FText CacheSummaryText(const FMtoUCachePlaybackView& View)
         FText::FromString(FString::FromInt(View.FrameCount)));
 }
 
-EMtoUConnectionState ClassifyConnection(const FString& Status)
-{
-    // The strings are the ones MtoULiveLinkSource publishes for the actor; a
-    // status this build does not know keeps its raw text in the headline.
-    if (Status.IsEmpty())
-    {
-        return EMtoUConnectionState::Unknown;
-    }
-    if (Status.StartsWith(TEXT("Error"))
-        || Status.StartsWith(TEXT("Preview morph mismatch")))
-    {
-        return EMtoUConnectionState::Error;
-    }
-    if (Status.StartsWith(TEXT("Preview not ready")))
-    {
-        return EMtoUConnectionState::NotReady;
-    }
-    if (Status.StartsWith(TEXT("Validating")))
-    {
-        return EMtoUConnectionState::Validating;
-    }
-    if (Status.StartsWith(TEXT("Connected: bone-only")))
-    {
-        return EMtoUConnectionState::BoneOnly;
-    }
-    if (Status.StartsWith(TEXT("Connected: partial")))
-    {
-        return EMtoUConnectionState::Partial;
-    }
-    if (Status.StartsWith(TEXT("Connected")))
-    {
-        return EMtoUConnectionState::Connected;
-    }
-    if (Status.StartsWith(TEXT("Disconnected")))
-    {
-        return EMtoUConnectionState::Disconnected;
-    }
-    return EMtoUConnectionState::Unknown;
-}
-
 FText ReadinessHeadline(const FMtoUPreviewReadiness& Readiness, ESeverity& OutSeverity)
 {
     switch (Readiness.State)
@@ -222,53 +168,47 @@ FText ReadinessHeadline(const FMtoUPreviewReadiness& Readiness, ESeverity& OutSe
 }
 
 FText ConnectionHeadline(
-    EMtoUConnectionState State, const FString& Status, EMtoULinkSessionState Session,
-    ESeverity& OutSeverity)
+    EMtoUConnectionState State, EMtoULinkSessionState Session, ESeverity& OutSeverity)
 {
     switch (State)
     {
-    case EMtoUConnectionState::Disconnected:
-        OutSeverity = ESeverity::Neutral;
-        // Every session that ends reports the same "Disconnected" string, so
-        // only the actor's session lifecycle separates a link that was lost
-        // from one that was never established.
-        return Session == EMtoULinkSessionState::Ended
-            ? LOCTEXT("ConnectionInterrupted", "连接已中断")
-            : LOCTEXT("ConnectionDisconnected", "未连接");
     case EMtoUConnectionState::Validating:
         OutSeverity = ESeverity::Info;
         return LOCTEXT("ConnectionValidating", "连接中");
-    case EMtoUConnectionState::NotReady:
+    case EMtoUConnectionState::PreviewNotReady:
         OutSeverity = ESeverity::Warning;
         return LOCTEXT("ConnectionNotReady", "未连接（预览未就绪）");
-    case EMtoUConnectionState::Partial:
+    case EMtoUConnectionState::ConnectedPartialMorph:
         OutSeverity = ESeverity::Warning;
         return LOCTEXT("ConnectionPartial", "已连接（部分 Morph）");
-    case EMtoUConnectionState::BoneOnly:
+    case EMtoUConnectionState::ConnectedBoneOnly:
         OutSeverity = ESeverity::Warning;
         return LOCTEXT("ConnectionBoneOnly", "已连接（仅骨骼）");
     case EMtoUConnectionState::Connected:
         OutSeverity = ESeverity::Success;
         return LOCTEXT("ConnectionConnected", "已连接");
+    case EMtoUConnectionState::ConnectedAsSecondObject:
+        OutSeverity = ESeverity::Success;
+        return LOCTEXT("ConnectionSecondObject", "已连接（副对象）");
+    case EMtoUConnectionState::PreviewMorphMismatch:
+        OutSeverity = ESeverity::Error;
+        return LOCTEXT("ConnectionMorphMismatch", "连接出错（Morph 不匹配）");
+    case EMtoUConnectionState::RemovedFromSet:
+        OutSeverity = ESeverity::Neutral;
+        return LOCTEXT("ConnectionRemovedFromSet", "已移出对象集合");
     case EMtoUConnectionState::Error:
         OutSeverity = ESeverity::Error;
         return LOCTEXT("ConnectionError", "连接出错");
-    case EMtoUConnectionState::Unknown:
+    case EMtoUConnectionState::Disconnected:
     default:
         OutSeverity = ESeverity::Neutral;
-        return Status.TrimStartAndEnd().IsEmpty()
-            ? LOCTEXT("ConnectionIdle", "未连接")
-            : LOCTEXT("ConnectionUnknown", "连接状态未知");
+        // Every session that ends leaves the actor Disconnected, so only the
+        // actor's session lifecycle separates a link that was lost from one
+        // that was never established.
+        return Session == EMtoULinkSessionState::Ended
+            ? LOCTEXT("ConnectionInterrupted", "连接已中断")
+            : LOCTEXT("ConnectionDisconnected", "未连接");
     }
-}
-
-/** The raw message is shown whenever it says more than the headline already does. */
-bool ConnectionNeedsDetail(const FString& Status)
-{
-    return !Status.IsEmpty()
-        && Status != TEXT("Connected")
-        && Status != TEXT("Disconnected")
-        && Status != TEXT("Validating");
 }
 
 /**
@@ -306,7 +246,8 @@ EStatusIssue ClassifyIssue(EMtoUConnectionState Connection, const FMtoUPreviewRe
     {
         return EStatusIssue::PreviewFailed;
     }
-    if (Connection == EMtoUConnectionState::Error)
+    if (Connection == EMtoUConnectionState::Error
+        || Connection == EMtoUConnectionState::PreviewMorphMismatch)
     {
         return EStatusIssue::ConnectionBlocked;
     }
@@ -329,11 +270,12 @@ EStatusIssue ClassifyIssue(EMtoUConnectionState Connection, const FMtoUPreviewRe
     {
     case EMtoUConnectionState::Validating:
         return EStatusIssue::LinkValidating;
-    case EMtoUConnectionState::BoneOnly:
+    case EMtoUConnectionState::ConnectedBoneOnly:
         return EStatusIssue::LinkBoneOnly;
-    case EMtoUConnectionState::Partial:
+    case EMtoUConnectionState::ConnectedPartialMorph:
         return EStatusIssue::LinkPartial;
     case EMtoUConnectionState::Connected:
+    case EMtoUConnectionState::ConnectedAsSecondObject:
         return EStatusIssue::LinkConnected;
     default:
         return EStatusIssue::Idle;
@@ -825,14 +767,13 @@ FMtoULiveLinkActorDetails::FStatusView BuildStatusView(
     AMtoULiveLinkActor& Target, const FMtoUPreviewReadiness& Readiness)
 {
     FMtoULiveLinkActorDetails::FStatusView View;
-    const FString& ConnectionStatus = Target.GetConnectionStatus();
-    const EMtoUConnectionState Connection = ClassifyConnection(ConnectionStatus);
+    const EMtoUConnectionState Connection = Target.GetConnectionState();
 
     ESeverity ReadinessSeverity = ESeverity::Neutral;
     const FText ReadinessText = ReadinessHeadline(Readiness, ReadinessSeverity);
     ESeverity ConnectionSeverity = ESeverity::Neutral;
     const FText ConnectionText = ConnectionHeadline(
-        Connection, ConnectionStatus, Target.GetLinkSessionState(), ConnectionSeverity);
+        Connection, Target.GetLinkSessionState(), ConnectionSeverity);
 
     View.Preview = ReadinessText;
     View.Connection = ConnectionText;
@@ -899,10 +840,8 @@ FMtoULiveLinkActorDetails::FStatusView BuildStatusView(
     }
     AddRaw(Target.GetCharacterPartDiagnostics());
     AddRaw(Target.GetModelDiagnostics());
-    if (ConnectionNeedsDetail(ConnectionStatus))
-    {
-        AddRaw(ConnectionStatus);
-    }
+    // The headline names the state; the failure behind an error is the detail.
+    AddRaw(Target.GetConnectionDetail());
     View.RawDiagnostics = FText::FromString(FString::Join(RawMessages, TEXT("\n\n")));
     return View;
 }
@@ -1015,8 +954,9 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
         }
     }
 
-    // Curated rows own all status text. Keep the serialized property intact.
-    DetailBuilder.HideProperty(FName(TEXT("ConnectionStatus")));
+    // Curated rows own all status text.
+    DetailBuilder.HideProperty(FName(TEXT("ConnectionState")));
+    DetailBuilder.HideProperty(FName(TEXT("ConnectionDetail")));
     const TSharedRef<FStatusPresenter> Status = MakeShared<FStatusPresenter>(Actor);
 
     IDetailCategoryBuilder& Runtime = DetailBuilder.EditCategory(
@@ -2117,10 +2057,12 @@ const FMtoULiveLinkActorDetails::FStatusView& FMtoULiveLinkActorDetails::FStatus
     }
 
     // The change key reads each axis once: readiness state and stage, the
-    // connection message, the display selection. Readiness is read through the
-    // actor's one coherent snapshot and only formatted when the key moved.
+    // connection state and its detail, the display selection. Readiness is read
+    // through the actor's one coherent snapshot and only formatted when the key
+    // moved.
     const FMtoUPreviewReadiness Readiness = Target->GetPreviewReadiness();
-    const FString& Connection = Target->GetConnectionStatus();
+    const EMtoUConnectionState Connection = Target->GetConnectionState();
+    const FString& ConnectionDetail = Target->GetConnectionDetail();
     const EMtoUDisplayTarget Display = Target->GetDisplayTarget();
     const EMtoULinkSessionState Session = Target->GetLinkSessionState();
     if (bHasView
@@ -2132,6 +2074,7 @@ const FMtoULiveLinkActorDetails::FStatusView& FMtoULiveLinkActorDetails::FStatus
         && CachedKey.PreviewDiagnostics == Readiness.Diagnostics
         && CachedKey.PreviewSummary == Readiness.Summary
         && CachedKey.Connection == Connection
+        && CachedKey.ConnectionDetail == ConnectionDetail
         && CachedKey.ModelDiagnostics == Target->GetModelDiagnostics()
         && CachedKey.CharacterDiagnostics == Target->GetCharacterPartDiagnostics())
     {
@@ -2147,6 +2090,7 @@ const FMtoULiveLinkActorDetails::FStatusView& FMtoULiveLinkActorDetails::FStatus
     CachedKey.Display = Display;
     CachedKey.Session = Session;
     CachedKey.Connection = Connection;
+    CachedKey.ConnectionDetail = ConnectionDetail;
     CachedKey.ModelDiagnostics = Target->GetModelDiagnostics();
     CachedKey.CharacterDiagnostics = Target->GetCharacterPartDiagnostics();
     bHasView = true;

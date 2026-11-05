@@ -85,7 +85,7 @@ public:
         if (FPlatformTime::Seconds() > Deadline)
         {
             Test->AddError(FString::Printf(TEXT("Character acceptance timed out at stage %d: %s"), Stage,
-                Actor.IsValid() ? *Actor->GetConnectionStatus() : TEXT("no actor")));
+                Actor.IsValid() ? *UEnum::GetValueAsString(Actor->GetConnectionState()) : TEXT("no actor")));
             return true;
         }
         Source->Update(); Client->ForceTick();

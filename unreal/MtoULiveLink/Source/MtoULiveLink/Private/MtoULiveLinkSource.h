@@ -8,6 +8,7 @@
 #include "ILiveLinkSource.h"
 #include "MtoUCacheCommandQueue.h"
 #include "MtoUCacheSession.h"
+#include "MtoULiveLinkActor.h"
 #include "MtoULinkageSession.h"
 #include "MtoULiveLinkProtocol.h"
 
@@ -24,13 +25,6 @@ class FSocket;
  */
 MTOULIVELINK_API TSharedPtr<class FMtoULiveLinkSource> MtoUSetActiveSource(
     TSharedPtr<class FMtoULiveLinkSource> Source);
-FMtoUCachePlaybackView MtoUGetActorCachePlaybackView(const AMtoULiveLinkActor& Actor);
-bool MtoUStartActorCachedPlayback(const AMtoULiveLinkActor& Actor);
-bool MtoUStopActorCachedPlayback(const AMtoULiveLinkActor& Actor);
-bool MtoUPauseActorCachedPlayback(const AMtoULiveLinkActor& Actor);
-bool MtoUResumeActorCachedPlayback(const AMtoULiveLinkActor& Actor);
-bool MtoUSeekActorCachedPlayback(const AMtoULiveLinkActor& Actor, int32 SourceFrame);
-bool MtoUSetActorCachedLoop(const AMtoULiveLinkActor& Actor, bool bEnabled);
 
 /**
  * The one idempotent session-termination boundary shared by the Live Link
@@ -473,7 +467,7 @@ private:
     // per-object part of the end contract, also used when only the second
     // object leaves the set.
     void ReleaseSessionObjectOnGameThread(
-        FMtoUSessionObject& Object, const FString& ActorStatus, bool bRemoveSubject = true);
+        FMtoUSessionObject& Object, EMtoUConnectionState ActorState, bool bRemoveSubject = true);
     // A published group that will not be confirmed (cancelled, failed, mode
     // left) gives the subject back the last complete frame; the displays
     // follow once the subject holds it.
