@@ -110,7 +110,7 @@ void AMtoULiveLinkActor::PostDuplicate(bool bDuplicateForPIE)
 
 void AMtoULiveLinkActor::Destroyed()
 {
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReleaseGeneratedPreview();
     Super::Destroyed();
 }
@@ -130,7 +130,7 @@ void AMtoULiveLinkActor::SetBinding(UMtoULiveLinkBinding* InBinding)
         return;
     }
 
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReleaseGeneratedPreview();
     Binding = InBinding;
     EnterUnrefreshedReadiness(TEXT("Run Refresh Preview to prepare the current Binding inputs."));
@@ -191,7 +191,7 @@ bool AMtoULiveLinkActor::BeginPreviewBuild()
     // also the synchronous publish gate: old queued frames and cached
     // commands fail closed from here, without waiting for the worker to
     // close the socket. A rejected reentrant start above never terminates.
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReleaseGeneratedPreview();
     HideDisplay();
     PreviewState = EMtoUPreviewState::Building;
@@ -310,7 +310,7 @@ void AMtoULiveLinkActor::EnterUnrefreshedReadiness(const FString& Message)
 
 void AMtoULiveLinkActor::NotifyGeneratedPreviewDeleted()
 {
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     InvalidateGeneratedPreview(TEXT("Generated Preview deleted. Run Refresh Preview to rebuild it."));
     PreviewSummary.Reset();
     ShowDriverMesh();
@@ -318,7 +318,7 @@ void AMtoULiveLinkActor::NotifyGeneratedPreviewDeleted()
 
 void AMtoULiveLinkActor::NotifyTransientPreviewReleased()
 {
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReleaseGeneratedPreview();
     EnterUnrefreshedReadiness(TEXT("The transient Generated Preview was released. Run Refresh Preview."));
 }
@@ -412,7 +412,7 @@ void AMtoULiveLinkActor::NotifyBindingInputsChanged()
     // Primary Driver and Preview inputs are the Preview revision, but they also
     // change which parts resolve, so the composition is republished here too.
     SyncCharacterComposition();
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     RebindInputNotifications();
     InvalidateGeneratedPreview(TEXT("Binding inputs changed. Run Refresh Preview."));
     ReapplyDisplayTarget();
@@ -453,7 +453,7 @@ void AMtoULiveLinkActor::NotifySourceAssetChanged(const UObject* Asset, const FS
     // One terminal boundary for every relevant Preview revision change
     // (ADR-0002): the active session ends before the revision is dirtied,
     // and only an explicit Refresh plus a fresh connection can stream again.
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     InvalidateGeneratedPreview(FString::Printf(
         TEXT("%s changed (%s). Run Refresh Preview."), *Asset->GetName(), *Reason));
     // A rebuilt Primary Driver can also change whether an Additional Part is
@@ -665,7 +665,7 @@ void AMtoULiveLinkActor::SyncCharacterComposition()
     // the negotiated composition: the running session must end before its
     // frames and cached commands can reach the new component set. Removing the
     // Primary Driver removes the whole character, parts included.
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     ReconcileCharacterPartComponents(Composition);
     // The component set changed, so its source observations and its display
     // follow here instead of in every caller.
@@ -883,7 +883,7 @@ void AMtoULiveLinkActor::HandleCharacterPartMeshChanged()
     // and let the components and sources resynchronize. The garment Preview
     // revision depends on the Primary Driver and the imported Preview, never
     // on a part, so readiness survives.
-    MtoURequestStreamingSessionEnd();
+    MtoURequestStreamingSessionEnd(*this);
     SyncCharacterComposition();
 }
 

@@ -128,12 +128,13 @@ bool IsPlacedEditorActor(const AMtoULiveLinkActor& Actor)
     return World && World->WorldType == EWorldType::Editor;
 }
 
-TAtomic<uint64> GStreamingSessionEndRequests{0};
 TWeakPtr<FMtoULiveLinkSource> GActiveSource;
 #if WITH_DEV_AUTOMATION_TESTS
 // Test-only hold on worker disconnect cleanup (see header). Defaults off, so
 // production and ordinary automation never observe it.
 TAtomic<bool> GDeferStreamingSessionEndCleanup{false};
+// Test-only record of the actors that ask for a session end (see header).
+TFunction<void(const AMtoULiveLinkActor&)> GStreamingSessionEndProbe;
 #endif
 }
 
@@ -223,19 +224,30 @@ bool MtoUSetActorCachedLoop(const AMtoULiveLinkActor& Actor, bool bEnabled)
     return false;
 }
 
-void MtoURequestStreamingSessionEnd()
+void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester)
 {
-    ++GStreamingSessionEndRequests;
-}
-
-uint64 MtoUGetStreamingSessionEndCount()
-{
-    return GStreamingSessionEndRequests.Load();
+    check(IsInGameThread());
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GStreamingSessionEndProbe)
+    {
+        GStreamingSessionEndProbe(Requester);
+    }
+#endif
+    if (const TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
+    {
+        Source->RequestStreamingSessionEnd(Requester);
+    }
 }
 #if WITH_DEV_AUTOMATION_TESTS
 void MtoUSetDeferStreamingSessionEndCleanup(bool bDefer)
 {
     GDeferStreamingSessionEndCleanup.Store(bDefer);
+}
+
+void MtoUSetStreamingSessionEndProbe(TFunction<void(const AMtoULiveLinkActor& Requester)> Probe)
+{
+    check(IsInGameThread());
+    GStreamingSessionEndProbe = MoveTemp(Probe);
 }
 
 namespace
@@ -261,12 +273,13 @@ void MtoUNotifyEditorWorldCleanup(UWorld* World, bool bSessionEnded, bool bClean
     {
         return;
     }
+    // Each Binding actor of the world asks like any other requester, so a
+    // session that streams none of them keeps running.
     for (TObjectIterator<AMtoULiveLinkActor> It; It; ++It)
     {
         if (!It->HasAnyFlags(RF_ClassDefaultObject) && It->GetWorld() == World)
         {
-            MtoURequestStreamingSessionEnd();
-            return;
+            MtoURequestStreamingSessionEnd(**It);
         }
     }
 }
@@ -491,64 +504,7 @@ void FMtoULiveLinkSource::Update()
     uint64 DisconnectedSession = 0;
     while (DisconnectedSessions.Dequeue(DisconnectedSession))
     {
-        if (DisconnectedSession == GameThreadSession)
-        {
-            SetEditorViewportRealtimeOverride(false);
-            HoldLinkageDisplaysOnGameThread(false);
-            RestoreGeneration.Reset();
-            if (Client && SourceGuid.IsValid())
-            {
-                for (const FMtoUSessionObject& Object : SessionObjects)
-                {
-                    Client->RemoveSubject_AnyThread(Object.SubjectKey);
-                }
-            }
-            for (const TWeakObjectPtr<AMtoULiveLinkActor>& Actor : ParticipatingActors)
-            {
-                if (Actor.IsValid())
-                {
-                    Actor->ReleaseLiveLinkSubject();
-                    Actor->ReapplyDisplayTarget();
-                    Actor->SetConnectionStatus(TEXT("Disconnected"));
-                    Actor->NoteSessionEnded();
-                }
-            }
-            GameThreadSession = 0;
-            SessionObjects.Reset();
-            SetObjects.Reset();
-            PendingApplication.Reset();
-            NegotiatedSetRevision = 0;
-            NegotiatedSpaceRevision = 1;
-            // Every borrowed writer is restored per resource and the linkage
-            // state returns to realtime; a new connection negotiates again.
-            LinkageSession.EndSession();
-            {
-                FScopeLock Lock(&PendingMutex);
-                FMtoUPendingHello Hello;
-                while (PendingHellos.Dequeue(Hello))
-                {
-                    ReleaseLinkageControl();
-                }
-                FMtoUPendingLinkageControl Control;
-                while (PendingLinkageControls.Dequeue(Control))
-                {
-                    ReleaseLinkageControl();
-                    if (Control.Kind == FMtoUPendingLinkageControl::EKind::LeaveLinkage)
-                    {
-                        ++LeavesTaken;
-                    }
-                }
-                FMtoUPendingPoseGroup Group;
-                while (PendingPoseGroups.Dequeue(Group))
-                {
-                    ReleaseLinkageControl();
-                }
-            }
-            // The transient cache and its upload/play identity history are
-            // scoped to one negotiated streaming session; a newer connection
-            // starts its own fresh sequence at 1.
-            CacheSession.EndSession();
-        }
+        EndStreamingSessionOnGameThread(DisconnectedSession);
     }
 
     // The greeting is answered before any object is negotiated, so the intake
@@ -564,24 +520,13 @@ void FMtoULiveLinkSource::Update()
     }
     for (FMtoUPendingInit& Init : Inits)
     {
-        if (!IsCurrentSession(Init.SessionId))
+        // An init of a session the worker left, or one an end request already
+        // closed (an explicit refresh replaces the display right after it),
+        // never negotiates; only a newer session may stream the newer
+        // revision.
+        if (!IsCurrentSession(Init.SessionId) || Init.SessionId == EndedSession)
         {
             continue;
-        }
-        // An explicit refresh increments the termination counter before
-        // replacing the display. An init queued for the replaced session must
-        // never negotiate after the refresh started; only a new session id
-        // may establish a new epoch and stream the newer revision.
-        const bool bStaleInitForReplacedSession = Init.SessionId == GameThreadSession
-            && GameThreadSession != 0
-            && MtoUGetStreamingSessionEndCount() != GameThreadSessionEndEpoch;
-        if (bStaleInitForReplacedSession)
-        {
-            continue;
-        }
-        if (Init.SessionId != GameThreadSession)
-        {
-            GameThreadSessionEndEpoch = MtoUGetStreamingSessionEndCount();
         }
         GameThreadSession = Init.SessionId;
         // A refused object ends the whole set: the rest of its inits are not
@@ -650,10 +595,11 @@ void FMtoULiveLinkSource::Update()
     {
         WorkerLinkageLeavesPending -= LeavesTaken;
     }
-    if (LinkageSession.ConsumeSessionEndRequest())
+    if (const int32 FailedRestoreSession = LinkageSession.ConsumeSessionEndRequest())
     {
-        // A failed restore ended the session rather than hiding the residual.
-        MtoURequestStreamingSessionEnd();
+        // A failed restore ended the session rather than hiding the residual;
+        // it ends the session whose restore failed and no other.
+        RequestSessionEndOnGameThread(static_cast<uint64>(FailedRestoreSession));
     }
 
     // While a cache owns this session, ordinary live frames must neither
@@ -739,19 +685,153 @@ void FMtoULiveLinkSource::StopListener()
     SetStatus(TEXT("Stopped"));
     if (IsInGameThread())
     {
+        // The worker is gone, so no session is current any more: the end
+        // contract runs for what the game thread still holds, without any
+        // reply and without touching the Live Link client, which may be
+        // invalid by now. The editor module has already handed the writers
+        // back and cleared its hooks when the editor closes.
+        const int32 GreetedSession = LinkageSession.GetSessionId();
+        EndStreamingSessionOnGameThread(GameThreadSession, true);
+        if (GreetedSession > 0)
+        {
+            EndStreamingSessionOnGameThread(static_cast<uint64>(GreetedSession), true);
+        }
+        EndedSession = 0;
         CacheSession.EndSession();
         HoldLinkageDisplaysOnGameThread(false);
         SetEditorViewportRealtimeOverride(false);
-        for (const TWeakObjectPtr<AMtoULiveLinkActor>& Actor : ParticipatingActors)
-        {
-            if (Actor.IsValid())
+    }
+}
+
+void FMtoULiveLinkSource::RequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester)
+{
+    check(IsInGameThread());
+    uint64 Target = 0;
+    {
+        FScopeLock Lock(&PendingMutex);
+        Target = CurrentWorkerSession;
+    }
+    // No session is current: nothing to end, and nothing may be left behind
+    // that could end a later one.
+    if (Target == 0)
+    {
+        return;
+    }
+    // Until the object set is negotiated, any Binding actor may change what
+    // the negotiation reads, so any request ends it. Afterwards the session
+    // streams its participating actors only; the others come and go freely.
+    const bool bNegotiated = GameThreadSession == Target
+        && !SetObjects.IsEmpty()
+        && SessionObjects.Num() == SetObjects.Num();
+    if (bNegotiated)
+    {
+        const bool bParticipates = ParticipatingActors.ContainsByPredicate(
+            [&Requester](const TWeakObjectPtr<AMtoULiveLinkActor>& Participant)
             {
-                Actor->ReleaseLiveLinkSubject();
-                Actor->ReapplyDisplayTarget();
-                Actor->SetConnectionStatus(TEXT("Disconnected"));
-                Actor->NoteSessionEnded();
+                return Participant.GetEvenIfUnreachable() == &Requester;
+            });
+        if (!bParticipates)
+        {
+            return;
+        }
+    }
+    RequestSessionEndOnGameThread(Target);
+}
+
+void FMtoULiveLinkSource::RequestSessionEndOnGameThread(uint64 SessionId)
+{
+    check(IsInGameThread());
+    if (SessionId == 0 || SessionId == EndedSession || !IsCurrentSession(SessionId))
+    {
+        return;
+    }
+    EndedSession = SessionId;
+    SessionEndRequests.Enqueue(SessionId);
+}
+
+void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool bListenerStopped)
+{
+    check(IsInGameThread());
+    if (SessionId == 0)
+    {
+        return;
+    }
+    const bool bNegotiated = GameThreadSession == SessionId;
+    const bool bGreeted = LinkageSession.GetSessionId() == static_cast<int32>(SessionId);
+    if (!bNegotiated && !bGreeted)
+    {
+        return;
+    }
+    if (EndedSession == SessionId)
+    {
+        // The worker's disconnect reached the game thread: no message of this
+        // session can arrive any more, so the gate it needed is spent.
+        EndedSession = 0;
+    }
+
+    // The actors that took part, released below. Collected first because the
+    // restore result decides what they report.
+    TArray<TWeakObjectPtr<AMtoULiveLinkActor>> Released;
+    if (bNegotiated)
+    {
+        SetEditorViewportRealtimeOverride(false);
+        HoldLinkageDisplaysOnGameThread(false);
+        RestoreGeneration.Reset();
+        PendingApplication.Reset();
+        const FString Disconnected(TEXT("Disconnected"));
+        for (FMtoUSessionObject& Object : SessionObjects)
+        {
+            Released.AddUnique(Object.Actor);
+            ReleaseSessionObjectOnGameThread(Object, Disconnected, !bListenerStopped);
+        }
+        // An actor whose object was refused or is not negotiated yet took part
+        // too: it leaves the connection the same way.
+        for (const TWeakObjectPtr<AMtoULiveLinkActor>& Participant : ParticipatingActors)
+        {
+            if (AMtoULiveLinkActor* Actor = Participant.Get())
+            {
+                if (!Released.Contains(Participant))
+                {
+                    Released.Add(Participant);
+                    Actor->ReleaseLiveLinkSubject();
+                    Actor->ReapplyDisplayTarget();
+                    Actor->SetConnectionStatus(Disconnected);
+                    Actor->NoteSessionEnded();
+                }
             }
         }
+        GameThreadSession = 0;
+        SessionObjects.Reset();
+        ParticipatingActors.Reset();
+        SetObjects.Reset();
+        NegotiatedSetRevision = 0;
+        NegotiatedSpaceRevision = 1;
+    }
+
+    // Every borrowed writer is restored per resource and the linkage state
+    // returns to realtime with no session identity; a new connection
+    // negotiates again. A restore that failed leaves its residual in the view.
+    LinkageSession.EndSession();
+    const FString Residual = LinkageSession.GetView().RecoveryResidual;
+    if (!Residual.IsEmpty() && !bListenerStopped)
+    {
+        const FString Report = FString::Printf(
+            TEXT("Disconnected; the linkage takeover could not be restored: %s"), *Residual);
+        SetStatus(Report);
+        for (const TWeakObjectPtr<AMtoULiveLinkActor>& Participant : Released)
+        {
+            if (AMtoULiveLinkActor* Actor = Participant.Get())
+            {
+                Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Residual));
+            }
+        }
+    }
+    if (bNegotiated)
+    {
+        // The transient cache and its upload/play identity history are
+        // scoped to one negotiated streaming session; a newer connection
+        // starts its own fresh sequence at 1.
+        CacheSession.EndSession();
     }
 }
 
@@ -845,11 +925,6 @@ uint32 FMtoULiveLinkSource::Run()
 
     uint64 SessionCounter = 0;
     uint64 ActiveSession = 0;
-    // Each worker tracks the shared counter independently, so one listener
-    // can never swallow a termination request meant for another. Requests
-    // made before this accept belong to older sessions and are never applied
-    // retroactively.
-    uint64 LastSeenSessionEndRequests = GStreamingSessionEndRequests.Load();
     // Every init of the declared set arrives before any other message.
     bool bInitReceived = false;
     int32 WorkerInitsExpected = 0;
@@ -1055,19 +1130,25 @@ uint32 FMtoULiveLinkSource::Run()
         // One shared idempotent termination boundary: a Preview revision
         // invalidation or Binding actor lifetime end closes the socket here,
         // and the existing disconnect path performs the Game Thread cleanup.
+        // A request names the session it ends, so one for a session this
+        // worker has already left, or has not accepted, closes nothing.
         // Test-only deferral (automation, off by default) holds this cleanup
         // so the synchronous Game Thread publish gate can be proven before
-        // any worker close; the pending counter is left unread so release
-        // still disconnects exactly once.
-        const uint64 SessionEndRequests = GStreamingSessionEndRequests.Load();
+        // any worker close; the requests stay queued, so release still
+        // disconnects exactly once.
         bool bSessionEndCleanupDeferred = false;
 #if WITH_DEV_AUTOMATION_TESTS
         bSessionEndCleanupDeferred = GDeferStreamingSessionEndCleanup.Load();
 #endif
-        if (SessionEndRequests != LastSeenSessionEndRequests && !bSessionEndCleanupDeferred)
+        if (!bSessionEndCleanupDeferred)
         {
-            LastSeenSessionEndRequests = SessionEndRequests;
-            if (ActiveSession != 0)
+            bool bCloseActiveSession = false;
+            uint64 EndRequestedSession = 0;
+            while (SessionEndRequests.Dequeue(EndRequestedSession))
+            {
+                bCloseActiveSession |= ActiveSession != 0 && EndRequestedSession == ActiveSession;
+            }
+            if (bCloseActiveSession)
             {
                 MarkDisconnected();
                 continue;
@@ -1109,7 +1190,6 @@ uint32 FMtoULiveLinkSource::Run()
                 {
                     ClientSocket = Accepted;
                     ActiveSession = ++SessionCounter;
-                    LastSeenSessionEndRequests = GStreamingSessionEndRequests.Load();
                     bInitReceived = false;
                     WorkerInitsExpected = 0;
                     WorkerInitsReceived = 0;
@@ -2389,10 +2469,10 @@ void FMtoULiveLinkSource::NotePairingChangedOnGameThread()
 }
 
 void FMtoULiveLinkSource::ReleaseSessionObjectOnGameThread(
-    FMtoUSessionObject& Object, const TCHAR* ActorStatus)
+    FMtoUSessionObject& Object, const FString& ActorStatus, bool bRemoveSubject)
 {
     check(IsInGameThread());
-    if (Client && SourceGuid.IsValid())
+    if (bRemoveSubject && Client && SourceGuid.IsValid())
     {
         Client->RemoveSubject_AnyThread(Object.SubjectKey);
     }
@@ -3265,6 +3345,16 @@ void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Pac
     const int32 SessionId = LinkageSession.GetSessionId() != 0
         ? LinkageSession.GetSessionId()
         : static_cast<int32>(GameThreadSession);
+    // A reply for a session that is over, or that an end request already
+    // closed, has nobody to receive it: it is dropped here, before it can take
+    // a slot of the frozen control queue that no worker will ever return while
+    // nobody is connected. The greeting acknowledgement is answered before the
+    // session is negotiated, so the gate is the active session, not the
+    // publishable one.
+    if (SessionId <= 0 || !IsSessionActiveOnGameThread(static_cast<uint64>(SessionId)))
+    {
+        return;
+    }
     if (bControl && !TryAdmitOutgoingControl())
     {
         // Overflow is an error, never an unbounded backlog.
@@ -3291,7 +3381,7 @@ void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Pac
 bool FMtoULiveLinkSource::IsSessionActiveOnGameThread(uint64 SessionId) const
 {
     check(IsInGameThread());
-    if (SessionId == 0)
+    if (SessionId == 0 || SessionId == EndedSession)
     {
         return false;
     }
@@ -3300,7 +3390,7 @@ bool FMtoULiveLinkSource::IsSessionActiveOnGameThread(uint64 SessionId) const
         return IsSessionPublishableOnGameThread(SessionId);
     }
     // The greeting phase precedes negotiation: the worker still owns the
-    // socket and no explicit refresh has ended this session yet.
+    // socket and no end has been requested for this session yet.
     return IsCurrentSession(SessionId);
 }
 
@@ -3595,11 +3685,7 @@ bool FMtoULiveLinkSource::IsCurrentSession(uint64 SessionId) const
 bool FMtoULiveLinkSource::IsSessionPublishableOnGameThread(uint64 SessionId) const
 {
     check(IsInGameThread());
-    if (SessionId == 0 || SessionId != GameThreadSession)
-    {
-        return false;
-    }
-    if (MtoUGetStreamingSessionEndCount() != GameThreadSessionEndEpoch)
+    if (SessionId == 0 || SessionId != GameThreadSession || SessionId == EndedSession)
     {
         return false;
     }

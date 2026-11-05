@@ -115,10 +115,18 @@ public:
     /**
      * One TCP connection became the current session. The greeting is answered
      * before any object is negotiated, so this only establishes the identity
-     * the later messages must repeat.
+     * the later messages must repeat. Writers an earlier session still
+     * borrowed are handed back first, and what could not be handed back is
+     * reported to this session (RECOVERY_REFUSED), never dropped.
      */
     void BeginSession(int32 SessionId);
-    /** The connection ended; every borrowed resource is restored. */
+    /**
+     * The connection ended; every borrowed resource is restored and the
+     * session identity (id, set, revisions, mode and control) is cleared, so
+     * nothing that names the ended session is answered or entered any more.
+     * What could not be restored stays in the view as RECOVERY_REFUSED instead
+     * of a successful disconnect.
+     */
     void EndSession();
 
     /** The greeting arrived; the answer names the current pairing and space. */
@@ -208,11 +216,11 @@ public:
     TFunction<bool(FString& OutCode, FString& OutError)> EntryGuard;
 
     /**
-     * True once a failed restore ended the session; the source consumes the
-     * request and closes the connection through the shared termination
-     * boundary. Consuming never loses a second request.
+     * The session a failed restore asked to end, or 0 when none did; the
+     * source consumes the request and ends exactly that session through the
+     * shared termination boundary. Consuming never loses a second request.
      */
-    bool ConsumeSessionEndRequest();
+    int32 ConsumeSessionEndRequest();
 
 private:
     static double Now();
@@ -249,6 +257,9 @@ private:
     void EndForLostTakeover(const FString& Reason,
         const TCHAR* Code = TEXT("TARGET_UNKNOWN"));
     void RestoreBorrowedWriters(FString& OutResidual);
+    // Writes what a restore could not hand back into the view and, the first
+    // time it is reported, into the log.
+    void ReportResidual(const FString& Residual, const TCHAR* Context);
 
     FMtoULinkageHooks Hooks;
 
@@ -273,6 +284,8 @@ private:
     /** The last takeover's writers were handed back; the residual when they were not. */
     bool bWritersRestored = false;
     FString RecoveryResidual;
+    /** RecoveryResidual was written to the log already. */
+    bool bResidualLogged = false;
     /** Groups refused as scheduling noise (cancelled, superseded, older mode). */
     int32 RefusedGroupCount = 0;
     FString RefusedCode;
@@ -285,7 +298,8 @@ private:
     int32 FrameSerial = 0;
     int32 IssueSerial = 0;
     double LastPumpSeconds = 0.0;
-    bool bSessionEndRequested = false;
+    // The session whose failed restore asked to end it; 0 when none did.
+    int32 SessionEndRequestedFor = 0;
 
     TArray<FMtoUStagedPoseGroup> Staged;
     FString LastAppliedEvalId;

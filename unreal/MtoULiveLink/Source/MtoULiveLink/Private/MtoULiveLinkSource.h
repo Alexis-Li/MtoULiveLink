@@ -17,7 +17,12 @@ class FRunnableThread;
 class ILiveLinkClient;
 class FSocket;
 
-TSharedPtr<class FMtoULiveLinkSource> MtoUSetActiveSource(
+/**
+ * Makes `Source` the one the Binding actors and the linkage boundary reach and
+ * returns the previous one. Exported so the Editor module's automation can
+ * make the source it builds the active one for the length of a test.
+ */
+MTOULIVELINK_API TSharedPtr<class FMtoULiveLinkSource> MtoUSetActiveSource(
     TSharedPtr<class FMtoULiveLinkSource> Source);
 FMtoUCachePlaybackView MtoUGetActorCachePlaybackView(const AMtoULiveLinkActor& Actor);
 bool MtoUStartActorCachedPlayback(const AMtoULiveLinkActor& Actor);
@@ -29,27 +34,37 @@ bool MtoUSetActorCachedLoop(const AMtoULiveLinkActor& Actor, bool bEnabled);
 
 /**
  * The one idempotent session-termination boundary shared by the Live Link
- * source and the Binding actor. Any active streaming session ends when its
- * Preview revision is invalidated or the Binding actor's lifetime ends, so a
- * new Preview revision can never receive frames negotiated for an older
- * Character snapshot. Requests made while no session is active are no-ops;
+ * source and the Binding actor. A Binding actor asks the active source to end
+ * the connection when its Preview revision is invalidated or its lifetime
+ * ends, so a new Preview revision can never receive frames negotiated for an
+ * older Character snapshot. The source decides which session the request
+ * ends: only the worker's current one, and once its object set is negotiated
+ * only when `Requester` takes part in it. Requests made while no session is
+ * current, or by an actor the negotiated session does not stream, are no-ops;
  * a new connection is always required to stream the newer revision.
  * An explicit Preview refresh ends its actor's session through the same
- * boundary before replacing the display (Issue #39).
+ * boundary before replacing the display (Issue #39). Game Thread only.
  */
-void MtoURequestStreamingSessionEnd();
+void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester);
 
-/** Current value of the idempotent termination counter for publish gating. */
-uint64 MtoUGetStreamingSessionEndCount();
 #if WITH_DEV_AUTOMATION_TESTS
 /**
  * Test-only deterministic hold on the worker's disconnect cleanup: while set,
  * the worker keeps serving the pre-refresh socket and session instead of
- * closing on the termination counter, so automation can prove the
- * Game Thread publish gate refuses old frames before any worker cleanup.
+ * closing on the end request, so automation can prove the Game Thread
+ * publish gate refuses old frames before any worker cleanup.
  * Production builds never see this; automation must always release it.
  */
 MTOULIVELINK_API void MtoUSetDeferStreamingSessionEndCleanup(bool bDefer);
+
+/**
+ * Test-only record of every end request a Binding actor makes, taken before
+ * the active source judges it. A test without a session uses it to prove which
+ * actor operations ask for one. Production builds never see this; automation
+ * must always clear it.
+ */
+MTOULIVELINK_API void MtoUSetStreamingSessionEndProbe(
+    TFunction<void(const AMtoULiveLinkActor& Requester)> Probe);
 
 /** Where a linkage group is when the apply probe sees it. */
 enum class EMtoULinkageApplyStage : uint8
@@ -73,13 +88,13 @@ MTOULIVELINK_API void MtoUSetLinkageApplyProbe(
 #endif
 
 /**
- * The world-unload seam of the same idempotent termination boundary: the
- * Editor world that owns the active session's Binding Actor is being cleaned
- * up. UWorld::DestroyWorld and world unloading never call Actor::Destroyed(),
- * so the synchronous FWorldDelegates::OnWorldCleanup broadcast is the
- * authoritative unload seam. A late BeginDestroy cannot use the identity-free
- * boundary because it could terminate a newer session; this hook runs in
- * order with the actual unload instead.
+ * The world-unload seam of the same termination boundary: the Editor world
+ * that owns the active session's Binding Actor is being cleaned up.
+ * UWorld::DestroyWorld and world unloading never call Actor::Destroyed(), so
+ * the synchronous FWorldDelegates::OnWorldCleanup broadcast is the
+ * authoritative unload seam. Every Binding actor of the world asks the
+ * boundary like any other requester; a late BeginDestroy cannot, because it
+ * could terminate a newer session.
  */
 void MtoUNotifyEditorWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
 
@@ -264,6 +279,11 @@ public:
 
     bool StartListener();
     void StopListener();
+    /**
+     * A Binding actor asks the connection to end (see
+     * `MtoURequestStreamingSessionEnd`); Game Thread only.
+     */
+    void RequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester);
     FMtoUCachePlaybackView GetActorCachePlaybackView(const AMtoULiveLinkActor& Actor) const;
     bool StartActorCachedPlayback(const AMtoULiveLinkActor& Actor);
     bool StopActorCachedPlayback(const AMtoULiveLinkActor& Actor);
@@ -337,6 +357,7 @@ private:
 #if WITH_DEV_AUTOMATION_TESTS
     friend class FMtoUSessionIsolationTestAccess;
     friend class FMtoUControlBudgetTestAccess;
+    friend class FMtoUSessionEndTestAccess;
     // Editor integration coverage for explicit refresh during a session.
     friend class FMtoURefreshEndsSessionTestAccess;
 #endif
@@ -434,9 +455,25 @@ private:
         const TArray<double>& Curves,
         FLiveLinkFrameDataStruct& OutFrame,
         FString& OutError) const;
-    // Removes one object's subject and hands its displays back to their own
-    // Binding state, as a disconnect does for the whole set.
-    void ReleaseSessionObjectOnGameThread(FMtoUSessionObject& Object, const TCHAR* ActorStatus);
+    // The one place a streaming session ends on the Game Thread, whatever
+    // ended it: the worker's disconnect, a requested end, a failed restore, the
+    // source being removed (`bListenerStopped`) or the editor closing. A
+    // session id can be held by only some owners (the greeting phase only by
+    // the linkage session), so each owner clears what it holds; when neither
+    // holds the id, nothing happens. The intake queues are never emptied here:
+    // their drains drop what belongs to an ended session and return its
+    // budget, which keeps a newer connection's greeting.
+    void EndStreamingSessionOnGameThread(uint64 SessionId, bool bListenerStopped = false);
+    // The end request for one worker session: the target the worker closes and
+    // every later message, init and frame of it is refused. A session the
+    // worker no longer holds is left alone.
+    void RequestSessionEndOnGameThread(uint64 SessionId);
+    // Removes one object's subject (unless the Live Link client may already be
+    // gone) and hands its displays back to their own Binding state; the
+    // per-object part of the end contract, also used when only the second
+    // object leaves the set.
+    void ReleaseSessionObjectOnGameThread(
+        FMtoUSessionObject& Object, const FString& ActorStatus, bool bRemoveSubject = true);
     // A published group that will not be confirmed (cancelled, failed, mode
     // left) gives the subject back the last complete frame; the displays
     // follow once the subject holds it.
@@ -461,10 +498,10 @@ private:
     bool IsCurrentSession(uint64 SessionId) const;
     bool OwnsActorCache(const AMtoULiveLinkActor& Actor) const;
     // True only while the session still owns GameThread publication: the
-    // worker still considers it current and no explicit refresh has ended it
-    // since negotiation. A refresh increments the termination counter before
-    // replacing the display, so old queued frames and cached commands fail
-    // this gate synchronously without waiting for the worker to close.
+    // worker still considers it current and no end has been requested for it
+    // since negotiation. An end request records the session before the
+    // display is replaced, so old queued frames and cached commands fail this
+    // gate synchronously without waiting for the worker to close.
     bool IsSessionPublishableOnGameThread(uint64 SessionId) const;
     void SetStatus(const FString& InStatus);
 
@@ -482,6 +519,9 @@ private:
     TArray<FMtoUPendingInit> PendingInits;
     TOptional<FMtoUPendingFrame> PendingFrame;
     TQueue<uint64, EQueueMode::Spsc> DisconnectedSessions;
+    // The sessions the game thread asked the worker to close; the worker
+    // closes a connection only while its session is the named one.
+    TQueue<uint64, EQueueMode::Spsc> SessionEndRequests;
     TQueue<FMtoUOutgoing, EQueueMode::Spsc> OutgoingReplies;
     // Linkage intake: the greeting, the control messages and the staged pose
     // groups the worker parsed. The game thread drains every one of them, so
@@ -521,11 +561,12 @@ private:
     ILiveLinkClient* Client = nullptr;
     FGuid SourceGuid;
     uint64 GameThreadSession = 0;
-    // Termination-counter value observed when GameThreadSession was
-    // negotiated. An explicit refresh increments the counter before replacing
-    // the display, so any later publish for the older epoch fails closed even
-    // before the worker closes the socket.
-    uint64 GameThreadSessionEndEpoch = 0;
+    // The worker session an end request closed, until the worker's disconnect
+    // reaches EndStreamingSessionOnGameThread. Later messages, inits and
+    // frames of it fail closed even before the worker closes the socket.
+    // Worker session ids only grow, so an older id is excluded by
+    // IsCurrentSession and one field is enough.
+    uint64 EndedSession = 0;
     // v11 identity of the negotiated session: the declared object set, its
     // revision and the common space both adapters must match.
     TArray<FString> SetObjects;

@@ -4202,6 +4202,9 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("ephemeral listening port is reported"), Port > 0);
     TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
     const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
+    // The Binding actors end a connection through the active source.
+    const TSharedPtr<FMtoULiveLinkSource> PreviousActiveSource = MtoUSetActiveSource(Source);
+    ON_SCOPE_EXIT { MtoUSetActiveSource(PreviousActiveSource); };
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     const FLiveLinkSubjectKey LiveSubjectKey(SourceGuid, FName(TEXT("MtoU_Character")));
     TestTrue(TEXT("source reaches listening state"),
@@ -4941,6 +4944,9 @@ bool FMtoUMayaRefreshPeerTest::RunTest(const FString& Parameters)
     TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
     const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
     PeerSource = Source;
+    // The Binding actors end a connection through the active source.
+    const TSharedPtr<FMtoULiveLinkSource> PreviousActiveSource = MtoUSetActiveSource(Source);
+    ON_SCOPE_EXIT { MtoUSetActiveSource(PreviousActiveSource); };
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     const FLiveLinkSubjectKey LiveSubjectKey(SourceGuid, FName(TEXT("MtoU_Character")));
     auto WriteCommand = [&](const FString& Action, int32 Time)
@@ -5369,6 +5375,9 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
     TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
     const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
     GuardSource = Source;
+    // The Binding actors end a connection through the active source.
+    const TSharedPtr<FMtoULiveLinkSource> PreviousActiveSource = MtoUSetActiveSource(Source);
+    ON_SCOPE_EXIT { MtoUSetActiveSource(PreviousActiveSource); };
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     const FLiveLinkSubjectKey LiveSubjectKey(SourceGuid, FName(TEXT("MtoU_Character")));
     TestTrue(TEXT("source reaches listening state"),
@@ -5914,6 +5923,9 @@ struct FMtoUComparisonNaturalTickState
     ISocketSubsystem* SocketSubsystem = nullptr;
     FSocket* Client = nullptr;
     TSharedPtr<FMtoULiveLinkSource> Source;
+    // The source the editor had before this test made its own the active one.
+    TSharedPtr<FMtoULiveLinkSource> PreviousActiveSource;
+    bool bActiveSourceSet = false;
     UWorld* EditorWorld = nullptr;
     AMtoULiveLinkActor* Actor = nullptr;
     TStrongObjectPtr<UMtoULiveLinkBinding> BindingGuard;
@@ -6304,6 +6316,9 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
 
         TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
         State->Source = Source;
+        // The Binding actor ends a connection through the active source.
+        State->PreviousActiveSource = MtoUSetActiveSource(Source);
+        State->bActiveSourceSet = true;
         const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
         Self->TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
         Self->TestTrue(TEXT("source reaches listening state"), ComparisonPollUntil(
@@ -6607,6 +6622,12 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
     // leave no trace in the real editor world.
     ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, OverrideName]()
     {
+        if (State->bActiveSourceSet)
+        {
+            MtoUSetActiveSource(State->PreviousActiveSource);
+            State->PreviousActiveSource.Reset();
+            State->bActiveSourceSet = false;
+        }
         if (State->Source.IsValid())
         {
             State->Source->StopListener();
