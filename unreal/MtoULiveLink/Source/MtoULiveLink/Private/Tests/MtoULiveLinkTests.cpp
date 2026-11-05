@@ -34,6 +34,7 @@
 #include "Misc/CommandLine.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
+#include "Misc/OutputDevice.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "ReferenceSkeleton.h"
@@ -15907,6 +15908,27 @@ struct FMtoUSessionEndFixture
     }
 };
 
+/** Counts the warnings the linkage session logs while it lives. */
+class FMtoULinkageWarningCapture final : public FOutputDevice
+{
+public:
+    FMtoULinkageWarningCapture() { GLog->AddOutputDevice(this); }
+    ~FMtoULinkageWarningCapture() override { GLog->RemoveOutputDevice(this); }
+    int32 Count() const { return Warnings.Load(); }
+
+    virtual void Serialize(
+        const TCHAR* Message, ELogVerbosity::Type Verbosity, const FName& Category) override
+    {
+        if (Verbosity <= ELogVerbosity::Warning && Category == FName(TEXT("LogMtoULinkageSession")))
+        {
+            Warnings.IncrementExchange();
+        }
+    }
+
+private:
+    TAtomic<int32> Warnings{0};
+};
+
 /** One fake Maya connection to the fixture's source. */
 struct FMtoUSessionEndMaya
 {
@@ -16193,6 +16215,46 @@ bool FMtoUSessionEndSourceRemovedTest::RunTest(const FString& Parameters)
     F.Source->StopListener();
     TestEqual(TEXT("a second shutdown restores nothing again"), F.Hooks.RestoreCalls, 1);
     TestEqual(TEXT("a second shutdown takes nothing over"), F.Hooks.TakeOverCalls, 1);
+    Maya.Drop();
+    F.Close();
+
+    // ---- the editor closes -------------------------------------------------
+    // Its module detaches the linkage hooks (after handing the writers back)
+    // before the source shuts down, so the source ends a session whose
+    // takeover is still recorded with no hook left to call.
+    FMtoUSessionEndFixture Closing;
+    ON_SCOPE_EXIT { Closing.Close(); };
+    if (!Closing.Open(*this))
+    {
+        return false;
+    }
+    FMtoUSessionEndMaya ClosingMaya(Closing);
+    if (!ClosingMaya.Connect(*this, true))
+    {
+        return false;
+    }
+    FString ClosingError;
+    TestTrue(TEXT("linkage entry takes the writers over"), MtoURequestLinkageEnter(1, ClosingError));
+    if (!ClosingMaya.ConfirmLinkage(*this, 1))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the takeover is held"), MtoUGetLinkageView().bTakeoverHeld);
+    MtoUSetLinkageHooks(FMtoULinkageHooks());
+    FMtoULinkageWarningCapture Warnings;
+    TestTrue(TEXT("the source accepts the shutdown"), Closing.Source->RequestSourceShutdown());
+    const FMtoULinkageView Closed = MtoUGetLinkageView();
+    TestEqual(TEXT("the closed editor holds no session"), Closed.Identity.SessionId, 0);
+    TestTrue(TEXT("the closed editor holds no takeover and no residual"),
+        !Closed.bTakeoverHeld && Closed.RecoveryResidual.IsEmpty() && Closed.ErrorCode.IsEmpty()
+        && Closed.Mode == TEXT("realtime"));
+    TestEqual(TEXT("no hook was left to call"), Closing.Hooks.RestoreCalls, 0);
+    TestTrue(TEXT("the actor shows the true disconnected state"),
+        Closing.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected
+        && Closing.Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
+    TestEqual(TEXT("the source reports a plain stop"),
+        Closing.Source->GetSourceStatus().ToString(), FString(TEXT("Stopped")));
+    TestEqual(TEXT("ending a session without hooks logs no warning"), Warnings.Count(), 0);
     return true;
 }
 

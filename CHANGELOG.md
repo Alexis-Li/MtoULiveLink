@@ -39,11 +39,11 @@ repository's issues.
 - Leaving linkage no longer reports a "恢复残留" for a locked output-resolution attribute
   that linkage never changed; only an attribute that could not be put back is listed. (#12)
 - The Sequencer tracks that **进入联动** muted are handed back when the connection ends
-  before the character connects, when the MtoU source is removed in the Live Link window
-  and when the editor closes; they no longer stay muted. (#13)
+  before the character connects and when the MtoU source is removed in the Live Link
+  window; they no longer stay muted. (#13)
 - After a disconnect, **进入联动** is refused at once and no Sequencer track is muted. (#13)
 - When a track cannot be handed back at the end of a connection, the Binding Actor's
-  Details list it under 恢复残留 instead of reporting a restore. (#13)
+  Details show 恢复未完成 in the **恢复结果** row instead of reporting a restore. (#13)
 - Placing, refreshing or deleting a Binding Actor that does not take part in the
   running connection no longer ends it; only the actors the connection streams do. (#13)
 - A Binding Actor taken out of the object set shows 已移出对象集合 in its Details instead

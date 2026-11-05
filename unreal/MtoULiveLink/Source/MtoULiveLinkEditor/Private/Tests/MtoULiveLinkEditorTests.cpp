@@ -864,32 +864,33 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
         const TCHAR* Detail;
         const TCHAR* Headline;
         FMtoULiveLinkActorDetails::ESeverity Severity;
-        bool bShowsDetail;
     };
     const FCase Cases[] = {
         { EMtoUConnectionState::Disconnected, TEXT(""), TEXT("未连接"),
-            FMtoULiveLinkActorDetails::ESeverity::Neutral, false },
+            FMtoULiveLinkActorDetails::ESeverity::Neutral },
         { EMtoUConnectionState::Validating, TEXT(""), TEXT("连接中"),
-            FMtoULiveLinkActorDetails::ESeverity::Info, false },
+            FMtoULiveLinkActorDetails::ESeverity::Info },
         { EMtoUConnectionState::Connected, TEXT(""), TEXT("已连接"),
-            FMtoULiveLinkActorDetails::ESeverity::Success, false },
+            FMtoULiveLinkActorDetails::ESeverity::Success },
         { EMtoUConnectionState::ConnectedAsSecondObject, TEXT(""), TEXT("已连接（副对象）"),
-            FMtoULiveLinkActorDetails::ESeverity::Success, false },
+            FMtoULiveLinkActorDetails::ESeverity::Success },
         { EMtoUConnectionState::ConnectedPartialMorph, TEXT(""), TEXT("已连接（部分 Morph）"),
-            FMtoULiveLinkActorDetails::ESeverity::Warning, false },
+            FMtoULiveLinkActorDetails::ESeverity::Warning },
         { EMtoUConnectionState::ConnectedBoneOnly, TEXT(""), TEXT("已连接（仅骨骼）"),
-            FMtoULiveLinkActorDetails::ESeverity::Warning, false },
+            FMtoULiveLinkActorDetails::ESeverity::Warning },
         { EMtoUConnectionState::PreviewNotReady, TEXT(""), TEXT("未连接（预览未就绪）"),
-            FMtoULiveLinkActorDetails::ESeverity::Warning, false },
+            FMtoULiveLinkActorDetails::ESeverity::Warning },
         { EMtoUConnectionState::PreviewMorphMismatch, TEXT(""), TEXT("连接出错（Morph 不匹配）"),
-            FMtoULiveLinkActorDetails::ESeverity::Error, false },
+            FMtoULiveLinkActorDetails::ESeverity::Error },
         // A secondary object that left the set while the connection went on is
         // a known state, not an unknown one.
         { EMtoUConnectionState::RemovedFromSet, TEXT(""), TEXT("已移出对象集合"),
-            FMtoULiveLinkActorDetails::ESeverity::Neutral, false },
+            FMtoULiveLinkActorDetails::ESeverity::Neutral },
         { EMtoUConnectionState::Error, *SkeletonFailure, TEXT("连接出错"),
-            FMtoULiveLinkActorDetails::ESeverity::Error, true },
+            FMtoULiveLinkActorDetails::ESeverity::Error },
     };
+    FString BaselineDiagnostics;
+    bool bHaveBaseline = false;
     for (const FCase& Case : Cases)
     {
         const FString Name = UEnum::GetValueAsString(Case.State);
@@ -909,11 +910,24 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
         TestTrue(FString::Printf(TEXT("%s reports its own severity"), *Name),
             View.Severity == Case.Severity);
         // The detail reaches the copyable diagnostics, and a state without one
-        // adds nothing to them.
-        TestEqual(FString::Printf(TEXT("%s keeps its detail in the diagnostics"), *Name),
-            !FString(Case.Detail).IsEmpty()
-                && View.RawDiagnostics.ToString().Contains(Case.Detail),
-            Case.bShowsDetail);
+        // adds nothing to them: they read exactly as they do for the first
+        // state, which carries no detail either.
+        const FString Diagnostics = View.RawDiagnostics.ToString();
+        if (FString(Case.Detail).IsEmpty())
+        {
+            if (!bHaveBaseline)
+            {
+                BaselineDiagnostics = Diagnostics;
+                bHaveBaseline = true;
+            }
+            TestEqual(FString::Printf(TEXT("%s adds nothing to the diagnostics"), *Name),
+                Diagnostics, BaselineDiagnostics);
+        }
+        else
+        {
+            TestTrue(FString::Printf(TEXT("%s keeps its detail in the diagnostics"), *Name),
+                Diagnostics.Contains(Case.Detail));
+        }
     }
 
     // A blocking error keeps its own text instead of a generic headline.
