@@ -50,6 +50,9 @@ repository's issues.
   of 连接状态未知. (#13)
 - After Maya disconnects, the Live Link source status no longer reports a control-queue
   overflow that did not happen. (#13)
+- When Maya quits or its connection drops while Unreal is still sending to it, Unreal
+  notices at once: the connection ends, muted Sequencer tracks are handed back and a new
+  Maya can connect, instead of staying 已连接 until the source is removed. (#29)
 
 ## 1.0.0 - 2026-10-30
 
