@@ -271,9 +271,9 @@ Unreal 导出时已配对目标所在的位置。目标被移动或旋转之后�
 | 有意减面的模型无法通过自动服装识别 | 检查源模型是否有重复几何体或服装／身体混用材质槽。确认是有意减面后，在 Binding 的 **Driver Garment Slot Override** 中指定服装独立的材质槽，再刷新并检查效果。 |
 | BlendShape 未生效 | 检查“传递 BS”、名称匹配、当前服装及连接诊断。模型预览的源资产变更后需重新刷新。 |
 | 镜头联动中经常显示“Maya 跟不上”和滞后时间 | 在 Maya 中打开 **窗口 > 设置/首选项 > 插件管理器**（英文界面：**Windows > Settings/Preferences > Plug-in Manager**），取消不用的插件的 **自动加载**，例如 MASH、XGen（`xgenToolkit`）、GPU Cache、Scene Assembly、LookdevX 和 Type，然后重启 Maya。打开场景时，场景需要的插件仍会加载。 |
-| 修改后连接断开 | 更换服装、模式、“传递 BS”或角色部件后需重连；刷新也会断开当前连接。修改或重新导入 Primary Driver、Preview Static Mesh，或修改 **Driver Garment Slot Override** 后，刷新模型预览并重连；撤销／重做这些修改时也遵循同一规则。 |
+| 修改后连接断开 | 更换服装、模式、“传递 BS”或角色部件后需重连；只有刷新正在参与连接的 Actor 才会断开当前连接。修改或重新导入 Primary Driver、Preview Static Mesh，或修改 **Driver Garment Slot Override** 后，刷新模型预览并重连；撤销／重做这些修改时也遵循同一规则。 |
 
-预览时请保留 Binding Actor 并保持其关卡加载；删除 Actor 或卸载关卡会结束连接。
+预览时请保留参与连接的 Binding Actor 并保持其关卡加载；删除该 Actor 或卸载其关卡会结束连接。放置、刷新或删除没有参与连接的 Binding Actor 不会断开连接。
 
 ## 许可证
 
