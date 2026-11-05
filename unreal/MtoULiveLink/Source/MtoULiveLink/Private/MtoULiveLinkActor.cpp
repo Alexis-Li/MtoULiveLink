@@ -666,7 +666,7 @@ void AMtoULiveLinkActor::SyncCharacterComposition()
     CharacterPartDiagnostics = Composition.Diagnostics;
     CharacterPartSummary = Composition.Summary;
 
-    if (CharacterPartsMatch(Composition))
+    if (AppliedPartsMatch(Composition) && CharacterPartsMatch(Composition))
     {
         // Renaming a part or reordering the list changes neither a session nor
         // a display component; only the enabled composition is observable.
@@ -675,8 +675,15 @@ void AMtoULiveLinkActor::SyncCharacterComposition()
     // Adding, removing, enabling, disabling, or replacing a part invalidates
     // the negotiated composition: the running session must end before its
     // frames and cached commands can reach the new component set. Removing the
-    // Primary Driver removes the whole character, parts included.
+    // Primary Driver removes the whole character, parts included. The applied
+    // record decides even when an undo or redo already restored matching
+    // components.
     MtoURequestStreamingSessionEnd(*this);
+    AppliedParts.Reset(Composition.GetEnabledIdentity().Num());
+    for (const FMtoUCharacterPartIdentity& Part : Composition.GetEnabledIdentity())
+    {
+        AppliedParts.Add({Part.PartId, Part.Mesh});
+    }
     ReconcileCharacterPartComponents(Composition);
     // The component set changed, so its source observations and its display
     // follow here instead of in every caller.
@@ -695,6 +702,24 @@ bool AMtoULiveLinkActor::CharacterPartsMatch(const FMtoUCharacterComposition& Co
     {
         const UMtoUCharacterPartComponent* Component = CharacterPartComponents[Index];
         if (!Component || !Component->MatchesPart(Targets[Index].PartId, Targets[Index].Mesh))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool AMtoULiveLinkActor::AppliedPartsMatch(const FMtoUCharacterComposition& Composition) const
+{
+    const TArray<FMtoUCharacterPartIdentity>& Targets = Composition.GetEnabledIdentity();
+    if (AppliedParts.Num() != Targets.Num())
+    {
+        return false;
+    }
+    for (int32 Index = 0; Index < Targets.Num(); ++Index)
+    {
+        if (AppliedParts[Index].PartId != Targets[Index].PartId
+            || AppliedParts[Index].Mesh.Get() != Targets[Index].Mesh)
         {
             return false;
         }

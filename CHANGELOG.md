@@ -53,6 +53,9 @@ repository's issues.
 - When Maya quits or its connection drops while Unreal is still sending to it, Unreal
   notices at once: the connection ends, muted Sequencer tracks are handed back and a new
   Maya can connect, instead of staying 已连接 until the source is removed. (#29)
+- Undoing or redoing an Additional Parts edit in Unreal now always ends the streaming
+  connection of the affected Binding actor, as the edit itself does, instead of sometimes
+  leaving Maya streaming to the old part set. (#31)
 
 ## 1.0.0 - 2026-10-30
 
