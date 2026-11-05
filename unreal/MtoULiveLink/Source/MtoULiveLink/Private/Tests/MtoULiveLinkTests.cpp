@@ -15908,13 +15908,21 @@ struct FMtoUSessionEndFixture
     }
 };
 
-/** Counts the warnings the linkage session logs while it lives. */
+/**
+ * Counts the warnings the linkage session logs while it lives. The counter is
+ * atomic, so the device can take calls from any thread at once; the log
+ * redirector then hands it every record on the logging thread, at the moment
+ * it is logged. A device that cannot is buffered and, with a dedicated log
+ * thread, receives its records later: a count read in between would miss them.
+ */
 class FMtoULinkageWarningCapture final : public FOutputDevice
 {
 public:
     FMtoULinkageWarningCapture() { GLog->AddOutputDevice(this); }
     ~FMtoULinkageWarningCapture() override { GLog->RemoveOutputDevice(this); }
     int32 Count() const { return Warnings.Load(); }
+
+    virtual bool CanBeUsedOnMultipleThreads() const override { return true; }
 
     virtual void Serialize(
         const TCHAR* Message, ELogVerbosity::Type Verbosity, const FName& Category) override
