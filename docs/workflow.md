@@ -87,8 +87,13 @@ The PR owns the implementation diff, review findings and check results.
    concurrent writers need isolated checkouts and clear file ownership.
 3. **Deliver a reviewable change.** Record full starting and ending SHAs,
    target branch, resulting behavior, checks actually run and remaining gaps
-   in the PR description, and link it from the issue.
-4. **Review the actual change.** Read requirements and the complete diff at
+   in the PR description, and link it from the issue. Delivery ends with the
+   PR reported as **待审核**; whoever implemented the change stops there.
+4. **Review the actual change.** The review is independent of the
+   implementation: whoever wrote or fixed the change does not review it,
+   recheck its fixes or publish a review conclusion for it. Without an
+   independent review the PR stays **待审核**. Read requirements and the
+   complete diff at
    the named commits, inspect affected callers, and check acceptance,
    compatibility, failure paths and unrelated changes. Verify delivery claims
    against code and evidence. Publish the review on the PR with its full base
@@ -139,13 +144,14 @@ implemented, reviewed, integrated, host-verified or released.
   evidence and completion condition; severity and blocking are separate judgments.
 - Allocate `R-001` style finding IDs across the issue after reading existing
   findings. Keep each ID through fixes and re-review. A claimed fix remains
-  **已修复，待复验** until reviewed. Classify open work as **已确认缺陷**,
+  **已修复，待复验** until an independent review rechecks it. Classify open work as **已确认缺陷**,
   **待验证风险**, **验收缺口** or **后续候选**; candidates become blockers only
   through agreed scope changes. Include the completion condition and next actor.
 
-GitHub does not allow a PR author to approve their own PR. If publication uses
-that account, record the review as a comment with baseline, scope, conclusion
-and evidence; it is not a GitHub approval event.
+GitHub does not allow a PR author to approve their own PR. When the review is
+published from the author's account, record it as a comment with baseline,
+scope, conclusion and evidence; it is not a GitHub approval event. Publishing
+from that account does not make the review independent.
 See [GitHub's review rules](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews).
 
 Use `Refs #<issue>` in PR descriptions and close explicitly after acceptance
