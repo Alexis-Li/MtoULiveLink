@@ -67,20 +67,6 @@ struct MTOULIVELINK_API FMtoUPoseGroup
     double UeDisplayFrame = 0.0;
 };
 
-/** Actual component completion evidence for one applied group. */
-struct MTOULIVELINK_API FMtoUAppliedEvidence
-{
-    FString EvalId;
-    int32 SampleSerial = 0;
-    bool bApplied = false;
-    double AppliedDisplayFrame = 0.0;
-    double LagSeconds = 0.0;
-    FString Reason;
-    int32 BoneCount = 0;
-    int32 CurveCount = 0;
-    int32 PartCount = 0;
-};
-
 /** One object of the set as the panel shows it. */
 struct MTOULIVELINK_API FMtoULinkageObjectView
 {

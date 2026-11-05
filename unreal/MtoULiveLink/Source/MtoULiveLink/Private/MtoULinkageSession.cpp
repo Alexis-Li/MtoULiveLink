@@ -55,10 +55,6 @@ bool MtoUSharesAnchor(const FTransform& Primary, const FTransform& Other, FStrin
     return false;
 }
 
-// The one module-level hooks seam. A source that starts before the editor
-// registered adopts them, so the registration order never loses a hook.
-static FMtoULinkageHooks GMtoULinkageHooks;
-
 // One listener serves the Editor session, so the pairing registry is
 // process-wide: the user's pairing of a Binding actor with one Maya object id
 // survives a source restart (module reload, automation host) instead of
@@ -75,7 +71,6 @@ double FMtoULinkageSession::Now()
 void FMtoULinkageSession::SetHooks(const FMtoULinkageHooks& InHooks)
 {
     Hooks = InHooks;
-    GMtoULinkageHooks = InHooks;
 }
 
 bool FMtoULinkageSession::PairTarget(
@@ -1698,7 +1693,6 @@ int32 FMtoULinkageSession::ConsumeSessionEndRequest()
 
 void MtoUSetLinkageHooks(const FMtoULinkageHooks& Hooks)
 {
-    GMtoULinkageHooks = Hooks;
     if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
     {
         Source->GetLinkageSession().SetHooks(Hooks);
