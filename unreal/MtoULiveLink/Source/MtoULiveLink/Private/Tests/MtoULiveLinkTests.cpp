@@ -12989,9 +12989,11 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
     AddExpectedMessagePlain(TEXT("Maya: plugin unknown, protocol 9."), ELogVerbosity::Warning,
         EAutomationExpectedMessageFlags::Contains, 1);
 
-    // No actor is placed, so any message that reaches a target discovery step
-    // would answer NO_BINDING_ACTOR: receiving the version code instead proves
-    // the refusal happened before the target was discovered.
+    // No actor is placed, so an init that reached target discovery would be
+    // answered with NO_BINDING_ACTOR. The refusal of the greeting is the
+    // worker's own: the checks below show it arrives with nothing after it (no
+    // answer to the init, no NO_BINDING_ACTOR) and that the connection is then
+    // closed, so the init was never read.
     TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
     const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
@@ -13063,11 +13065,33 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
             TestEqual(TEXT("the refusal names the loaded plugin version"),
                 Refusal->GetStringField(TEXT("plugin_version")), LoadedPluginVersionName());
         }
-        // Drain whatever else arrives while the game thread updates.
-        TArray<uint8> Unexpected;
-        Reader.Next(*Client, TEXT("nothing"), Unexpected, Pump, 0.3);
+        // Read until the peer closes while the game thread keeps updating,
+        // recording every packet that arrives after the refusal. The close is
+        // the state awaited; the deadline only bounds a hang.
+        const bool bClosed = PollUntil([&]()
+        {
+            Pump();
+            uint8 Buffer[4096];
+            int32 Read = 0;
+            const bool bOpen = Client->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read);
+            if (bOpen && Read > 0)
+            {
+                Reader.Decoder.Append(Buffer, Read);
+            }
+            TArray<uint8> Trailing;
+            FString DecodeError;
+            while (Reader.Decoder.Pop(Trailing, DecodeError) == EMtoUDecodeResult::Message)
+            {
+                TSharedPtr<FJsonObject> Object;
+                Reader.OtherTypes.Add(
+                    (JsonObjectFromBytes(Trailing, Object) && Object.IsValid())
+                        ? Object->GetStringField(TEXT("type"))
+                        : FString(TEXT("invalid")));
+            }
+            return !bOpen;
+        }, 10.0);
+        TestTrue(TEXT("the refused connection is closed within the deadline"), bClosed);
         TestEqual(TEXT("nothing follows the refusal"), Reader.OtherTypes.Num(), 0);
-        TestTrue(TEXT("the connection is closed"), WaitForClose(*Client));
         DestroySocket(*SocketSubsystem, Client);
     };
 

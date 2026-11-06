@@ -5057,8 +5057,13 @@ class ProtocolTests(unittest.TestCase):
                     self._assert_refusing_release(
                         case, mtou_diagnostics.error_reply_diagnostic(case["payload"]))
             else:
-                with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                with self.assertRaisesRegex(
+                        ValueError, "|".join(expected["keywords"])) as caught:
                     mtou_protocol.validate_reply(case["payload"])
+                # The code is the one the session reports for the refusal.
+                self.assertEqual(
+                    expected["error_code"],
+                    mtou_session.invalid_reply_diagnostic(caught.exception)["code"])
             return
         if operation == "cache_begin":
             payload = case["payload"]
