@@ -23,6 +23,7 @@ from .config import (
     SECONDARY_OBJECT_ID,
     WORKFLOW_ANIMATION,
     WORKFLOWS,
+    __version__,
 )
 
 
@@ -164,8 +165,13 @@ DEFAULT_CAPABILITIES = {
 
 
 def make_hello_message(maya_version, linear_unit, unit_scale, fps,
-                       capabilities=None):
-    """First message of a connection: version, scene units and capabilities."""
+                       capabilities=None, plugin_version=__version__):
+    """First message of a connection: version, scene units and capabilities.
+
+    ``plugin_version`` is the release of the Maya component that is loaded; it
+    only lets the peer name both releases when it refuses a protocol version.
+    ``None`` leaves the field out.
+    """
     scale = finite_float(unit_scale)
     if scale is None or scale <= 0.0:
         raise ValueError("scene unit scale must be a positive finite number")
@@ -176,7 +182,7 @@ def make_hello_message(maya_version, linear_unit, unit_scale, fps,
     if capabilities:
         for name, value in capabilities.items():
             declared[str(name)] = bool(value)
-    return {
+    message = {
         "type": "hello",
         "version": PROTOCOL_VERSION,
         "host": "maya",
@@ -188,6 +194,9 @@ def make_hello_message(maya_version, linear_unit, unit_scale, fps,
         },
         "capabilities": declared,
     }
+    if plugin_version is not None:
+        message["plugin_version"] = str(plugin_version)
+    return message
 
 
 def validate_mode_control(mode, control):
@@ -434,6 +443,25 @@ def validate_anchor(anchor):
 # List fields whose entries are objects rather than names.
 STRING_LIST_EXCEPTIONS = ("components", "targets")
 
+# The code of an ``error`` that refuses a protocol version. It alone carries the
+# refusing release (``protocol_version`` and ``plugin_version``).
+PROTOCOL_VERSION_MISMATCH = "PROTOCOL_VERSION_MISMATCH"
+
+
+class ProtocolVersionMismatch(ValueError):
+    """A reply of another protocol version, refused by Maya itself.
+
+    ``peer_protocol_version`` is the version the peer declared: always an
+    integer, because a version that is missing or not an integer is an
+    ordinary malformed reply.
+    """
+
+    def __init__(self, peer_protocol_version):
+        self.peer_protocol_version = peer_protocol_version
+        super(ProtocolVersionMismatch, self).__init__(
+            "protocol reply field 'version' is {0}; it must equal the current"
+            " protocol version {1}".format(peer_protocol_version, PROTOCOL_VERSION))
+
 
 def validate_reply(reply):
     if not isinstance(reply, dict):
@@ -555,6 +583,9 @@ def validate_reply(reply):
     if reply_type == "hello_ack" and exact_int(reply.get("version")) != PROTOCOL_VERSION:
         # A peer of another version answers with another shape; the version is
         # the reason, whatever else differs.
+        peer_version = exact_int(reply.get("version"))
+        if peer_version is not None:
+            raise ProtocolVersionMismatch(peer_version)
         raise ValueError(
             "protocol reply field 'version' must equal the current protocol version")
     if fields is None:
@@ -608,6 +639,15 @@ def validate_reply(reply):
         raise ValueError(
             "protocol reply field 'kind' must be one of {0}".format(
                 ", ".join(ERROR_KINDS)))
+    if reply_type == "error" and reply["code"] == PROTOCOL_VERSION_MISMATCH:
+        # The refusing release, shown to the user. Either field may be absent
+        # (a peer of another version names none), but not of another type.
+        if "protocol_version" in reply and exact_int(reply["protocol_version"]) is None:
+            raise ValueError(
+                "protocol reply field 'protocol_version' must be an integer")
+        if "plugin_version" in reply and not isinstance(reply["plugin_version"], str):
+            raise ValueError(
+                "protocol reply field 'plugin_version' has the wrong JSON type")
     if reply_type == "mode_state":
         try:
             validate_mode_control(reply["mode"], reply["control"])
