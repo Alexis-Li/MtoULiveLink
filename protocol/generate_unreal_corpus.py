@@ -22,11 +22,13 @@ OUTPUT_PATH = (
 # the cache upload and its outcomes, the linkage pairing, the exclusive
 # time-control state, the complete pose group, the application acknowledgement,
 # the scene-reference handoff and the removal of the second object of a set.
+# ``unknown_type`` is a message whose ``type`` the protocol does not define: a
+# retired type belongs here.
 OPERATIONS = {
     "framing", "init", "frame", "ready", "error",
     "cache_enter",
-    "cache_begin", "cache_frame", "cache_end", "cache_play",
-    "cache_stop", "cache_clear",
+    "cache_begin", "cache_frame", "cache_end",
+    "cache_clear",
     "cache_ready", "cache_playing", "cache_progress", "cache_complete",
     "cache_paused", "cache_resumed", "cache_seeked", "cache_looped",
     "cache_loop_changed",
@@ -37,9 +39,9 @@ OPERATIONS = {
     "group",
     "applied",
     "reference_offer", "reference_result", "reference_removed",
-    "reference_query",
     "remove_object", "object_removed",
     "resource_limit",
+    "unknown_type",
 }
 HOSTS = {"maya", "unreal"}
 # The frozen budgets of protocol/README.md. A resource case names one of these keys and compares
@@ -74,13 +76,17 @@ ERROR_CODES = {
     "CACHE_NOT_READY", "CACHE_REVISION_MISMATCH", "CACHE_INVALID_STATE",
 }
 # Message types a linkage case may declare the pre-state of. Each one carries
-# the identity a v11 adapter must match before it answers.
+# the identity an adapter must match before it answers.
 LINKAGE_OPERATIONS = {
     "camera_time", "applied", "mode_state", "reference_offer", "leave_linkage",
     "remove_object",
 }
 # Stable object ids of a set: the primary character and the second object.
 OBJECT_IDS = {"character", "secondary"}
+# ``expected.kind`` of a rejected case Unreal answers with an ``error``: the
+# ``error.kind`` that reply carries.
+ERROR_KINDS = {"scheduling", "failure"}
+PROTOCOL_VERSION = 12
 
 
 def load_corpus(path: Path = CORPUS_PATH) -> dict:
@@ -100,8 +106,8 @@ def validate_corpus(corpus: object) -> list[str]:
         return ["corpus must be a JSON object"]
     if corpus.get("schema_version") != 1:
         errors.append("schema_version must equal 1")
-    if corpus.get("protocol_version") != 11:
-        errors.append("protocol_version must equal 11")
+    if corpus.get("protocol_version") != PROTOCOL_VERSION:
+        errors.append("protocol_version must equal {0}".format(PROTOCOL_VERSION))
     cases = corpus.get("cases")
     if not isinstance(cases, list) or not cases:
         return errors + ["cases must be a non-empty array"]
@@ -153,7 +159,9 @@ def validate_corpus(corpus: object) -> list[str]:
         if not isinstance(expected.get("close"), bool):
             errors.append(prefix + " expected.close must be boolean")
         if not expected.get("accepted") and expected.get("error_code") not in ERROR_CODES:
-            errors.append(prefix + " rejected case needs a stable v11 error_code")
+            errors.append(prefix + " rejected case needs a stable error_code")
+        if "kind" in expected and expected["kind"] not in ERROR_KINDS:
+            errors.append(prefix + " expected.kind must be 'scheduling' or 'failure'")
         keywords = expected.get("keywords", [])
         if not isinstance(keywords, list) or any(not isinstance(value, str) for value in keywords):
             errors.append(prefix + " expected.keywords must be a string array")

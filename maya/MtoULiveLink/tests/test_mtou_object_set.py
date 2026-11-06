@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 """Object-set tests: a primary character and one independent object (no Maya host).
 
-Covers the v11 set negotiation of the sender worker, the realtime frame of a
+Covers the set negotiation of the sender worker, the realtime frame of a
 two-object set, the in-connection removal of the second object, the linkage
 group of the whole set and the panel's pairing window and set limits.
 """

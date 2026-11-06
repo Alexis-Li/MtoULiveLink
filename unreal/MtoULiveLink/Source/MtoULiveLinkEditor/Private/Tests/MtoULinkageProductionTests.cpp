@@ -98,7 +98,7 @@ namespace
 using MtoUGuiAcceptance::ReadJsonFile;
 using MtoUGuiAcceptance::WriteJsonFile;
 
-/** The second object's id in the v11 object set. */
+/** The second object's id in the object set. */
 const TCHAR* const SecondaryObjectId = TEXT("secondary");
 
 TArray<TSharedPtr<FJsonValue>> NumberArray(std::initializer_list<double> Values)

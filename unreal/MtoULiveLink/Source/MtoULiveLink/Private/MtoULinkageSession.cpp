@@ -648,7 +648,7 @@ void FMtoULinkageSession::NoteMode(const FMtoUModeMessage& Message, double NowSe
         return;
     }
 
-    // realtime or cached: Maya returned to its own time authority.
+    // realtime: Maya returned to its own time authority.
     if (Message.ModeRevision <= ModeRevision)
     {
         SendError(
@@ -658,8 +658,10 @@ void FMtoULinkageSession::NoteMode(const FMtoUModeMessage& Message, double NowSe
         return;
     }
     ModeRevision = Message.ModeRevision;
-    Mode = Message.Mode;
-    Control = Message.Control.IsEmpty() ? TEXT("maya") : Message.Control;
+    // The parser admits only (realtime, maya) here; the control is Maya's
+    // whatever the message carried.
+    Mode = TEXT("realtime");
+    Control = TEXT("maya");
     Issued.Reset();
     Desired.Reset();
     Staged.Reset();
@@ -761,7 +763,8 @@ void FMtoULinkageSession::StagePoseGroup(const FMtoUPoseGroupMessage& Message, d
         SendError(
             TEXT("RESOURCE_LIMIT"),
             TEXT("Linkage groups arrive faster than the game thread applies them."),
-            FString::Printf(TEXT("staged groups %d"), Staged.Num()));
+            FString::Printf(TEXT("staged groups %d"), Staged.Num()),
+            ESendErrorKind::Failure, &Message);
         return;
     }
     FMtoUStagedPoseGroup& StagedGroup = Staged.AddDefaulted_GetRef();
@@ -783,20 +786,22 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
             SendError(
                 TEXT("INVALID_MESSAGE"),
                 TEXT("A group named another session."),
-                FString::Printf(TEXT("group session %d, current session %d"), Group.SessionId, SessionId));
+                FString::Printf(TEXT("group session %d, current session %d"), Group.SessionId, SessionId),
+                ESendErrorKind::Failure, &Group);
             continue;
         }
         if (bTransitioning)
         {
             // The gate is closed during a transition: nothing is accepted for
-            // the previous revision and the last complete display stays. Maya
-            // counts this details form, and the older-revision one below, as
-            // scheduling instead of a conflict dialog (linkage.py).
+            // the previous revision and the last complete display stays. The
+            // refusal is scheduling, so Maya counts it instead of reporting a
+            // conflict; this and the three gates below that mark themselves
+            // scheduling are the only ones that do.
             SendError(
                 TEXT("MODE_CONFLICT"),
                 TEXT("A group arrived during a time-control transition."),
                 FString::Printf(TEXT("target mode revision %d"), Group.ModeRevision),
-                ESendErrorKind::Scheduling);
+                ESendErrorKind::Scheduling, &Group);
             continue;
         }
         if (Mode != TEXT("linkage"))
@@ -805,7 +810,7 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 TEXT("LINKAGE_NOT_ACTIVE"),
                 TEXT("A group arrived while another host owns time."),
                 FString::Printf(TEXT("current mode %s"), *Mode),
-                ESendErrorKind::Scheduling);
+                ESendErrorKind::Scheduling, &Group);
             continue;
         }
         if (Group.ModeRevision != ModeRevision)
@@ -816,7 +821,8 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 TEXT("MODE_CONFLICT"),
                 TEXT("A group named a different mode revision."),
                 FString::Printf(TEXT("group mode revision %d, current %d"), Group.ModeRevision, ModeRevision),
-                Group.ModeRevision < ModeRevision ? ESendErrorKind::Scheduling : ESendErrorKind::Failure);
+                Group.ModeRevision < ModeRevision ? ESendErrorKind::Scheduling : ESendErrorKind::Failure,
+                &Group);
             continue;
         }
         if (Group.SetRevision != SetRevision)
@@ -827,7 +833,8 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 TEXT("SET_REVISION_STALE"),
                 TEXT("A group named an older object set."),
                 FString::Printf(TEXT("group set revision %d, current %d"), Group.SetRevision, SetRevision),
-                Group.SetRevision < SetRevision ? ESendErrorKind::Scheduling : ESendErrorKind::Failure);
+                Group.SetRevision < SetRevision ? ESendErrorKind::Scheduling : ESendErrorKind::Failure,
+                &Group);
             continue;
         }
         {
@@ -864,7 +871,7 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 SendError(
                     TEXT("INVALID_MESSAGE"),
                     TEXT("A group does not carry exactly the negotiated object set."),
-                    SetMismatch);
+                    SetMismatch, ESendErrorKind::Failure, &Group);
                 continue;
             }
         }
@@ -873,7 +880,8 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
             SendError(
                 TEXT("SPACE_REVISION_STALE"),
                 TEXT("A group named an older common space."),
-                FString::Printf(TEXT("group space revision %d, current %d"), Group.SpaceRevision, SpaceRevision));
+                FString::Printf(TEXT("group space revision %d, current %d"), Group.SpaceRevision, SpaceRevision),
+                ESendErrorKind::Failure, &Group);
             continue;
         }
         if (!Issued.IsSet() || Issued->EvalId != Group.EvalId)
@@ -886,20 +894,7 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 FString::Printf(TEXT("group eval %s, current target %s"),
                     *Group.EvalId,
                     Issued.IsSet() ? *Issued->EvalId : TEXT("none")),
-                ESendErrorKind::Scheduling);
-            continue;
-        }
-        if (Group.EvalId == LastAppliedEvalId && Group.SampleSerial <= LastAppliedSampleSerial)
-        {
-            // A repeated publication of an already applied sample is refused.
-            SendError(
-                TEXT("INVALID_MESSAGE"),
-                TEXT("A group repeated a publication that was already applied."),
-                FString::Printf(
-                    TEXT("group sample_serial %d, applied sample_serial %d for eval %s"),
-                    Group.SampleSerial,
-                    LastAppliedSampleSerial,
-                    *Group.EvalId));
+                ESendErrorKind::Scheduling, &Group);
             continue;
         }
         OutMessage = MoveTemp(Entry.Message);
@@ -1244,18 +1239,6 @@ void FMtoULinkageSession::NoteReferenceRemoved(const FMtoUReferenceRemovedMessag
         return;
     }
     Detail = FString::Printf(TEXT("Reference container removed: %s"), *Message.Detail);
-    PublishView();
-}
-
-void FMtoULinkageSession::NoteReferenceQuery(const FMtoUReferenceQueryMessage& Message)
-{
-    if (Message.SessionId != SessionId)
-    {
-        return;
-    }
-    // The Maya side owns the import; the editor answers the query by offering
-    // a handoff of the scope the user selected in Unreal.
-    Detail = FString::Printf(TEXT("Reference query %s for the selected scope."), *Message.TransferId);
     PublishView();
 }
 
@@ -1651,9 +1634,13 @@ void FMtoULinkageSession::SendControl(TArray<uint8>&& Packet)
 }
 
 void FMtoULinkageSession::SendError(
-    const FString& Code, const FString& Message, const FString& Details, ESendErrorKind Kind)
+    const FString& Code, const FString& Message, const FString& Details, ESendErrorKind Kind,
+    const FMtoUPoseGroupMessage* RefusedGroup)
 {
-    SendControl(FMtoUProtocol::EncodeError(Code, Message, Details));
+    SendControl(FMtoUProtocol::EncodeError(
+        Code, Message, Details, INDEX_NONE, INDEX_NONE, Kind,
+        RefusedGroup ? RefusedGroup->EvalId : FString(),
+        RefusedGroup ? RefusedGroup->SampleSerial : INDEX_NONE));
     if (Kind == ESendErrorKind::Scheduling)
     {
         // Normal while scrubbing or switching mode: the peer hears the refusal,

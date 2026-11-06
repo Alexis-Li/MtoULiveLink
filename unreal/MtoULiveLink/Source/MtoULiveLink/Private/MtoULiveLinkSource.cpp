@@ -358,9 +358,9 @@ bool FMtoULiveLinkSource::StopActorCachedPlayback(const AMtoULiveLinkActor& Acto
     return Transition.bAccepted;
 }
 
-// The four interactive actions below exist only on this Binding actor, unlike
-// play/stop which Maya can also send. A refused one therefore stays a local
-// prompt in the actor row and is never reported to Maya as a peer outcome.
+// The interactive actions below exist only on this Binding actor: Maya sends no
+// playback command. A refused one therefore stays a local prompt in the actor
+// row and is never reported to Maya as a peer outcome.
 bool FMtoULiveLinkSource::PauseActorCachedPlayback(const AMtoULiveLinkActor& Actor)
 {
     if (!GetActorCachePlaybackView(Actor).CanPause())
@@ -1320,6 +1320,19 @@ uint32 FMtoULiveLinkSource::Run()
                         }
                     }
 
+                    // A type the protocol does not define, a retired one
+                    // included, is refused whatever state the connection is
+                    // in; the mode and set checks below see only defined
+                    // types, so none of them can answer it with a code that
+                    // keeps the connection.
+                    if (!FMtoUProtocol::IsDefinedMessageType(MessageType))
+                    {
+                        SendErrorAndDisconnect(
+                            TEXT("INVALID_MESSAGE"),
+                            FMtoUProtocol::UndefinedTypeError(MessageType));
+                        break;
+                    }
+
                     // Exactly one host owns time in each mode: while linkage
                     // is active, cache work and live frames contradict the
                     // authority statement and are refused with their code.
@@ -1356,8 +1369,7 @@ uint32 FMtoULiveLinkSource::Run()
                         || MessageType == TEXT("leave_linkage")
                         || MessageType == TEXT("remove_object")
                         || MessageType == TEXT("reference_result")
-                        || MessageType == TEXT("reference_removed")
-                        || MessageType == TEXT("reference_query"))
+                        || MessageType == TEXT("reference_removed"))
                     {
                         // Linkage control work happens on the game thread
                         // because it mutates the takeover and the published
@@ -1397,17 +1409,11 @@ uint32 FMtoULiveLinkSource::Run()
                             bValid = FMtoUProtocol::ParseReferenceResult(
                                 Payload, Control.ReferenceResult, LinkageError, &LinkageErrorCode);
                         }
-                        else if (MessageType == TEXT("reference_removed"))
+                        else
                         {
                             Control.Kind = FMtoUPendingLinkageControl::EKind::ReferenceRemoved;
                             bValid = FMtoUProtocol::ParseReferenceRemoved(
                                 Payload, Control.ReferenceRemoved, LinkageError, &LinkageErrorCode);
-                        }
-                        else
-                        {
-                            Control.Kind = FMtoUPendingLinkageControl::EKind::ReferenceQuery;
-                            bValid = FMtoUProtocol::ParseReferenceQuery(
-                                Payload, Control.ReferenceQuery, LinkageError, &LinkageErrorCode);
                         }
                         if (!bValid)
                         {
@@ -1556,42 +1562,17 @@ uint32 FMtoULiveLinkSource::Run()
                         EnqueueCacheCommand(MoveTemp(Command));
                         continue;
                     }
-                    if (MessageType == TEXT("cache_play"))
+                    if (MessageType == TEXT("cache_clear"))
                     {
                         FString CacheError;
                         FMtoUCacheCommand Command;
-                        Command.Kind = FMtoUCacheCommand::EKind::Play;
-                        if (!FMtoUProtocol::ParseCachePlay(Payload, Command.PlayId, CacheError))
+                        Command.Kind = FMtoUCacheCommand::EKind::Clear;
+                        if (!FMtoUProtocol::ParseCacheClear(Payload, Command.ClearId, CacheError))
                         {
                             SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), CacheError);
                             break;
                         }
-                        EnqueueCacheCommand(MoveTemp(Command));
-                        continue;
-                    }
-                    if (MessageType == TEXT("cache_stop") || MessageType == TEXT("cache_clear"))
-                    {
-                        FString CacheError;
-                        bool bValid = false;
-                        FMtoUCacheCommand Command;
-                        if (MessageType == TEXT("cache_stop"))
-                        {
-                            bValid = FMtoUProtocol::ParseCacheStop(Payload, CacheError);
-                            Command.Kind = FMtoUCacheCommand::EKind::Stop;
-                        }
-                        else
-                        {
-                            bValid = FMtoUProtocol::ParseCacheClear(
-                                Payload, Command.ClearId, CacheError);
-                            Command.Kind = FMtoUCacheCommand::EKind::Clear;
-                        }
-                        if (!bValid)
-                        {
-                            SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), CacheError);
-                            break;
-                        }
-                        if (Command.Kind == FMtoUCacheCommand::EKind::Clear
-                            && Command.ClearId > WorkerLastSeenClearId)
+                        if (Command.ClearId > WorkerLastSeenClearId)
                         {
                             WorkerLastSeenClearId = Command.ClearId;
                             WorkerCacheUploadId = 0;
@@ -1976,7 +1957,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     Object.NegotiatedRevision = Message.Revision;
     if (bPrimary)
     {
-        // The v11 identity of this session: the object set, its revision and
+        // The identity of this session: the object set, its revision and
         // the common space every later group or mode message must repeat.
         NegotiatedSetRevision = Message.SetRevision;
         NegotiatedSpaceRevision = Message.SpaceRevision;
@@ -2162,9 +2143,6 @@ void FMtoULiveLinkSource::HandleLinkageControlOnGameThread(const FMtoUPendingLin
     case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
         SessionId = Control.ReferenceRemoved.SessionId;
         break;
-    case FMtoUPendingLinkageControl::EKind::ReferenceQuery:
-        SessionId = Control.ReferenceQuery.SessionId;
-        break;
     }
     if (SessionId == INDEX_NONE || SessionId < 1
         || !IsSessionActiveOnGameThread(static_cast<uint64>(SessionId)))
@@ -2191,9 +2169,6 @@ void FMtoULiveLinkSource::HandleLinkageControlOnGameThread(const FMtoUPendingLin
         break;
     case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
         LinkageSession.NoteReferenceRemoved(Control.ReferenceRemoved);
-        break;
-    case FMtoUPendingLinkageControl::EKind::ReferenceQuery:
-        LinkageSession.NoteReferenceQuery(Control.ReferenceQuery);
         break;
     }
 }

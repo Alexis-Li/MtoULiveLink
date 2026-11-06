@@ -567,11 +567,11 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual(1.0, FakeWorker.instance.joined)
         self.assertEqual(mtou_config.PROTOCOL_VERSION,
                          FakeWorker.instance.init_message["version"])
-        self.assertEqual(11, FakeWorker.instance.init_message["version"])
         self.assertEqual("character", FakeWorker.instance.init_message["object_id"])
         self.assertEqual(["character"], FakeWorker.instance.init_message["set_objects"])
         self.assertEqual(1, FakeWorker.instance.init_count)
-        self.assertEqual(11, FakeWorker.instance.hello_message["version"])
+        self.assertEqual(mtou_config.PROTOCOL_VERSION,
+                         FakeWorker.instance.hello_message["version"])
         self.assertEqual("cm", FakeWorker.instance.hello_message["scene"]["linear_unit"])
         self.assertEqual("animation", FakeWorker.instance.init_message["workflow"])
         self.assertTrue(FakeWorker.instance.init_message["blendshapes_enabled"])

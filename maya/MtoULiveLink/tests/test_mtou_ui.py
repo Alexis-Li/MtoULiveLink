@@ -157,7 +157,8 @@ class FakeStreamingSession(object):
     def __init__(self, ready=True, session_id=7, set_revision=1,
                  space_revision=1):
         self._ready = ready
-        self.hello = {"session_id": session_id, "version": 11}
+        self.hello = {"session_id": session_id,
+                      "version": mtou_config.PROTOCOL_VERSION}
         self.messages = []
         self.paused = 0
         self.resumed = 0
@@ -304,8 +305,23 @@ class MainThreadDeferralTests(unittest.TestCase):
             controller._linkage = mock.Mock()
             controller._report_runtime_error({
                 "type": "error", "code": "LINKAGE_NOT_ACTIVE",
-                "message": "A group arrived while another host owns time."})
-        controller._linkage.note_refused.assert_called_once()
+                "message": "A group arrived while another host owns time.",
+                "kind": "scheduling", "eval_id": "seq@10+0/cam#c1",
+                "sample_serial": 2})
+        controller._linkage.note_refused.assert_called_once_with(
+            "A group arrived while another host owns time.",
+            eval_id="seq@10+0/cam#c1", sample_serial=2)
+        fake_cmds.evalDeferred.assert_not_called()
+
+    def test_a_scheduling_refusal_without_a_linkage_session_is_not_shown(self):
+        # The kind alone makes it scheduling; there is nothing to count it on.
+        fake_cmds = mock.MagicMock()
+        with mock.patch.object(mtou_mayaapi, "utils", None),                 mock.patch.object(mtou_controller, "cmds", fake_cmds):
+            controller = mtou_controller.Controller()
+            handled = controller._report_runtime_error({
+                "type": "error", "code": "EVAL_STALE", "message": "stale",
+                "kind": "scheduling"})
+        self.assertFalse(handled)
         fake_cmds.evalDeferred.assert_not_called()
 
 
@@ -740,70 +756,113 @@ class LinkagePanelTests(unittest.TestCase):
             self.session.route(camera_time())
         self.run_timer()
 
-    def _assert_counted(self, details, message="A group named a different mode revision."):
+    def _scheduling(self, code, **extra):
+        reply = {"type": "error", "code": code, "kind": "scheduling",
+                 "message": "refused", "details": "free text"}
+        reply.update(extra)
+        return reply
+
+    def _assert_counted(self, reply):
         self.show_error.reset_mock()
         refused = self.controller.linkage_status()["refused_count"]
-        self._route({"type": "error", "code": "MODE_CONFLICT",
-                     "message": message, "details": details})
+        self._route(reply)
         self.flush()
         self.show_error.assert_not_called()
         self.assertEqual(refused + 1, self.controller.linkage_status()["refused_count"])
 
-    def _assert_reported(self, details, message):
+    def _assert_reported(self, reply):
         self.show_error.reset_mock()
-        self._route({"type": "error", "code": "MODE_CONFLICT",
-                     "message": message, "details": details})
+        refused = self.controller.linkage_status()["refused_count"]
+        self._route(reply)
         self.flush()
-        self.assertEqual("MODE_CONFLICT", self.show_error.call_args[0][0]["code"])
+        self.assertEqual(reply["code"], self.show_error.call_args[0][0]["code"])
+        self.assertEqual(refused, self.controller.linkage_status()["refused_count"])
 
-    def test_unreal_refusing_a_group_during_its_transition_is_counted(self):
-        # R-021: a group that reached Unreal during a transition is scheduling.
+    def test_only_the_kind_decides_a_scheduling_refusal(self):
+        # Every code Unreal can mark as scheduling is counted, whatever its
+        # details say; the free text is only displayed.
         self.enter_linkage()
         self._send_one_group()
-        self._assert_counted("target mode revision 2",
-                             "A group arrived during a time-control transition.")
+        for code in ("EVAL_STALE", "LINKAGE_NOT_ACTIVE", "SET_REVISION_STALE",
+                     "MODE_CONFLICT"):
+            with self.subTest(code=code):
+                self._assert_counted(self._scheduling(code, details="not a pattern"))
 
-    def test_unreal_refusing_a_group_of_an_older_revision_is_counted(self):
-        # The group was in flight when Maya returned to realtime; the reply of
-        # the old revision arrives afterwards.
+    def test_the_same_codes_without_the_kind_are_reported(self):
+        # R-005: a newer set revision or a refused remove_object is a real
+        # conflict that used to be counted by its code alone.
         self.enter_linkage()
         self._send_one_group()
-        with self.bindings:
-            self.controller.leave_linkage("realtime")
-        self._assert_counted("group mode revision 1, current 2")
+        for code in ("EVAL_STALE", "LINKAGE_NOT_ACTIVE", "SET_REVISION_STALE",
+                     "MODE_CONFLICT"):
+            with self.subTest(code=code):
+                self._assert_reported({
+                    "type": "error", "code": code, "message": "refused",
+                    "details": "group set revision 9, current 3"})
+                self._assert_reported({
+                    "type": "error", "code": code, "kind": "failure",
+                    "message": "refused", "details": "target mode revision 4"})
 
-    def test_a_group_of_a_newer_revision_is_still_a_conflict(self):
-        # R-022: Unreal treats a group ahead of its revision as a failure.
+    def test_a_scheduling_refusal_of_the_issued_sample_frees_the_slot(self):
         self.enter_linkage()
         self._send_one_group()
-        self._assert_reported("group mode revision 9, current 3",
-                              "A group named a different mode revision.")
+        linkage = self.controller._linkage
+        self.assertEqual(1, linkage.status().issued)
+        self._assert_counted(self._scheduling(
+            "EVAL_STALE", eval_id="seq@10+0/cam#c1", sample_serial=1))
+        self.assertEqual(0, linkage.status().issued)
+
+    def test_a_scheduling_refusal_of_another_sample_keeps_the_slot(self):
+        self.enter_linkage()
+        self._send_one_group()
+        linkage = self.controller._linkage
+        for extra in ({"eval_id": "seq@11+0/cam#c1", "sample_serial": 1},
+                      {"eval_id": "seq@10+0/cam#c1", "sample_serial": 2},
+                      {"eval_id": "seq@10+0/cam#c1"},
+                      {"sample_serial": 1},
+                      {}):
+            with self.subTest(extra=extra):
+                self._assert_counted(self._scheduling("EVAL_STALE", **extra))
+                self.assertEqual(1, linkage.status().issued)
+
+    def test_the_issued_slot_is_not_freed_by_text(self):
+        # The refusal text used to name the issued sample; it no longer counts.
+        self.enter_linkage()
+        self._send_one_group()
+        self._assert_counted(self._scheduling(
+            "EVAL_STALE",
+            details="group eval seq@10+0/cam#c1, current target none"))
+        self.assertEqual(1, self.controller._linkage.status().issued)
+
+    def test_a_missing_kind_reads_as_a_failure(self):
+        self.enter_linkage()
+        self._assert_reported({"type": "error", "code": "MODE_CONFLICT",
+                               "message": "Linkage is already active.",
+                               "details": ""})
+
+    def test_a_group_of_a_newer_revision_is_a_failure(self):
+        # R-022: Unreal marks a group ahead of its revision as a failure.
+        self.enter_linkage()
+        self._send_one_group()
+        self._assert_reported({
+            "type": "error", "code": "MODE_CONFLICT", "kind": "failure",
+            "message": "A group named a different mode revision.",
+            "details": "group mode revision 9, current 3",
+            "eval_id": "seq@10+0/cam#c1", "sample_serial": 1})
 
     def test_a_refused_mode_message_is_reported_while_a_group_is_in_flight(self):
         # R-022: a conflict about Maya's own transition is never scheduling,
         # however many groups are still on their way.
         self.enter_linkage()
         self._send_one_group()
-        self._assert_reported(
-            "current mode revision 3, message 2",
-            "A leave_linkage message named an older or repeated mode revision.")
-        self._assert_reported(
-            "message mode revision 5, current 3",
-            "A failed transition named a mode revision this session never entered.")
-
-    def test_a_mode_conflict_without_group_details_is_reported(self):
-        self.enter_linkage()
-        self._assert_reported("", "Linkage is already active.")
-
-    def test_only_the_two_group_forms_are_scheduling_conflicts(self):
-        scheduling = mtou_linkage.is_scheduling_conflict
-        self.assertTrue(scheduling("target mode revision 4"))
-        self.assertTrue(scheduling("group mode revision 1, current 2"))
-        self.assertFalse(scheduling("group mode revision 2, current 2"))
-        self.assertFalse(scheduling("group mode revision 3, current 2"))
-        self.assertFalse(scheduling("current mode revision 3, message 2"))
-        self.assertFalse(scheduling("prefix target mode revision 4"))
-        self.assertFalse(scheduling(None))
+        self._assert_reported({
+            "type": "error", "code": "MODE_CONFLICT", "kind": "failure",
+            "message": "A leave_linkage message named an older or repeated mode revision.",
+            "details": "current mode revision 3, message 2"})
+        self._assert_reported({
+            "type": "error", "code": "MODE_CONFLICT", "kind": "failure",
+            "message": "A failed transition named a mode revision this session never entered.",
+            "details": "message mode revision 5, current 3"})
 
     def test_a_message_from_a_newer_mode_is_still_a_conflict(self):
         self.enter_linkage()

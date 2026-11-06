@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 """Minimal Unreal-side peer for the linkage host checks.
 
-Implements the v11 linkage conversation from the Unreal side (protocol/README.md)
+Implements the linkage conversation from the Unreal side (protocol/README.md)
 so the Maya adapter can be exercised without an editor: it greets the client,
 accepts one object, sends camera/time targets, applies the answered groups,
 reports the application evidence, and records latency and convergence.
@@ -19,8 +19,16 @@ import argparse
 import json
 import socket
 import struct
+import sys
 import threading
 import time
+from pathlib import Path
+
+SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
+
+from mtou_livelink.config import PROTOCOL_VERSION  # noqa: E402
 
 MAX_MESSAGE_BYTES = 32 * 1024 * 1024
 
@@ -105,12 +113,12 @@ class MockUnrealPeer(object):
         if hello.get("type") != "hello":
             self.errors.append("first message was {0!r}".format(hello.get("type")))
             return
-        if hello.get("version") != 11:
+        if hello.get("version") != PROTOCOL_VERSION:
             self.errors.append("hello version {0!r}".format(hello.get("version")))
             return
         self._send(sock, {
             "type": "hello_ack",
-            "version": 11,
+            "version": PROTOCOL_VERSION,
             "session_id": self.session_id,
             "capabilities": {"linkage": True, "reference": True},
             "targets": [{"object_id": self.object_id, "kind": "binding_actor",

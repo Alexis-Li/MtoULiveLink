@@ -7,6 +7,11 @@ repository's issues.
 
 ## Unreleased
 
+### Upgrade notes
+
+- Update the Maya and Unreal components together: protocol v12 refuses a mixed
+  pair before it touches either scene. (#14)
+
 ### Added
 
 - Both archives now contain `LICENSE` and `NOTICE`, and the copyright and license
@@ -56,6 +61,9 @@ repository's issues.
 - Undoing or redoing an Additional Parts edit in Unreal now always ends the streaming
   connection of the affected Binding actor, as the edit itself does, instead of sometimes
   leaving Maya streaming to the old part set. (#31)
+- A real linkage conflict, such as Unreal using another character-set revision than
+  Maya (角色集合修订号不一致), is now reported instead of counted with the cancelled
+  targets. (#14)
 
 ## 1.0.0 - 2026-10-30
 
