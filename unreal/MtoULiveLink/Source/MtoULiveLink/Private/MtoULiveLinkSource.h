@@ -133,8 +133,7 @@ struct FMtoUPendingLinkageControl
         LeaveLinkage,
         RemoveObject,
         ReferenceResult,
-        ReferenceRemoved,
-        ReferenceQuery
+        ReferenceRemoved
     };
 
     uint64 IntakeOrder = 0;
@@ -144,7 +143,6 @@ struct FMtoUPendingLinkageControl
     FMtoURemoveObjectMessage RemoveObject;
     FMtoUReferenceResultMessage ReferenceResult;
     FMtoUReferenceRemovedMessage ReferenceRemoved;
-    FMtoUReferenceQueryMessage ReferenceQuery;
 };
 
 struct FMtoUPendingPoseGroup

@@ -16,7 +16,6 @@ struct FMtoULeaveLinkageMessage;
 struct FMtoUPoseGroupMessage;
 struct FMtoUReferenceResultMessage;
 struct FMtoUReferenceRemovedMessage;
-struct FMtoUReferenceQueryMessage;
 struct FMtoURemoveObjectMessage;
 struct FMtoUAppliedComponent;
 
@@ -141,8 +140,6 @@ public:
     void NoteReferenceResult(const FMtoUReferenceResultMessage& Message);
     /** The user removed the tool-owned reference container. */
     void NoteReferenceRemoved(const FMtoUReferenceRemovedMessage& Message);
-    /** Maya asks for the handoff of a scope the user selected in Unreal. */
-    void NoteReferenceQuery(const FMtoUReferenceQueryMessage& Message);
 
     /** The negotiated identity of the streaming session: its primary object. */
     void NegotiateIdentity(const FString& ObjectId, int32 SetRevision, int32 SpaceRevision);
@@ -223,20 +220,25 @@ public:
     int32 ConsumeSessionEndRequest();
 
 private:
+    // Test seam: the corpus runner records an application against an issue that
+    // is still open, a state the session leaves only through its own
+    // confirmation (see TakeNextStagedGroup).
+    friend class FMtoULinkageSessionTestAccess;
+
     static double Now();
     // Bounded cadence of the camera/time pump: the editor is asked at most
     // once per interval and never more than one target is in flight.
     static constexpr double CameraPumpIntervalSeconds = 0.01;
 
     void SendControl(TArray<uint8>&& Packet);
-    /** Whether an error reply is a real failure or normal scheduling noise. */
-    enum class ESendErrorKind : uint8
-    {
-        Failure,
-        Scheduling
-    };
+    /**
+     * Answer with an `error` of the given kind (see `ESendErrorKind`). An error
+     * that refuses a parsed group passes it, so the reply carries its
+     * `eval_id` and `sample_serial`.
+     */
     void SendError(const FString& Code, const FString& Message, const FString& Details,
-        ESendErrorKind Kind = ESendErrorKind::Failure);
+        ESendErrorKind Kind = ESendErrorKind::Failure,
+        const FMtoUPoseGroupMessage* RefusedGroup = nullptr);
     void PublishView();
     void UpdateConvergence(double NowSeconds);
     void PumpCameraTargets(double NowSeconds, bool bAskEditorNow);

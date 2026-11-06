@@ -903,10 +903,9 @@ bool FMtoUProtocol::ParseMode(
         OutError = TEXT("Fields 'session_id' and 'mode_revision' must be positive integers.");
         return false;
     }
-    if (OutMessage.Mode != TEXT("realtime") && OutMessage.Mode != TEXT("cached")
-        && OutMessage.Mode != TEXT("linkage"))
+    if (OutMessage.Mode != TEXT("realtime") && OutMessage.Mode != TEXT("linkage"))
     {
-        OutError = TEXT("Field 'mode' must be 'realtime', 'cached' or 'linkage'.");
+        OutError = TEXT("Field 'mode' must be 'realtime' or 'linkage'.");
         return false;
     }
     if (OutMessage.Control != TEXT("maya") && OutMessage.Control != TEXT("unreal"))
@@ -917,6 +916,23 @@ bool FMtoUProtocol::ParseMode(
     if (OutMessage.Transition != TEXT("ready") && OutMessage.Transition != TEXT("failed"))
     {
         OutError = TEXT("Field 'transition' must be 'ready' or 'failed'.");
+        return false;
+    }
+    // A mode has exactly one controller: linkage is Unreal's and realtime is
+    // Maya's. A statement that pairs them otherwise contradicts itself, and
+    // a linkage statement is `ready`: Maya reports a failed transition as
+    // realtime.
+    const bool bLinkage = OutMessage.Mode == TEXT("linkage");
+    if (OutMessage.Control != (bLinkage ? TEXT("unreal") : TEXT("maya")))
+    {
+        OutError = FString::Printf(
+            TEXT("Field 'control' must be '%s' when mode is '%s'."),
+            bLinkage ? TEXT("unreal") : TEXT("maya"), *OutMessage.Mode);
+        return false;
+    }
+    if (bLinkage && OutMessage.Transition != TEXT("ready"))
+    {
+        OutError = TEXT("Field 'transition' must be 'ready' when mode is 'linkage'.");
         return false;
     }
     // detail is diagnostic text; an absent one names no failure, but a
@@ -1383,56 +1399,6 @@ bool FMtoUProtocol::ParseReferenceRemoved(
     return true;
 }
 
-bool FMtoUProtocol::ParseReferenceQuery(
-    const TArray<uint8>& Payload,
-    FMtoUReferenceQueryMessage& OutMessage,
-    FString& OutError,
-    FString* OutErrorCode)
-{
-    OutMessage = FMtoUReferenceQueryMessage();
-    OutError.Reset();
-    if (OutErrorCode)
-    {
-        *OutErrorCode = TEXT("INVALID_MESSAGE");
-    }
-    TSharedPtr<FJsonObject> Object;
-    if (!ParseObject(Payload, Object, OutError))
-    {
-        return false;
-    }
-    FString Type;
-    if (!GetStringField(Object, TEXT("type"), Type, OutError)
-        || Type != TEXT("reference_query"))
-    {
-        OutError = TEXT("Message type must be 'reference_query'.");
-        return false;
-    }
-    if (!GetIdentityInt(Object, TEXT("session_id"), OutMessage.SessionId, OutError)
-        || !GetStringField(Object, TEXT("transfer_id"), OutMessage.TransferId, OutError))
-    {
-        return false;
-    }
-    if (OutMessage.SessionId < 1 || OutMessage.TransferId.IsEmpty())
-    {
-        OutError = TEXT("Fields 'session_id' must be positive and 'transfer_id' non-empty.");
-        return false;
-    }
-    TSharedPtr<FJsonObject> Scope;
-    if (!GetOptionalObject(Object, TEXT("scope"), Scope, OutError) || !Scope.IsValid())
-    {
-        OutError = TEXT("Field 'scope' must be an object.");
-        return false;
-    }
-    FString Level;
-    if (!GetStringField(Scope, TEXT("level"), Level, OutError) || Level.IsEmpty())
-    {
-        OutError = TEXT("Field 'scope.level' must be a non-empty string.");
-        return false;
-    }
-    OutMessage.Scope = Scope;
-    return true;
-}
-
 bool FMtoUProtocol::PeekType(
     const TArray<uint8>& Payload,
     FString& OutType,
@@ -1493,6 +1459,37 @@ bool FMtoUProtocol::PeekType(
     }
     OutError = TEXT("Field 'type' has the wrong JSON type.");
     return false;
+}
+
+bool FMtoUProtocol::IsDefinedMessageType(const FString& Type)
+{
+    // Every message Maya sends to Unreal. The table is the protocol's own
+    // list, not a prefix: a retired type is absent from it and so is any type
+    // the protocol never had.
+    static const TCHAR* const Defined[] = {
+        TEXT("hello"), TEXT("init"), TEXT("frame"),
+        TEXT("cache_enter"), TEXT("cache_begin"), TEXT("cache_frame"),
+        TEXT("cache_end"), TEXT("cache_clear"),
+        TEXT("mode"), TEXT("group"), TEXT("leave_linkage"), TEXT("remove_object"),
+        TEXT("reference_result"), TEXT("reference_removed")};
+    for (const TCHAR* Name : Defined)
+    {
+        if (Type == Name)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+FString FMtoUProtocol::UndefinedTypeError(const FString& Type)
+{
+    return FString::Printf(TEXT("Message type '%s' is not defined by the protocol."), *Type);
+}
+
+const TCHAR* FMtoUProtocol::ErrorKindName(ESendErrorKind Kind)
+{
+    return Kind == ESendErrorKind::Scheduling ? TEXT("scheduling") : TEXT("failure");
 }
 
 bool FMtoUProtocol::ParseCacheBegin(
@@ -1728,34 +1725,6 @@ bool FMtoUProtocol::ParseCacheEnd(const TArray<uint8>& Payload, FString& OutErro
     return true;
 }
 
-bool FMtoUProtocol::ParseCachePlay(
-    const TArray<uint8>& Payload,
-    int32& OutPlayId,
-    FString& OutError)
-{
-    OutPlayId = INDEX_NONE;
-    OutError.Reset();
-    TSharedPtr<FJsonObject> Object;
-    if (!ParseObject(Payload, Object, OutError))
-    {
-        return false;
-    }
-    FString Type;
-    if (!GetStringField(Object, TEXT("type"), Type, OutError) || Type != TEXT("cache_play"))
-    {
-        OutError = TEXT("Message type must be 'cache_play'.");
-        return false;
-    }
-    TSharedPtr<FJsonValue> PlayIdValue;
-    if (!GetTypedField(Object, TEXT("play_id"), EJson::Number, PlayIdValue, OutError)
-        || !GetExactInt(PlayIdValue, OutPlayId))
-    {
-        OutError = TEXT("Field 'play_id' must be an integer JSON number.");
-        return false;
-    }
-    return true;
-}
-
 bool ParseCacheTypeOnly(const TArray<uint8>& Payload, const TCHAR* ExpectedType, FString& OutError)
 {
     TSharedPtr<FJsonObject> Object;
@@ -1775,11 +1744,6 @@ bool ParseCacheTypeOnly(const TArray<uint8>& Payload, const TCHAR* ExpectedType,
 bool FMtoUProtocol::ParseCacheEnter(const TArray<uint8>& Payload, FString& OutError)
 {
     return ParseCacheTypeOnly(Payload, TEXT("cache_enter"), OutError);
-}
-
-bool FMtoUProtocol::ParseCacheStop(const TArray<uint8>& Payload, FString& OutError)
-{
-    return ParseCacheTypeOnly(Payload, TEXT("cache_stop"), OutError);
 }
 
 bool FMtoUProtocol::ParseCacheClear(
@@ -2347,13 +2311,24 @@ TArray<uint8> FMtoUProtocol::EncodeError(
     const FString& Message,
     const FString& Details,
     int32 UploadId,
-    int32 PlayId)
+    int32 PlayId,
+    ESendErrorKind Kind,
+    const FString& EvalId,
+    int32 SampleSerial)
 {
     const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetStringField(TEXT("type"), TEXT("error"));
     Object->SetStringField(TEXT("code"), Code);
     Object->SetStringField(TEXT("message"), Message);
     Object->SetStringField(TEXT("details"), Details.IsEmpty() ? Message : Details);
+    Object->SetStringField(TEXT("kind"), ErrorKindName(Kind));
+    // An error that refuses a parsed group repeats the group's identity; Maya
+    // frees the issued slot only when both name the sample it issued.
+    if (!EvalId.IsEmpty() && SampleSerial != INDEX_NONE)
+    {
+        Object->SetStringField(TEXT("eval_id"), EvalId);
+        Object->SetNumberField(TEXT("sample_serial"), SampleSerial);
+    }
     // Cache-operation errors echo the owning identity so Maya can discard
     // late errors from older uploads or play attempts.
     if (UploadId > 0)

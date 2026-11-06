@@ -8,6 +8,27 @@
 #include "MtoUConnectionNegotiator.h"
 #include "MtoULinkageTypes.h"
 
+/**
+ * The wire protocol version. A hand-written test message names it through
+ * this macro, so a version change needs no edit in the tests.
+ */
+#define MTOU_PROTOCOL_VERSION 12
+#define MTOU_PROTOCOL_VERSION_FIELD_TEXT_(Number) #Number
+#define MTOU_PROTOCOL_VERSION_FIELD_TEXT(Number) MTOU_PROTOCOL_VERSION_FIELD_TEXT_(Number)
+/** `"version":<current>` as a string literal, for building a JSON message. */
+#define MTOU_PROTOCOL_VERSION_FIELD "\"version\":" MTOU_PROTOCOL_VERSION_FIELD_TEXT(MTOU_PROTOCOL_VERSION)
+
+/**
+ * `error.kind`: whether an error answers scheduling noise (a group the
+ * scheduling of the two hosts made obsolete) or a real failure. The peer
+ * decides only by this value; the code and text do not.
+ */
+enum class ESendErrorKind : uint8
+{
+    Failure,
+    Scheduling
+};
+
 struct FMtoUTransform
 {
     FVector Translation = FVector::ZeroVector;
@@ -137,14 +158,6 @@ struct FMtoUReferenceRemovedMessage
     FString Detail;
 };
 
-/** Maya asks for the handoff of the scope the user selected in Unreal. */
-struct FMtoUReferenceQueryMessage
-{
-    int32 SessionId = 0;
-    FString TransferId;
-    TSharedPtr<FJsonObject> Scope;
-};
-
 /** One `applied.components` row: actual completion evidence of one object. */
 struct FMtoUAppliedComponent
 {
@@ -212,7 +225,7 @@ private:
 class FMtoUProtocol
 {
 public:
-    static constexpr int32 Version = 11;
+    static constexpr int32 Version = MTOU_PROTOCOL_VERSION;
     // A set holds the primary character and at most one independent object.
     static constexpr int32 MaxSetObjects = 2;
     // Transient Unreal cache limits, recalibrated with the first real-project
@@ -270,6 +283,9 @@ public:
         FMtoUHelloMessage& OutMessage,
         FString& OutError,
         FString* OutErrorCode = nullptr);
+    // Refuses with INVALID_MESSAGE, keeping the connection, a mode that is not
+    // a wire mode (`cached` is not) and a mode, control and transition that do
+    // not pair up: linkage is Unreal's and `ready`, realtime is Maya's.
     static bool ParseMode(
         const TArray<uint8>& Payload,
         FMtoUModeMessage& OutMessage,
@@ -303,13 +319,18 @@ public:
         FMtoUReferenceRemovedMessage& OutMessage,
         FString& OutError,
         FString* OutErrorCode = nullptr);
-    static bool ParseReferenceQuery(
-        const TArray<uint8>& Payload,
-        FMtoUReferenceQueryMessage& OutMessage,
-        FString& OutError,
-        FString* OutErrorCode = nullptr);
     static bool ParseFrame(const TArray<uint8>& Payload, FMtoUFrameMessage& OutMessage, FString& OutError);
     static bool PeekType(const TArray<uint8>& Payload, FString& OutType, FString& OutError);
+    /**
+     * True for a `type` Maya may send to Unreal. Any other type, a retired one
+     * included, is refused with INVALID_MESSAGE and the connection closes,
+     * whatever state the connection is in.
+     */
+    static bool IsDefinedMessageType(const FString& Type);
+    /** The diagnostic for a `type` that is not defined. */
+    static FString UndefinedTypeError(const FString& Type);
+    /** The wire spelling of an error kind. */
+    static const TCHAR* ErrorKindName(ESendErrorKind Kind);
     // ExpectedObjects maps every object of the current set beside the primary
     // to its negotiated transform (X) and curve (Y) counts. A frame of another
     // set (an object the set no longer holds, or one it lacks) is a droppable
@@ -336,11 +357,6 @@ public:
         FString& OutError,
         FString* OutErrorCode = nullptr);
     static bool ParseCacheEnd(const TArray<uint8>& Payload, FString& OutError);
-    static bool ParseCachePlay(
-        const TArray<uint8>& Payload,
-        int32& OutPlayId,
-        FString& OutError);
-    static bool ParseCacheStop(const TArray<uint8>& Payload, FString& OutError);
     static bool ParseCacheClear(const TArray<uint8>& Payload, int32& OutClearId, FString& OutError);
     static TArray<uint8> EncodeReady(
         const TArray<FName>& MissingInUnreal,
@@ -441,12 +457,20 @@ public:
     // Cleared echoes the owning identity of the cache ownership that was
     // dropped so Maya can discard late outcomes from older operations.
     static TArray<uint8> EncodeCacheCleared(int32 UploadId, int32 PlayId, int32 ClearId);
+    /**
+     * Every error names its `kind` (failure unless the caller says otherwise).
+     * An error that refuses a parsed group repeats that group's `eval_id` and
+     * `sample_serial`, so Maya frees the slot of exactly that sample.
+     */
     static TArray<uint8> EncodeError(
         const FString& Code,
         const FString& Message,
         const FString& Details = FString(),
         int32 UploadId = INDEX_NONE,
-        int32 PlayId = INDEX_NONE);
+        int32 PlayId = INDEX_NONE,
+        ESendErrorKind Kind = ESendErrorKind::Failure,
+        const FString& EvalId = FString(),
+        int32 SampleSerial = INDEX_NONE);
     static FLiveLinkStaticDataStruct MakeStaticData(
         const FMtoUInitMessage& Init,
         const TArray<FName>& AcceptedCurveNames);
