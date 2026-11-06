@@ -76,7 +76,7 @@ class ProjectToolTests(unittest.TestCase):
         }
         self.assertEqual(
             [
-                "protocol_version must equal 11",
+                "protocol_version must equal 12",
                 "limits.max_linkage_group_bytes must be a positive integer",
                 "limits.max_control_queue must be a positive integer",
                 "limits.max_reference_bytes must be a positive integer",
@@ -87,7 +87,7 @@ class ProjectToolTests(unittest.TestCase):
                 "case 1 operation is unsupported",
                 "case 1 applies_to must contain maya and/or unreal",
                 "case 1 must define exactly one input source",
-                "case 1 rejected case needs a stable v11 error_code",
+                "case 1 rejected case needs a stable error_code",
             ],
             module.validate_corpus(invalid),
         )
