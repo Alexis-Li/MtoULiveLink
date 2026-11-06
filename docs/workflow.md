@@ -73,16 +73,19 @@ The PR owns the implementation diff, review findings and check results.
    its agreed prototype scope.
 2. **Choose the delivery boundary.** Small wording, typo, link and formatting
    fixes, and small edits to rules, workflows, templates or `CHANGELOG.md`, go
-   directly on the current working branch when they change no code, tests,
-   tools, CI, packaging, version or product decision. They need no separate
-   branch, PR, development report or review report. They reach `main` with
-   their branch; the current branch is `main` only when no development branch
-   is in progress. Run applicable checks and use normal commits without
-   rewriting shared history. Use a PR if size or impact is uncertain.
+   directly on the integration branch in progress when they change no code,
+   tests, tools, CI, packaging, version or product decision; with no
+   integration branch in progress they go on `main`. They never go on a PR
+   branch, and they need no separate branch, PR, development report or review
+   report. They reach `main` with the integration branch. Run applicable
+   checks and use normal commits without rewriting shared history. Use a PR if
+   size or impact is uncertain.
    All other work, including development tasks, code changes and significant
-   changes, goes through a PR. Branch from the intended integration branch
-   with `feature/<topic>` for new features, tools or documentation, or
-   `fix/<topic>` for corrections; use a short kebab-case topic. Inspect local
+   changes, goes through a PR. Branch from the integration branch in progress
+   (from `main` only when none is) and target the PR at it, with
+   `feature/<topic>` for new features, tools or documentation, or
+   `fix/<topic>` for corrections; use a short kebab-case topic. A PR branch
+   holds only its PR's change. Inspect local
    changes before switching branches. Serial work can reuse a checkout;
    concurrent writers need isolated checkouts and clear file ownership.
 3. **Deliver a reviewable change.** Record full starting and ending SHAs,

@@ -46,12 +46,14 @@ pinned commit. Do not change sibling projects.
   comments as the current state; rewrite an outdated decision in place once
   the user agrees.
 - Follow docs/workflow.md for Issue/PR work: `feature/<topic>` or
-  `fix/<topic>` branches with a PR to `main`, `Refs #<issue>` (never closing
+  `fix/<topic>` branches cut from the integration branch in progress (`main`
+  when none is) with a PR back to it, `Refs #<issue>` (never closing
   keywords), full base/head SHAs, AC and R- finding IDs, a published review of
   the exact head SHA before every merge, `--match-head-commit` merges, and
   issue comments that each end with a `当前状态` footer, generated and checked
-  with `tools/issue_report.py` for status comments. Small documentation and
-  rule edits go on the current branch as docs/workflow.md defines.
+  with `tools/issue_report.py` for status comments. A PR branch holds only
+  its PR's change; small documentation and rule edits go directly on the
+  integration branch as docs/workflow.md defines.
 - Never publish machine-specific paths, credentials or private asset contents
   in files, Issues or PRs; use placeholders such as `<Maya2024>`,
   `<Project.uproject>` or `<scratch>`. Report the state reached precisely:
