@@ -165,6 +165,8 @@ def validate_corpus(corpus: object) -> list[str]:
         keywords = expected.get("keywords", [])
         if not isinstance(keywords, list) or any(not isinstance(value, str) for value in keywords):
             errors.append(prefix + " expected.keywords must be a string array")
+        if "peer_versions" in expected:
+            errors.extend(validate_peer_versions(prefix, case))
         negotiated = case.get("negotiated_revision")
         if negotiated is not None and (
                 isinstance(negotiated, bool) or not isinstance(negotiated, int)):
@@ -178,6 +180,48 @@ def validate_corpus(corpus: object) -> list[str]:
             errors.extend(validate_linkage_state(prefix, case))
         if operation == "resource_limit":
             errors.extend(validate_resource_case(prefix, case, limits))
+    return errors
+
+
+def validate_peer_versions(prefix: str, case: dict) -> list[str]:
+    """``expected.peer_versions`` is what Maya shows of the peer's release.
+
+    Only Maya judges it, and only on a message that carries or implies the
+    peer's release: the ``error`` that refuses a protocol version, or the
+    ``hello_ack`` Maya refuses for another protocol version. A case no runner
+    judges is rejected instead of passing unchecked.
+    """
+    expected = case["expected"]
+    versions = expected["peer_versions"]
+    errors = []
+    if case.get("operation") == "error":
+        payload = case.get("payload")
+        judged = (
+            expected.get("accepted") is True
+            and isinstance(payload, dict)
+            and payload.get("code") == "PROTOCOL_VERSION_MISMATCH")
+    elif case.get("operation") == "hello_ack":
+        judged = (expected.get("accepted") is False
+                  and expected.get("error_code") == "PROTOCOL_VERSION_MISMATCH")
+    else:
+        judged = False
+    if not judged or case.get("applies_to") != ["maya"]:
+        errors.append(
+            prefix + " expected.peer_versions is judged only for a Maya case"
+            " that names a refused protocol version (an accepted"
+            " PROTOCOL_VERSION_MISMATCH error or a refused hello_ack)")
+    if not isinstance(versions, dict) or set(versions) != {
+            "plugin_version", "protocol_version"}:
+        return errors + [
+            prefix + " expected.peer_versions must hold plugin_version and"
+            " protocol_version"]
+    plugin_version = versions["plugin_version"]
+    if plugin_version is not None and not isinstance(plugin_version, str):
+        errors.append(prefix + " peer_versions.plugin_version must be a string or null")
+    protocol_version = versions["protocol_version"]
+    if protocol_version is not None and (
+            isinstance(protocol_version, bool) or not isinstance(protocol_version, int)):
+        errors.append(prefix + " peer_versions.protocol_version must be an integer or null")
     return errors
 
 

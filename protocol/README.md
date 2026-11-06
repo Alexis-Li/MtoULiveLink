@@ -23,9 +23,22 @@ Git history.
   the connection **before** it discovers a target, borrows a camera, mutes a
   writer or reads a handoff directory. The same code answers any message whose
   `version` differs, including an `init` from an earlier version.
+- Maya refuses a `hello_ack` whose `version` differs the same way: it reports
+  `PROTOCOL_VERSION_MISMATCH`, ends the connection and sends nothing more.
 - A mismatched pair never partially succeeds: no partial target takeover, no
   half-imported reference, no cached pose left behind. Users therefore install
   both components from one release.
+- So that Maya can name both releases, the refusal carries the refuser's. Three
+  optional fields hold them: `hello.plugin_version` (the Maya component's
+  release) and, on an `error` with `code: "PROTOCOL_VERSION_MISMATCH"` only,
+  `protocol_version` (the protocol version the refuser implements, an integer;
+  an `error` has no `version`) and `plugin_version` (the refuser's release). Both are the versions the host has loaded, not those on disk, and
+  a host omits an item it cannot name. They are for display: no host decides
+  anything by them, a missing item is shown as unknown, and the text of
+  `details` is never read for a version. A value of the wrong type is
+  `INVALID_MESSAGE` like any known field, but only after the version check: a
+  `hello` whose `version` differs is always answered with
+  `PROTOCOL_VERSION_MISMATCH`, whatever else it holds.
 
 ## Transport and framing
 
@@ -39,8 +52,10 @@ Git history.
 - Every message has a string `type`. Receivers ignore unknown fields, so
   additive diagnostic fields need no new version; any structural or semantic
   change does. A known field with a value the protocol does not define is not
-  an unknown field: an unknown `mode`, `control` or `error.kind`, or a `mode`
-  that its `control` does not pair with, is `INVALID_MESSAGE`.
+  an unknown field: an unknown `mode`, `control` or `error.kind`, a `mode`
+  that its `control` does not pair with, or a `plugin_version` or
+  `protocol_version` of the wrong type (see [Version pairing](#version-pairing)),
+  is `INVALID_MESSAGE`.
 - A message whose `type` the protocol does not define, a retired one included,
   is refused with `INVALID_MESSAGE` and the receiver closes the connection,
   whatever state the connection is in.
@@ -450,7 +465,7 @@ the container.
 
 | `type` | Payload | Notes |
 | --- | --- | --- |
-| `hello` | `version`, `host`, `maya_version`, `scene{linear_unit, unit_scale_cm, fps}`, `capabilities{linkage, reference, cache, model}` | first message of a connection |
+| `hello` | `version`, `host`, `maya_version`, `scene{linear_unit, unit_scale_cm, fps}`, `capabilities{linkage, reference, cache, model}`; optional `plugin_version` | first message of a connection; `plugin_version` is the Maya component's release, shown when a protocol version is refused |
 | `init` | `version`, `revision`, `workflow`, `blendshapes_enabled`, `bones[[name, parent_index, transform]]` parent first (root parent `-1`), `curves[name]`, `object_id`, `set_revision`, `space_revision`, `set_objects` | one per object of the set, in `set_objects` order; an existing pairing must name the placed Binding Actor |
 | `frame` | `transforms`, `curves` for the primary, plus `objects[{object_id, transforms, curves}]` for the other object of a two-object set | one realtime sample of the whole set at one Maya time |
 | `cache_enter` | — | the connection enters cached ownership before capture |
@@ -471,7 +486,7 @@ the container.
 | --- | --- | --- |
 | `hello_ack` | `version`, `session_id`, `capabilities`, `targets[{object_id, kind, binding_path, generation}]`, `space{space_revision, anchor}` | `targets` lists the explicitly paired targets, primary first; empty until the user pairs |
 | `ready` | `revision`, `workflow`, `missing_in_unreal`, `missing_in_maya`, `bone_name_remaps`, `target_morph_count`, `accepted_morph_count`, `session_id`, `object_id`, `set_revision`, `space_revision` | negotiation result for one object |
-| `error` | `code`, `message`, `details`, `kind`; `eval_id` and `sample_serial` for a refused `group`; `upload_id` and/or `play_id` for a cache error | a stable code from the table below; text is diagnostic only. `kind` is `scheduling` or `failure` (see [Error kinds](#error-kinds)). A recoverable cache error carries the positive identity of the upload or play attempt it belongs to; each field is omitted when the error has none, including a refused stale `cache_clear` and structural errors (see [Cached playback](#cached-playback)). The routing by `upload_id` and `play_id` does not depend on `kind`, `eval_id` or `sample_serial` |
+| `error` | `code`, `message`, `details`, `kind`; `eval_id` and `sample_serial` for a refused `group`; `upload_id` and/or `play_id` for a cache error; `protocol_version` and `plugin_version` for `PROTOCOL_VERSION_MISMATCH` | a stable code from the table below; text is diagnostic only. `kind` is `scheduling` or `failure` (see [Error kinds](#error-kinds)). A recoverable cache error carries the positive identity of the upload or play attempt it belongs to; each field is omitted when the error has none, including a refused stale `cache_clear` and structural errors (see [Cached playback](#cached-playback)). The routing by `upload_id` and `play_id` does not depend on `kind`, `eval_id` or `sample_serial`. `protocol_version` and `plugin_version` name the refusing release (see [Version pairing](#version-pairing)) |
 | `cache_ready` | `upload_id`, `revision`, `frame_count` | the complete upload was accepted |
 | `cache_playing` | `upload_id`, `play_id`, `loop` | an attempt started; precedes its other outcomes |
 | `cache_progress` | `play_id`, `applied` | bounded progress of applied poses |
@@ -497,7 +512,7 @@ it. A message whose `type` is not defined is always a structural failure.
 
 | Code | Trigger |
 | --- | --- |
-| `PROTOCOL_VERSION_MISMATCH` | version field or `hello` version differs |
+| `PROTOCOL_VERSION_MISMATCH` | version field or `hello` version differs, or Maya receives a `hello_ack` of another `version`; the `error` Unreal sends names its `protocol_version` and `plugin_version` |
 | `INVALID_MESSAGE` | malformed shape or framing, invalid UTF-8, non-finite number, wrong length, duplicate id, partial or unknown object set, an undefined `type`, a value the protocol does not define for a known field, a `mode` that its `control` or `transition` does not pair with; a dropped realtime frame keeps the connection, and so does an illegal `mode` |
 | `SECOND_CLIENT_REJECTED` | a second Maya connects while one is connected |
 | `NO_BINDING_ACTOR`, `MULTIPLE_BINDING_ACTORS` | no placed Binding Actor, or several without an explicit pairing |
@@ -549,10 +564,11 @@ the two values by this field alone: neither `code` nor the text decides.
 
 An error that refuses a parsed `group` also carries that group's `eval_id`
 (string) and `sample_serial` (integer), whatever its kind. Maya's issued sample
-is released only when both match it. A missing `kind` reads as `failure` (the
-`PROTOCOL_VERSION_MISMATCH` of a peer of another version carries none); a
-`kind` that is neither value, or is not a string, is `INVALID_MESSAGE` and
-ends the connection. Unreal only sends `kind`, `eval_id` and `sample_serial`.
+is released only when both match it. A missing `kind` reads as `failure` (an
+earlier peer's `PROTOCOL_VERSION_MISMATCH` carries neither `kind` nor the
+release fields); a `kind` that is neither value, or is not a string, is
+`INVALID_MESSAGE` and ends the connection. Unreal only sends `kind`, `eval_id`
+and `sample_serial`.
 
 ## Conformance corpus
 
@@ -566,12 +582,20 @@ pre-state it runs against (`linkage`, `negotiated_set`, `negotiated_revision`,
 rejected `group` with, and diagnostic `keywords`. The operation `unknown_type`
 is a message whose `type` the protocol does not define. Unreal judges a
 `group` case with a real linkage session over paired Binding actors and
-captures the `error` it sends. A resource case names
+captures the `error` it sends. A case may add `expected.peer_versions`, the
+release Maya shows of the peer: `plugin_version` (string) and
+`protocol_version` (integer), each `null` when the message does not provide
+it. Only Maya judges it, on an accepted `PROTOCOL_VERSION_MISMATCH` `error` or
+a refused `hello_ack`; the generator rejects it anywhere else. The corpus holds
+no value that depends on the product version: Unreal judges the `error` that
+refuses an earlier-version `hello`, `init` or `cache_begin` by the protocol it
+implements and the plugin version it loaded. A resource case names
 one `limits` key and a measured size above it instead of carrying the
 oversized payload. The corpus covers framing, negotiation, realtime frames,
 the cache upload and its outcomes, identity staleness, the object set and its
 removal, linkage transitions, groups and applied evidence, resources, an
-earlier-version `init`, `frame` and `cache_begin`, and the reference handoff.
+earlier-version `hello`, `init`, `frame`, `cache_begin` and `hello_ack`, and the
+reference handoff.
 The cancelled-target and paused-resample refusals are pinned by the linkage
 unit tests on both hosts rather than by a corpus case.
 
