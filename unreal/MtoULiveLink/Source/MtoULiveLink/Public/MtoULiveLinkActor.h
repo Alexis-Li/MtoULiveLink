@@ -326,6 +326,7 @@ private:
      */
     void SyncCharacterComposition();
     bool CharacterPartsMatch(const FMtoUCharacterComposition& Composition) const;
+    bool AppliedPartsMatch(const FMtoUCharacterComposition& Composition) const;
     void ApplyCharacterPartDisplay();
     void ReconcileCharacterPartComponents(const FMtoUCharacterComposition& Composition);
     void DestroyCharacterPartComponent(UMtoUCharacterPartComponent& Component);
@@ -402,6 +403,22 @@ private:
      */
     UPROPERTY(Transient)
     TArray<TObjectPtr<UMtoUCharacterPartComponent>> CharacterPartComponents;
+
+    /** One enabled part of the composition this actor last applied. */
+    struct FMtoUAppliedPart
+    {
+        FGuid PartId;
+        TWeakObjectPtr<USkeletalMesh> Mesh;
+    };
+
+    /**
+     * The enabled composition this actor last applied, in canonical part
+     * order. It is deliberately not a property: an editor undo or redo
+     * restores the actor's properties, its part components included, together
+     * with the Binding, so only a record outside the transaction buffer still
+     * tells the restored composition apart from the one a session negotiated.
+     */
+    TArray<FMtoUAppliedPart> AppliedParts;
 
     FString CharacterPartDiagnostics;
     FString CharacterPartSummary;
