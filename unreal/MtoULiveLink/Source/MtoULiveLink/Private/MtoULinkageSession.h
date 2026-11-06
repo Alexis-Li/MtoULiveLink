@@ -220,11 +220,6 @@ public:
     int32 ConsumeSessionEndRequest();
 
 private:
-    // Test seam: the corpus runner records an application against an issue that
-    // is still open, a state the session leaves only through its own
-    // confirmation (see TakeNextStagedGroup).
-    friend class FMtoULinkageSessionTestAccess;
-
     static double Now();
     // Bounded cadence of the camera/time pump: the editor is asked at most
     // once per interval and never more than one target is in flight.

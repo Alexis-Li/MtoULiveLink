@@ -6340,12 +6340,12 @@
       ],
       "expected": {
         "accepted": false,
-        "error_code": "INVALID_MESSAGE",
+        "error_code": "EVAL_STALE",
         "close": false,
         "keywords": [
-          "sample_serial"
+          "eval"
         ],
-        "kind": "failure"
+        "kind": "scheduling"
       }
     },
     {

@@ -103,8 +103,8 @@ backpressure instead of growing. There is no fixed bone or curve count.
 | `sample_serial` | Maya | increments per new sample of one `eval_id`; a paused edit produces a new sample |
 | `frame_serial` | Unreal | counts publications of one connection, including heartbeats |
 
-A message naming an old session, set, space, mode, cancelled target or repeated
-publication is refused with its specific code and changes no host state.
+A message naming an old session, set, space, mode or cancelled target is refused
+with its specific code and changes no host state.
 
 ## Connection and negotiation
 
@@ -371,7 +371,9 @@ One group is published at a time.
   before any display commits it; such a group is never confirmed. An ordinary
   camera move along continuous time does not cancel the target.
 - A `group` whose `eval_id` is no longer current is refused with `EVAL_STALE`
-  and changes nothing; the last complete display stays.
+  and changes nothing; the last complete display stays. A second publication of
+  a sample whose application was already confirmed is such a group, because the
+  confirmation ends the issue.
 - After the last desired target, Unreal must observe an applied group within
   2 s and only then report 已同步; otherwise it reports 未收敛 with the last
   target and the elapsed time.

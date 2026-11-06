@@ -897,20 +897,6 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 ESendErrorKind::Scheduling, &Group);
             continue;
         }
-        if (Group.EvalId == LastAppliedEvalId && Group.SampleSerial <= LastAppliedSampleSerial)
-        {
-            // A repeated publication of an already applied sample is refused.
-            SendError(
-                TEXT("INVALID_MESSAGE"),
-                TEXT("A group repeated a publication that was already applied."),
-                FString::Printf(
-                    TEXT("group sample_serial %d, applied sample_serial %d for eval %s"),
-                    Group.SampleSerial,
-                    LastAppliedSampleSerial,
-                    *Group.EvalId),
-                ESendErrorKind::Failure, &Group);
-            continue;
-        }
         OutMessage = MoveTemp(Entry.Message);
         return true;
     }

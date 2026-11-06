@@ -179,24 +179,6 @@ public:
     }
 };
 
-/**
- * Test seam for the linkage session. The session closes the issue of an
- * evaluation when its application is confirmed, so a repeat of that sample
- * normally meets EVAL_STALE; the guard against a repeated publication of the
- * evaluation that is still issued is judged by recording the application
- * while the issue stays open.
- */
-class FMtoULinkageSessionTestAccess
-{
-public:
-    static void RecordAppliedWhileIssued(FMtoULinkageSession& Session, int32 SampleSerial)
-    {
-        check(Session.Issued.IsSet());
-        Session.LastAppliedEvalId = Session.Issued->EvalId;
-        Session.LastAppliedSampleSerial = SampleSerial;
-    }
-};
-
 // The two control budgets of the linkage transport: the replies waiting for
 // the worker and the intake messages waiting for the game thread.
 class FMtoUControlBudgetTestAccess
@@ -1056,7 +1038,8 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
 
     int32 ApplicableCount = 0;
     int32 GroupCaseCount = 0;
-    int32 GroupJudgedCount = 0;
+    int32 GroupSessionJudgedCount = 0;
+    int32 GroupParseRefusedCount = 0;
     const TArray<TSharedPtr<FJsonValue>>& Cases = Corpus->GetArrayField(TEXT("cases"));
     // The corpus's own accepted group case declares the current linkage
     // identity; the identity cases that follow are judged against it.
@@ -1546,11 +1529,13 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             FMtoUPoseGroupMessage Judged;
             TSharedPtr<FJsonObject> Refusal;
             FMtoUPoseGroupMessage First;
+            bool bParseRefused = false;
             if (!FMtoUProtocol::ParseGroup(PayloadBytes[0], PayloadBytes[0].Num(), First, Error, &ErrorCode))
             {
                 // The parser refused the message before any session saw it:
                 // the worker answers with the default kind and no group
                 // identity, because there is no parsed group to name.
+                bParseRefused = true;
                 const TArray<uint8> Wire = FMtoUProtocol::EncodeError(ErrorCode, Error);
                 FMtoUFrameDecoder Decoder;
                 Decoder.Append(Wire.GetData(), Wire.Num());
@@ -1606,9 +1591,12 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                     bAccepted = Harness.Session.TakeNextStagedGroup(Taken);
                     if (bAccepted && Index + 1 < PayloadBytes.Num())
                     {
-                        // An earlier publication of the case was applied.
-                        FMtoULinkageSessionTestAccess::RecordAppliedWhileIssued(
-                            Harness.Session, Taken.SampleSerial);
+                        // An earlier publication of the case was applied: the
+                        // display confirms it, which closes the issue, so a
+                        // repeat of that sample meets a cancelled target.
+                        Harness.Session.NoteGroupApplied(Taken.EvalId, Taken.SampleSerial, true,
+                            Taken.UeDisplayFrame, TArray<FMtoUAppliedComponent>(),
+                            FString(), FPlatformTime::Seconds());
                         continue;
                     }
                     if (bAccepted)
@@ -1636,7 +1624,7 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                     break;
                 }
             }
-            ++GroupJudgedCount;
+            ++(bParseRefused ? GroupParseRefusedCount : GroupSessionJudgedCount);
             TestEqual(*FString::Printf(TEXT("%s acceptance"), *Id), bAccepted, bExpectedAccepted);
             // Every case of the group family is a per-message rejection: the
             // session answers with its stable code and keeps the connection
@@ -2511,12 +2499,13 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
         }
     }
     TestTrue(TEXT("Unreal exercised canonical conformance cases"), ApplicableCount > 0);
-    // A group case is judged by a session or not run at all; none is skipped.
-    TestEqual(TEXT("every group case was judged by a linkage session"),
-        GroupJudgedCount, GroupCaseCount);
+    // A group case is judged by a session or refused by the parser before any
+    // session sees it; none is skipped.
+    TestEqual(TEXT("every group case was judged by a session or refused by the parser"),
+        GroupSessionJudgedCount + GroupParseRefusedCount, GroupCaseCount);
     AddInfo(FString::Printf(
-        TEXT("Conformance corpus: %d cases apply to Unreal, %d group cases were judged by a linkage session."),
-        ApplicableCount, GroupJudgedCount));
+        TEXT("Conformance corpus: %d cases apply to Unreal; %d group cases: %d judged by a linkage session, %d refused at the parse layer."),
+        ApplicableCount, GroupCaseCount, GroupSessionJudgedCount, GroupParseRefusedCount));
     return true;
 }
 
@@ -6405,19 +6394,18 @@ bool FMtoUCacheSessionReconnectTest::RunTest(const FString& Parameters)
                 SubjectKey, ULiveLinkAnimationRole::StaticClass(), StaleFrame);
         });
     };
-    // Live Link evaluates a subject's first cached pose only once the ready
-    // subject has been ticked for a while, as the delayed-isolation windows
-    // below do before the second session plays; the first pose of a play that
-    // starts at once would otherwise pass unobserved.
-    auto WarmSubject = [&]()
+    // Live Link keeps the first cached pose of a play only once the ready
+    // subject is registered with the client, which its tick does after the
+    // static data arrives; a play that starts before that shows the poll loop
+    // only the second pose. The wait is on that state, not on a duration.
+    auto WarmSubject = [&]() -> bool
     {
-        const double Deadline = FPlatformTime::Seconds() + 0.15;
-        while (FPlatformTime::Seconds() < Deadline)
+        return PollUntil([&]()
         {
             Source->Update();
             LiveLinkClient.ForceTick();
-            FPlatformProcess::Sleep(0.001f);
-        }
+            return LiveLinkClient.GetSubjectRole_AnyThread(SubjectKey) != nullptr;
+        }, 5.0);
     };
     TFunction<void()> AfterFirstApplied;
     auto PlayToCompletion = [&](FSocket* Client, int32 PlayId, const FVector& FirstRoot,
@@ -6493,7 +6481,7 @@ bool FMtoUCacheSessionReconnectTest::RunTest(const FString& Parameters)
         && SendText(Primary, TEXT("{\"type\":\"cache_end\"}")));
     TestTrue(TEXT("session A upload produces identity-matched ready"),
         ReceiveText(Primary).Contains(TEXT("\"type\":\"cache_ready\"")));
-    WarmSubject();
+    TestTrue(TEXT("the ready subject is registered before session A plays"), WarmSubject());
     TestTrue(TEXT("session A play is started from the actor"),
         Source->StartActorCachedPlayback(*Actor));
     {
@@ -6619,7 +6607,7 @@ bool FMtoUCacheSessionReconnectTest::RunTest(const FString& Parameters)
             ReadyText.Contains(TEXT("\"type\":\"cache_ready\""))
             && ReadyText.Contains(TEXT("\"upload_id\":1")));
     }
-    WarmSubject();
+    TestTrue(TEXT("the ready subject is registered before the third session plays"), WarmSubject());
     TestTrue(TEXT("third play is started from the actor"),
         Source->StartActorCachedPlayback(*Actor));
     {
