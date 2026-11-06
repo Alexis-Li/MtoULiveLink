@@ -29,6 +29,7 @@
 #include "HAL/ThreadSafeCounter.h"
 #include "ILiveLinkClient.h"
 #include "IPAddress.h"
+#include "Interfaces/IPluginManager.h"
 #include "LiveLinkInstance.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
@@ -320,6 +321,17 @@ FString FromUtf8(const TArray<uint8>& Bytes)
 {
     FUTF8ToTCHAR Converted(reinterpret_cast<const ANSICHAR*>(Bytes.GetData()), Bytes.Num());
     return FString::ConstructFromPtrSize(Converted.Get(), Converted.Length());
+}
+
+/**
+ * The plugin version the engine loaded from the descriptor, read here on its
+ * own so that a version a message names is compared with the descriptor and
+ * not with the module's own copy of it.
+ */
+FString LoadedPluginVersionName()
+{
+    const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("MtoULiveLink"));
+    return Plugin.IsValid() ? Plugin->GetDescriptor().VersionName : FString();
 }
 
 TArray<uint8> Prefix(uint64 Length)
@@ -1068,6 +1080,39 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
         }
     }
     TMap<FString, int32> GroupAppliedSamples;
+    // A refused protocol version is answered with an error that names this
+    // side's release: the protocol it implements and the plugin version the
+    // engine loaded from the descriptor. Every init, hello and cache_begin case
+    // that expects PROTOCOL_VERSION_MISMATCH has the error its refusal sends
+    // encoded and judged here; a counter shows that none was only executed.
+    const FString DescriptorVersion = LoadedPluginVersionName();
+    TestTrue(TEXT("the loaded plugin has a descriptor version"), !DescriptorVersion.IsEmpty());
+    int32 VersionRefusalCases = 0;
+    int32 VersionRefusalsJudged = 0;
+    const auto JudgeVersionRefusal = [&](const FString& Id, const FString& ErrorCode,
+        const FString& Error)
+    {
+        ++VersionRefusalsJudged;
+        TestEqual(*FString::Printf(TEXT("%s refusal code"), *Id),
+            ErrorCode, FString(TEXT("PROTOCOL_VERSION_MISMATCH")));
+        const TArray<uint8> PacketBytes = FMtoUProtocol::EncodeError(ErrorCode, Error);
+        FMtoUFrameDecoder Decoder;
+        TArray<uint8> Reply;
+        FString DecodeError;
+        Decoder.Append(PacketBytes.GetData(), PacketBytes.Num());
+        TSharedPtr<FJsonObject> Encoded;
+        if (!TestTrue(*FString::Printf(TEXT("%s refusal is one JSON error"), *Id),
+                Decoder.Pop(Reply, DecodeError) == EMtoUDecodeResult::Message
+                && JsonObjectFromBytes(Reply, Encoded) && Encoded.IsValid()))
+        {
+            return;
+        }
+        TestEqual(*FString::Printf(TEXT("%s refusal names the protocol it implements"), *Id),
+            static_cast<int32>(Encoded->GetNumberField(TEXT("protocol_version"))),
+            static_cast<int32>(MTOU_PROTOCOL_VERSION));
+        TestEqual(*FString::Printf(TEXT("%s refusal names the loaded plugin version"), *Id),
+            Encoded->GetStringField(TEXT("plugin_version")), DescriptorVersion);
+    };
     for (const TSharedPtr<FJsonValue>& CaseValue : Cases)
     {
         const TSharedPtr<FJsonObject> Case = CaseValue->AsObject();
@@ -1088,6 +1133,14 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
         const bool bExpectedClose = Expected->GetBoolField(TEXT("close"));
         const TArray<TSharedPtr<FJsonValue>>* Keywords = nullptr;
         Expected->TryGetArrayField(TEXT("keywords"), Keywords);
+        FString ExpectedErrorCode;
+        Expected->TryGetStringField(TEXT("error_code"), ExpectedErrorCode);
+        if (ExpectedErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH")
+            && (Operation == TEXT("init") || Operation == TEXT("hello")
+                || Operation == TEXT("cache_begin")))
+        {
+            ++VersionRefusalCases;
+        }
 
         if (Operation == TEXT("reference_result"))
         {
@@ -1423,6 +1476,10 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                     TestTrue(*FString::Printf(TEXT("%s diagnostic keywords"), *Id),
                         ContainsKeywords(Error, *Keywords));
                 }
+                if (ErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                {
+                    JudgeVersionRefusal(Id, ErrorCode, Error);
+                }
             }
             continue;
         }
@@ -1444,7 +1501,19 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             const bool bAccepted = FMtoUProtocol::ParseHello(Bytes, Message, Error, &ErrorCode);
             TestEqual(*FString::Printf(TEXT("%s acceptance"), *Id), bAccepted, bExpectedAccepted);
             TestEqual(*FString::Printf(TEXT("%s close classification"), *Id), !bAccepted, bExpectedClose);
-            if (!bAccepted)
+            if (bAccepted)
+            {
+                // The Maya release the greeting names, when it names one.
+                FString PayloadPluginVersion;
+                const TSharedPtr<FJsonObject>* GreetingObject = nullptr;
+                if (Case->TryGetObjectField(TEXT("payload"), GreetingObject))
+                {
+                    (*GreetingObject)->TryGetStringField(TEXT("plugin_version"), PayloadPluginVersion);
+                }
+                TestEqual(*FString::Printf(TEXT("%s reads the plugin version"), *Id),
+                    Message.PluginVersion, PayloadPluginVersion);
+            }
+            else
             {
                 TestEqual(*FString::Printf(TEXT("%s stable error code"), *Id),
                     ErrorCode, Expected->GetStringField(TEXT("error_code")));
@@ -1452,6 +1521,10 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                 {
                     TestTrue(*FString::Printf(TEXT("%s diagnostic keywords"), *Id),
                         ContainsKeywords(Error, *Keywords));
+                }
+                if (ErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                {
+                    JudgeVersionRefusal(Id, ErrorCode, Error);
                 }
             }
             continue;
@@ -2494,11 +2567,19 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                     TestTrue(*FString::Printf(TEXT("%s diagnostic keywords"), *Id),
                         ContainsKeywords(Error, *Keywords));
                 }
+                if (Operation == TEXT("cache_begin") && ErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                {
+                    JudgeVersionRefusal(Id, ErrorCode, Error);
+                }
             }
             continue;
         }
     }
     TestTrue(TEXT("Unreal exercised canonical conformance cases"), ApplicableCount > 0);
+    TestTrue(TEXT("the corpus refuses a protocol version in init, hello and cache_begin"),
+        VersionRefusalCases > 0);
+    TestEqual(TEXT("every protocol version refusal had its error judged"),
+        VersionRefusalsJudged, VersionRefusalCases);
     // A group case is judged by a session or refused by the parser before any
     // session sees it; none is skipped.
     TestEqual(TEXT("every group case was judged by a session or refused by the parser"),
@@ -12898,6 +12979,16 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
     const uint16 Port = static_cast<uint16>(ReservedAddress->GetPort());
     DestroySocket(*SocketSubsystem, Reservation);
 
+    // Each refusal of a protocol version logs one warning naming both releases:
+    // the newer Maya's greeting, the 1.0.0 greeting and the v9 init. A release
+    // the peer did not provide reads "unknown".
+    AddExpectedMessagePlain(TEXT("Maya: plugin 1.1.0, protocol 13."), ELogVerbosity::Warning,
+        EAutomationExpectedMessageFlags::Contains, 1);
+    AddExpectedMessagePlain(TEXT("Maya: plugin unknown, protocol 11."), ELogVerbosity::Warning,
+        EAutomationExpectedMessageFlags::Contains, 1);
+    AddExpectedMessagePlain(TEXT("Maya: plugin unknown, protocol 9."), ELogVerbosity::Warning,
+        EAutomationExpectedMessageFlags::Contains, 1);
+
     // No actor is placed, so any message that reaches a target discovery step
     // would answer NO_BINDING_ACTOR: receiving the version code instead proves
     // the refusal happened before the target was discovered.
@@ -12936,13 +13027,69 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
         DestroySocket(*SocketSubsystem, Client);
     };
 
-    // A v9 greeting is refused before any target, writer or handoff exists.
-    ExpectVersionRefusal(Packet(
-        TEXT("{\"type\":\"hello\",\"version\":9,\"host\":\"maya\","
-             "\"maya_version\":\"2024\",\"scene\":{\"linear_unit\":\"cm\","
-             "\"unit_scale_cm\":1.0,\"fps\":24.0},\"capabilities\":{}}")));
+    // What Maya opens a connection with: its greeting and every init in one
+    // packet. The refusal has to come from the greeting alone and has to be
+    // the worker's own: it arrives while the game thread runs its updates, and
+    // nothing follows it (no answer to the init, no NO_BINDING_ACTOR, which a
+    // discovered target would have produced), the connection is closed.
+    const auto ExpectRefusalBeforeDiscovery = [&](const FString& Greeting, const FString& Init)
+    {
+        FSocket* Client = ConnectLoopback(*SocketSubsystem, Port);
+        TestNotNull(TEXT("mismatched client connects"), Client);
+        if (!Client)
+        {
+            return;
+        }
+        TArray<uint8> Opening = Packet(Greeting);
+        Opening.Append(Packet(Init));
+        TestTrue(TEXT("the opening packet is sent"),
+            SendBytes(*Client, Opening.GetData(), Opening.Num()));
+        FMtoULinkageReplyReader Reader;
+        const auto Pump = [&]() { Source->Update(); };
+        TArray<uint8> Payload;
+        TSharedPtr<FJsonObject> Refusal;
+        if (TestTrue(TEXT("the greeting is answered with an error"),
+                Reader.Next(*Client, TEXT("error"), Payload, Pump))
+            && TestTrue(TEXT("the refusal is JSON"),
+                JsonObjectFromBytes(Payload, Refusal) && Refusal.IsValid()))
+        {
+            TestEqual(TEXT("the refusal carries the frozen code"),
+                Refusal->GetStringField(TEXT("code")), FString(TEXT("PROTOCOL_VERSION_MISMATCH")));
+            TestEqual(TEXT("the refusal is a failure"),
+                Refusal->GetStringField(TEXT("kind")), FString(TEXT("failure")));
+            TestEqual(TEXT("the refusal names the protocol Unreal implements"),
+                static_cast<int32>(Refusal->GetNumberField(TEXT("protocol_version"))),
+                static_cast<int32>(MTOU_PROTOCOL_VERSION));
+            TestEqual(TEXT("the refusal names the loaded plugin version"),
+                Refusal->GetStringField(TEXT("plugin_version")), LoadedPluginVersionName());
+        }
+        // Drain whatever else arrives while the game thread updates.
+        TArray<uint8> Unexpected;
+        Reader.Next(*Client, TEXT("nothing"), Unexpected, Pump, 0.3);
+        TestEqual(TEXT("nothing follows the refusal"), Reader.OtherTypes.Num(), 0);
+        TestTrue(TEXT("the connection is closed"), WaitForClose(*Client));
+        DestroySocket(*SocketSubsystem, Client);
+    };
+
+    // A greeting of a newer Maya release names it: protocol 13, plugin 1.1.0.
+    ExpectRefusalBeforeDiscovery(
+        TEXT("{\"type\":\"hello\",\"version\":13,\"host\":\"maya\",\"maya_version\":\"2024\","
+             "\"plugin_version\":\"1.1.0\",\"scene\":{\"linear_unit\":\"cm\","
+             "\"unit_scale_cm\":1.0,\"fps\":24.0},\"capabilities\":{}}"),
+        TEXT("{\"type\":\"init\",\"version\":13,\"revision\":9,\"workflow\":\"animation\","
+             "\"blendshapes_enabled\":true,\"bones\":[[\"root\",-1,"
+             "[0,0,0,0,0,0,1,1,1,1]]],\"curves\":[]}"));
+    // The 1.0.0 release greets with protocol 11 and no plugin version.
+    ExpectRefusalBeforeDiscovery(
+        TEXT("{\"type\":\"hello\",\"version\":11,\"host\":\"maya\",\"maya_version\":\"2024\","
+             "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1.0,\"fps\":24.0},"
+             "\"capabilities\":{}}"),
+        TEXT("{\"type\":\"init\",\"version\":11,\"revision\":9,\"workflow\":\"animation\","
+             "\"blendshapes_enabled\":true,\"bones\":[[\"root\",-1,"
+             "[0,0,0,0,0,0,1,1,1,1]]],\"curves\":[]}"));
     // The v9 message set kept as regression: a v9 init, frame and cache_begin
-    // against a v10 adapter all report the same code.
+    // against the current adapter. The init is refused with the version code;
+    // a frame or cache_begin before any init is refused as invalid.
     ExpectVersionRefusal(Packet(
         TEXT("{\"type\":\"init\",\"version\":9,\"revision\":9,\"workflow\":\"animation\","
              "\"blendshapes_enabled\":true,\"bones\":[[\"root\",-1,"
@@ -12954,12 +13101,17 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
              "\"start_frame\":1,\"end_frame\":2,\"frame_count\":2,\"payload_size\":64}")));
 
     // A mismatched pair never partially succeeds: the listener returns to its
-    // greeting state and a matching v10 greeting is answered normally.
+    // greeting state and a matching v10 greeting is answered normally, also
+    // when it names its release.
     FSocket* Client = ConnectLoopback(*SocketSubsystem, Port);
     TestNotNull(TEXT("v10 client connects"), Client);
     if (Client)
     {
-        const TArray<uint8> Hello = LinkageHelloPacket();
+        const TArray<uint8> Hello = Packet(
+            TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD ",\"host\":\"maya\","
+                 "\"maya_version\":\"2024\",\"plugin_version\":\"1.1.0\","
+                 "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1.0,\"fps\":24.0},"
+                 "\"capabilities\":{\"linkage\":true,\"reference\":true,\"cache\":true,\"model\":true}}"));
         TestTrue(TEXT("the v10 greeting is sent"),
             SendBytes(*Client, Hello.GetData(), Hello.Num()));
         TArray<uint8> Payload;

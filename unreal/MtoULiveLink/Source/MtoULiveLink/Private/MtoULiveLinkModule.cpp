@@ -1,11 +1,13 @@
 // Copyright (C) 2026 Alexis-Li
 // SPDX-License-Identifier: GPL-3.0-only
 // Licensed under the GPL with additional terms; see NOTICE.
+#include "MtoULiveLinkProtocol.h"
 #include "MtoULiveLinkSource.h"
 
 #include "Engine/World.h"
 #include "Features/IModularFeatures.h"
 #include "ILiveLinkClient.h"
+#include "Interfaces/IPluginManager.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 #include "Modules/ModuleManager.h"
@@ -18,6 +20,15 @@ public:
         if (Source)
         {
             return;
+        }
+        // The release the engine loaded from the plugin descriptor. It is read
+        // here, on the game thread and before the Source exists, because the
+        // Source starts its network worker in its constructor and that worker
+        // only reads the value; a plugin the manager does not know leaves it
+        // empty, and no message then names a release.
+        if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("MtoULiveLink")))
+        {
+            FMtoUProtocol::SetPluginVersionName(Plugin->GetDescriptor().VersionName);
         }
         if (!ensureMsgf(
                 FModuleManager::Get().LoadModule(TEXT("LiveLink")),

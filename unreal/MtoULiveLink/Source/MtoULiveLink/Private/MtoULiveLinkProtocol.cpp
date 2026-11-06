@@ -15,6 +15,9 @@
 
 namespace
 {
+// The release of this plugin; see FMtoUProtocol::SetPluginVersionName.
+FString GPluginVersionName;
+
 // Absolute determinant tolerances reject valid small-scale rigs (for example
 // pupil joints at 1e-12). Use the engine's checked inverse, bypassing Inverse()'s
 // nearly-zero-axis identity fallback, and reject non-finite results explicitly.
@@ -155,6 +158,15 @@ bool GetOptionalIdentityInt(
         return true;
     }
     return GetIdentityInt(Object, Name, OutValue, OutError);
+}
+
+bool GetOptionalString(
+    const TSharedPtr<FJsonObject>& Object,
+    const TCHAR* Name,
+    FString& OutValue,
+    FString& OutError)
+{
+    return !Object->HasField(Name) || GetStringField(Object, Name, OutValue, OutError);
 }
 
 bool GetOptionalObject(
@@ -376,6 +388,16 @@ EMtoUDecodeResult FMtoUFrameDecoder::Pop(TArray<uint8>& OutPayload, FString& Out
     return EMtoUDecodeResult::Message;
 }
 
+void FMtoUProtocol::SetPluginVersionName(const FString& InPluginVersionName)
+{
+    GPluginVersionName = InPluginVersionName;
+}
+
+const FString& FMtoUProtocol::PluginVersionName()
+{
+    return GPluginVersionName;
+}
+
 bool FMtoUProtocol::ParseInit(
     const TArray<uint8>& Payload,
     FMtoUInitMessage& OutMessage,
@@ -409,6 +431,7 @@ bool FMtoUProtocol::ParseInit(
         OutError = TEXT("Field 'version' must be an integer JSON number.");
         return false;
     }
+    OutMessage.Version = MessageVersion;
     if (MessageVersion != FMtoUProtocol::Version)
     {
         OutError = FString::Printf(
@@ -790,6 +813,14 @@ bool FMtoUProtocol::ParseHello(
     }
     if (OutMessage.Version != FMtoUProtocol::Version)
     {
+        // The release is read for the log only, and only when it is a string:
+        // a greeting of another version is refused with the version code
+        // whatever else it holds.
+        const TSharedPtr<FJsonValue> PluginVersion = Object->TryGetField(TEXT("plugin_version"));
+        if (PluginVersion.IsValid() && PluginVersion->Type == EJson::String)
+        {
+            PluginVersion->TryGetString(OutMessage.PluginVersion);
+        }
         OutError = FString::Printf(
             TEXT("Unsupported protocol version; expected %d."), FMtoUProtocol::Version);
         if (OutErrorCode)
@@ -800,7 +831,8 @@ bool FMtoUProtocol::ParseHello(
     }
 
     if (!GetStringField(Object, TEXT("host"), OutMessage.Host, OutError)
-        || !GetStringField(Object, TEXT("maya_version"), OutMessage.MayaVersion, OutError))
+        || !GetStringField(Object, TEXT("maya_version"), OutMessage.MayaVersion, OutError)
+        || !GetOptionalString(Object, TEXT("plugin_version"), OutMessage.PluginVersion, OutError))
     {
         return false;
     }
@@ -2322,6 +2354,17 @@ TArray<uint8> FMtoUProtocol::EncodeError(
     Object->SetStringField(TEXT("message"), Message);
     Object->SetStringField(TEXT("details"), Details.IsEmpty() ? Message : Details);
     Object->SetStringField(TEXT("kind"), ErrorKindName(Kind));
+    // A refused protocol version names this side's release, so Maya can show
+    // both. The plugin version is left out when the descriptor was not read,
+    // never replaced by a constant.
+    if (Code == TEXT("PROTOCOL_VERSION_MISMATCH"))
+    {
+        Object->SetNumberField(TEXT("protocol_version"), Version);
+        if (!GPluginVersionName.IsEmpty())
+        {
+            Object->SetStringField(TEXT("plugin_version"), GPluginVersionName);
+        }
+    }
     // An error that refuses a parsed group repeats the group's identity; Maya
     // frees the issued slot only when both name the sample it issued.
     if (!EvalId.IsEmpty() && SampleSerial != INDEX_NONE)

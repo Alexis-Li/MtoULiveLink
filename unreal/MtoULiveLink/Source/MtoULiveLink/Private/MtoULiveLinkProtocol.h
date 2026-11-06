@@ -54,6 +54,9 @@ struct FMtoUInitMessage
     // The ordered object ids of the set this connection negotiates,
     // primary first; every init of the set repeats the same list.
     TArray<FString> SetObjects;
+    // The protocol version the message declares. It is set before the version
+    // check, so a refused message still names it for the log.
+    int32 Version = 0;
 };
 
 /** The stable object ids of a set: the primary character and the second object. */
@@ -69,6 +72,10 @@ struct FMtoUHelloMessage
     int32 Version = 0;
     FString Host;
     FString MayaVersion;
+    // The release of the Maya component, when it names one. It only helps to
+    // name both releases when a protocol version is refused; empty when the
+    // greeting carries none.
+    FString PluginVersion;
     FString LinearUnit;
     double UnitScaleCm = 0.0;
     double Fps = 0.0;
@@ -270,6 +277,16 @@ public:
     static constexpr int64 MaxQueuedCacheFrames = 512;
     static constexpr int64 MaxQueuedCacheBytes = 64ll * 1024ll * 1024ll;
 
+    /**
+     * The release of this plugin as the engine loaded its descriptor
+     * (`VersionName`). The module sets it once on the game thread, before the
+     * source's listener thread exists; every reader afterwards, the network
+     * worker included, only reads it. Empty when the descriptor is not
+     * available, and then no message names a release.
+     */
+    static void SetPluginVersionName(const FString& InPluginVersionName);
+    static const FString& PluginVersionName();
+
     static bool ParseInit(
         const TArray<uint8>& Payload,
         FMtoUInitMessage& OutMessage,
@@ -277,7 +294,10 @@ public:
         FString* OutErrorCode = nullptr);
     // The connection greeting. A differing version is refused with
     // PROTOCOL_VERSION_MISMATCH before any target, writer or handoff is
-    // touched, because the greeting is the first message of a connection.
+    // touched, because the greeting is the first message of a connection. The
+    // check comes first: the optional `plugin_version` is validated only for
+    // a greeting of this version, and read (when it is a string) only to name
+    // the release in the log of a refused one.
     static bool ParseHello(
         const TArray<uint8>& Payload,
         FMtoUHelloMessage& OutMessage,
@@ -461,6 +481,9 @@ public:
      * Every error names its `kind` (failure unless the caller says otherwise).
      * An error that refuses a parsed group repeats that group's `eval_id` and
      * `sample_serial`, so Maya frees the slot of exactly that sample.
+     * PROTOCOL_VERSION_MISMATCH also names this side's release: its
+     * `protocol_version`, and its `plugin_version` when the plugin's version is
+     * known (see PluginVersionName).
      */
     static TArray<uint8> EncodeError(
         const FString& Code,
