@@ -51,7 +51,7 @@ struct FMtoUInitMessage
     FString ObjectId;
     int32 SetRevision = 0;
     int32 SpaceRevision = 0;
-    // v11: the ordered object ids of the set this connection negotiates,
+    // The ordered object ids of the set this connection negotiates,
     // primary first; every init of the set repeats the same list.
     TArray<FString> SetObjects;
 };
@@ -189,7 +189,7 @@ struct FMtoUFrameMessage
 {
     TArray<FMtoUTransform> Transforms;
     TArray<double> Curves;
-    // v11: every other object of the set at the same Maya time; empty for a
+    // Every other object of the set at the same Maya time; empty for a
     // one-object set and for cached frames.
     TArray<FMtoUFrameObject> Objects;
 };

@@ -1957,7 +1957,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     Object.NegotiatedRevision = Message.Revision;
     if (bPrimary)
     {
-        // The v11 identity of this session: the object set, its revision and
+        // The identity of this session: the object set, its revision and
         // the common space every later group or mode message must repeat.
         NegotiatedSetRevision = Message.SetRevision;
         NegotiatedSpaceRevision = Message.SpaceRevision;

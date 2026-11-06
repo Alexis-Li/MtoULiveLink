@@ -1388,7 +1388,7 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
         Row.WholeRowContent()[Widget];
         FMtoULinkageEditor::RegisterLinkagePanelWidget(Row.WholeRowWidget.Widget);
     };
-    // Protocol v11 pairs the primary character ("character") and at most one
+    // The protocol pairs the primary character ("character") and at most one
     // second object ("secondary"); each actor of the set serves one of them,
     // so the row names the role instead of asking for an id.
     const auto PairAs = [Actor, LinkageMessage](const FString& ObjectId)

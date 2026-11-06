@@ -559,7 +559,7 @@ private:
     // Worker session ids only grow, so an older id is excluded by
     // IsCurrentSession and one field is enough.
     uint64 EndedSession = 0;
-    // v11 identity of the negotiated session: the declared object set, its
+    // Identity of the negotiated session: the declared object set, its
     // revision and the common space both adapters must match.
     TArray<FString> SetObjects;
     int32 NegotiatedSetRevision = 0;

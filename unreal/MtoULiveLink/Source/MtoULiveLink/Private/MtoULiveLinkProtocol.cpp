@@ -491,7 +491,7 @@ bool FMtoUProtocol::ParseInit(
         return false;
     }
 
-    // v11 object set: the ordered ids the connection negotiates, primary
+    // Object set: the ordered ids the connection negotiates, primary
     // first. Every init of the set names the same list and its own id in it.
     const TArray<TSharedPtr<FJsonValue>>* SetValues = nullptr;
     if (!GetArrayField(Object, TEXT("set_objects"), SetValues, OutError) || SetValues->IsEmpty())
@@ -700,7 +700,7 @@ bool FMtoUProtocol::ParseFrame(
     {
         return true;
     }
-    // v11: the other objects of a two-object set, sampled at the same Maya
+    // The other objects of a two-object set, sampled at the same Maya
     // time as the primary. A row names one object beside the primary, once.
     const TArray<TSharedPtr<FJsonValue>>* RowValues = nullptr;
     if (!GetArrayField(Object, TEXT("objects"), RowValues, OutError))
