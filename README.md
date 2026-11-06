@@ -14,10 +14,9 @@ geometry in Maya, without creating animation or preview assets.
 - Windows 64-bit
 - Autodesk Maya 2024 (current workflow); Maya 2022.4 remains supported
 - Stock Unreal Editor 5.7.4
-- Topia Engine 5.7.4 (plugin build and editor loading verified)
 - Editor use only; Play In Editor (PIE) is not supported.
 
-Compatibility with other third-party Unreal Engine 5.7 builds is not guaranteed.
+Compatibility with modified or third-party Unreal Engine 5.7 builds is not guaranteed.
 Install the Maya and Unreal components from the same release.
 
 ## Installation
@@ -50,7 +49,7 @@ earlier version, restart Maya when prompted.
 
 1. Copy `unreal/MtoULiveLink/` (or the `MtoULiveLink` folder of the Unreal
    archive) to `<Project>/Plugins/MtoULiveLink/`.
-2. Compile the Unreal project. For Topia Engine, use the instructions below.
+2. Compile the Unreal project.
 3. Enable **Live Link** and **MtoU_LiveLink**, then restart Unreal Editor.
 
 **Upgrade, rollback and removal**
@@ -68,35 +67,6 @@ End the current session first, then:
 - Remove the Maya component: delete `MtoULiveLink.mod` and any
   `MtoULiveLink` folder from the `modules` folder of the user Maya directory,
   delete the MtoU shelf button, then restart Maya.
-
-### Topia Engine 5.7.4
-
-**Recommended: double-click wizard (Windows, Chinese UI)**
-
-Close Unreal Editor and ensure the source plugin is installed at the project's
-`Plugins/MtoULiveLink` directory.
-Double-click `tools/build_mtou_topia_gui.cmd`, select the project `.uproject`, then
-the company engine's `Engine/Binaries/Win64/UnrealEditor.exe`. Check the displayed
-paths and click OK. Wait for the success message before opening the project.
-On failure, share the console error and `Build log` path with a technical teammate.
-If a compiler or SDK is missing, ask a technical teammate to configure
-it or supply a plugin already compiled for the same company engine version.
-After compilation, the tool replaces the target plugin's build outputs.
-To copy the wizard separately, keep `build_mtou_topia_gui.cmd`,
-`build_mtou_topia_gui.ps1`, and `build_mtou_topia.ps1` in the same folder.
-
-**Command-line alternative**: Close Unreal Editor. Set `TOPIA_ENGINE_ROOT` to the directory containing
-`Engine` and `ATHENA_UPROJECT` to your target `.uproject`, then run this command
-from the repository root:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/build_mtou_topia.ps1 `
-  -EngineRoot $env:TOPIA_ENGINE_ROOT `
-  -ProjectFile $env:ATHENA_UPROJECT `
-  -Apply
-```
-
-Omit `-Apply` to check the paths and preview the installation first.
 
 ## Prepare your character
 

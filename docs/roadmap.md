@@ -18,8 +18,8 @@
 - **场景参考**：UE 按显式关卡范围导出静态参考几何，Maya 校验后导入，
   与角色和相机处于同一共同空间。
 
-宿主：Windows 64 位，Maya 2024（Maya 2022.4 支持），stock UE 5.7.4 与
-Topia 5.7.4；仅编辑器内使用。线上协议见 [protocol/](../protocol/README.md)。
+宿主：Windows 64 位，Maya 2024（Maya 2022.4 支持），stock UE 5.7.4；
+仅编辑器内使用。线上协议见 [protocol/](../protocol/README.md)。
 
 ## 持续约束
 
@@ -34,8 +34,7 @@ Topia 5.7.4；仅编辑器内使用。线上协议见 [protocol/](../protocol/RE
 
 ## 已知限制
 
-- Maya 2022.4 只做过安装与语法检查，未运行交互联动验收；Topia 5.7.4 的
-  支持声明来自[插件构建与加载验收](history/topia-engine-acceptance.md)。
+- Maya 2022.4 只做过安装与语法检查，未运行交互联动验收。
 - 从含中文的路径编译 UE 插件源码会失败（MSVC 无法打开 PCH），属于工具链
   限制；已编译的插件可在此类工程中加载。
 - 宿主验收由脚本驱动真实 Maya GUI 与 UnrealEditor；交互视口逐帧观测、生产

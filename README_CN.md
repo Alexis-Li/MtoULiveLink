@@ -12,10 +12,9 @@ MtoU_LiveLink 连接同一台电脑上的 Maya 与 Unreal Editor，让你在 May
 - 64 位 Windows
 - Autodesk Maya 2024（当前工作流程）；继续支持 Maya 2022.4
 - 官方原版 Unreal Editor 5.7.4
-- Topia Engine 5.7.4（已验证插件编译与编辑器加载）
 - 仅用于编辑器，不支持 PIE（Play In Editor）。
 
-不保证兼容其他第三方修改版 Unreal Engine 5.7。Maya 与 Unreal 组件应使用同一版本。
+不保证兼容修改版或第三方 Unreal Engine 5.7。Maya 与 Unreal 组件应使用同一版本。
 
 ## 安装
 
@@ -42,7 +41,7 @@ MtoU_LiveLink 连接同一台电脑上的 Maya 与 Unreal Editor，让你在 May
 
 1. 将 `unreal/MtoULiveLink/`（或 Unreal 压缩包中的 `MtoULiveLink` 文件夹）复制到
    `<Project>/Plugins/MtoULiveLink/`。
-2. 编译 Unreal 项目。Topia Engine 用户请按下方说明操作。
+2. 编译 Unreal 项目。
 3. 启用 **Live Link** 和 **MtoU_LiveLink**，然后重启 Unreal Editor。
 
 **升级、回退与卸载**
@@ -57,32 +56,6 @@ Maya 与 Unreal 组件成对升级和回退：两端使用同一协议版本，�
   Unreal 插件构建并重新连接。
 - 卸载 Maya 组件：删除用户 Maya 目录 `modules` 中的 `MtoULiveLink.mod` 和
   `MtoULiveLink` 文件夹（如有），删除工具架上的 MtoU 按钮，然后重启 Maya。
-
-### Topia Engine 5.7.4
-
-**推荐：双击向导（Windows）**
-
-关闭 Unreal Editor，确认项目 `Plugins/MtoULiveLink` 已放入源码插件。
-双击仓库中的 `tools/build_mtou_topia_gui.cmd`，选择项目 `.uproject`，再选择公司引擎的
-`Engine/Binaries/Win64/UnrealEditor.exe`。核对显示的路径后点击“确定”，等待成功提示再打开项目。
-失败时将控制台中的错误及 `Build log` 路径交给技术同事。
-若提示缺少编译器或 SDK，请由技术同事配置，
-或提供与同一公司引擎版本匹配的已编译插件。
-编译完成后会替换目标插件的编译产物。
-如需单独复制向导，请将 `build_mtou_topia_gui.cmd`、`build_mtou_topia_gui.ps1` 和
-`build_mtou_topia.ps1` 放在同一文件夹中。
-
-**命令行方式**：关闭 Unreal Editor。将 `TOPIA_ENGINE_ROOT` 设为包含 `Engine` 的目录，
-将 `ATHENA_UPROJECT` 设为目标 `.uproject`，然后在仓库根目录运行以下命令：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/build_mtou_topia.ps1 `
-  -EngineRoot $env:TOPIA_ENGINE_ROOT `
-  -ProjectFile $env:ATHENA_UPROJECT `
-  -Apply
-```
-
-去掉 `-Apply` 可先检查路径并预览安装内容。
 
 ## 准备角色
 
