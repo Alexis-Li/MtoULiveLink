@@ -11,11 +11,13 @@ from .config import (
     CHARACTER_OBJECT_ID,
     CONTROL_MAYA,
     CONTROL_UNREAL,
+    ERROR_KINDS,
     LINKAGE_MODE,
     MAX_CACHE_FRAME_COUNT,
     MAX_CACHE_PAYLOAD_BYTES,
     MAX_MESSAGE_BYTES,
     MAX_SET_OBJECTS,
+    MODE_CONTROL,
     MODES,
     PROTOCOL_VERSION,
     SECONDARY_OBJECT_ID,
@@ -188,15 +190,31 @@ def make_hello_message(maya_version, linear_unit, unit_scale, fps,
     }
 
 
-def make_mode_message(session_id, mode_revision, mode, control, transition,
-                      detail=""):
-    """Maya's authority statement for one time-control state."""
+def validate_mode_control(mode, control):
+    """A statement names a wire mode and the one controller that mode has.
+
+    ``linkage`` is controlled by ``unreal`` and ``realtime`` by ``maya``; any
+    other mode (``cached`` included) or pairing is not a statement either host
+    can follow.
+    """
     if mode not in MODES:
         raise ValueError("mode must be one of {0}".format(", ".join(MODES)))
     if control not in (CONTROL_MAYA, CONTROL_UNREAL):
         raise ValueError("control must be 'maya' or 'unreal'")
+    if MODE_CONTROL[mode] != control:
+        raise ValueError("mode '{0}' is controlled by '{1}', not '{2}'".format(
+            mode, MODE_CONTROL[mode], control))
+
+
+def make_mode_message(session_id, mode_revision, mode, control, transition,
+                      detail=""):
+    """Maya's authority statement for one time-control state."""
+    validate_mode_control(mode, control)
     if transition not in ("ready", "failed"):
         raise ValueError("mode transition must be 'ready' or 'failed'")
+    if mode == LINKAGE_MODE and transition != "ready":
+        raise ValueError(
+            "a linkage statement is 'ready'; a failed transition is a realtime statement")
     return {
         "type": "mode",
         "session_id": _positive_int(session_id, "session id"),
@@ -301,24 +319,6 @@ def make_reference_removed_message(session_id, detail=""):
     }
 
 
-def make_reference_query_message(session_id, transfer_id, scope):
-    if not isinstance(scope, dict) or "level" not in scope:
-        raise ValueError("reference scope requires a level package name")
-    sublevels = scope.get("sublevels", [])
-    if not isinstance(sublevels, list) or any(
-            not isinstance(value, str) for value in sublevels):
-        raise ValueError("reference scope sublevels must be strings")
-    return {
-        "type": "reference_query",
-        "session_id": _positive_int(session_id, "session id"),
-        "transfer_id": str(transfer_id),
-        "scope": {
-            "level": str(scope["level"]),
-            "sublevels": [str(value) for value in sublevels],
-        },
-    }
-
-
 def _positive_int(value, label, allow_zero=False):
     number = exact_int(value)
     minimum = 0 if allow_zero else 1
@@ -340,17 +340,6 @@ def make_cache_frame_message(index, transforms, curves):
 
 def make_cache_end_message():
     return {"type": "cache_end"}
-
-
-def make_cache_play_message(play_id):
-    play_id = int(play_id)
-    if play_id < 1:
-        raise ValueError("cache play id must be a positive integer")
-    return {"type": "cache_play", "play_id": play_id}
-
-
-def make_cache_stop_message():
-    return {"type": "cache_stop"}
 
 
 def make_cache_clear_message(clear_id):
@@ -547,11 +536,6 @@ def validate_reply(reply):
             "space_revision": (int, float),
             "counts": dict,
         },
-        "reference_query": {
-            "session_id": (int, float),
-            "transfer_id": str,
-            "scope": dict,
-        },
     }
     # ``source_frame`` is present only once the attempt has applied a pose; a
     # pause or resume before the first frame omits it instead of inventing a
@@ -562,6 +546,10 @@ def validate_reply(reply):
         "camera_time": {"cut": dict},
         "applied": {"display_frame": (int, float)},
         "hello_ack": {"detail": str},
+        # ``kind`` may be absent (a peer of another version answers
+        # PROTOCOL_VERSION_MISMATCH without one) and then reads as a failure;
+        # ``eval_id`` and ``sample_serial`` identify the group an error refused.
+        "error": {"kind": str, "eval_id": str, "sample_serial": (int, float)},
     }
     fields = required.get(reply_type)
     if reply_type == "hello_ack" and exact_int(reply.get("version")) != PROTOCOL_VERSION:
@@ -616,13 +604,17 @@ def validate_reply(reply):
         space = reply["space"]
         if not isinstance(space.get("anchor"), dict):
             raise ValueError("hello_ack space field 'anchor' must be an object")
-    if reply_type in ("mode_state",) and reply["mode"] not in MODES:
+    if reply_type == "error" and "kind" in reply and reply["kind"] not in ERROR_KINDS:
         raise ValueError(
-            "protocol reply field 'mode' must be one of {0}".format(", ".join(MODES)))
-    if reply_type in ("mode_state",) and reply["control"] not in (CONTROL_MAYA, CONTROL_UNREAL):
-        raise ValueError("protocol reply field 'control' must be 'maya' or 'unreal'")
-    if reply_type == "mode_state" and reply["mode"] == LINKAGE_MODE:
-        validate_anchor(reply.get("anchor"))
+            "protocol reply field 'kind' must be one of {0}".format(
+                ", ".join(ERROR_KINDS)))
+    if reply_type == "mode_state":
+        try:
+            validate_mode_control(reply["mode"], reply["control"])
+        except ValueError as exc:
+            raise ValueError("protocol reply mode_state: {0}".format(exc))
+        if reply["mode"] == LINKAGE_MODE:
+            validate_anchor(reply.get("anchor"))
     if reply_type == "applied" and not reply["applied"]:
         if not reply["reason"]:
             raise ValueError(

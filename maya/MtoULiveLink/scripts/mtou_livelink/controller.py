@@ -14,6 +14,7 @@ from .config import (
     CONTROL_MAYA,
     CONTROL_UNREAL,
     DEFAULT_PLAYBACK_CAP,
+    ERROR_KIND_SCHEDULING,
     LINKAGE_MODE,
     MAX_REFERENCE_BYTES,
     MAX_REFERENCE_OBJECTS,
@@ -28,7 +29,7 @@ from .config import (
 )
 from .diagnostics import DIAGNOSTICS, error_reply_diagnostic, make_diagnostic
 from .legal import LEGAL_TEXT, LEGAL_TITLE
-from .linkage import LinkageError, LinkageSession, is_scheduling_conflict
+from .linkage import LinkageError, LinkageSession
 from .mayaapi import cmds, om, omui
 from .protocol import (
     exact_int,
@@ -1803,25 +1804,26 @@ class Controller(object):
     def _report_runtime_error(self, reply, holder=None):
         """Report one Unreal error that belongs to no cache operation.
 
-        Returns False when it is a refusal linkage scheduling expects, which is
+        Returns False when Unreal marked it ``kind: "scheduling"``, which is
         counted instead. The connection stays unless Unreal closes it. An error
         still in flight when Maya ended the connection is not reported.
         """
         holder = holder if holder is not None else {}
         if _stopped_by_maya(holder.get("session")):
             return False
-        code = reply.get("code") or "STREAM_INTERRUPTED"
-        linkage = self._linkage
-        if linkage is not None and (
-                code in ("EVAL_STALE", "LINKAGE_NOT_ACTIVE", "SET_REVISION_STALE")
-                or (code == "MODE_CONFLICT"
-                    and is_scheduling_conflict(reply.get("details")))):
-            # Unreal refused an answer to a target a pause, jump or camera edit
-            # cancelled, a group still in flight when linkage ended, or a group
-            # a mode change overtook (an older revision, or one that arrived
-            # during the transition); that is normal scheduling, counted, not
-            # a dialog. Every other MODE_CONFLICT is still reported.
-            linkage.note_refused(reply.get("details") or reply.get("message") or "")
+        if reply.get("kind") == ERROR_KIND_SCHEDULING:
+            # Unreal refused a group its own scheduling made obsolete: the
+            # target a pause, jump or camera edit cancelled, a group still in
+            # flight when linkage ended, or one a mode or set change overtook.
+            # That is normal scheduling, counted, never a dialog. Only the
+            # field decides: ``code`` and ``details`` do not, so every other
+            # error, whatever its code, is reported.
+            linkage = self._linkage
+            if linkage is not None:
+                linkage.note_refused(
+                    reply.get("details") or reply.get("message") or "",
+                    eval_id=reply.get("eval_id"),
+                    sample_serial=exact_int(reply.get("sample_serial")))
             return False
         diagnostic = error_reply_diagnostic(reply)
         self._last_diagnostic = diagnostic

@@ -7,7 +7,7 @@ import os
 
 __version__ = "1.0.0"
 
-PROTOCOL_VERSION = 11
+PROTOCOL_VERSION = 12
 
 WORKFLOW_ANIMATION = "animation"
 
@@ -87,6 +87,9 @@ ERROR_CLOSE_WINDOW_SECONDS = 2.0
 
 REALTIME_MODE = "realtime"
 
+# Cached Playback owns time inside the panel and the time-control lease, but it
+# is not a wire mode: the connection never names it in ``mode`` or
+# ``mode_state``.
 CACHED_MODE = "cached"
 
 # The third exclusive time-control state: Unreal drives the Level Sequence
@@ -94,13 +97,28 @@ CACHED_MODE = "cached"
 # pose groups. See protocol/README.md.
 LINKAGE_MODE = "linkage"
 
-MODES = (REALTIME_MODE, CACHED_MODE, LINKAGE_MODE)
-
 CONTROL_MAYA = "maya"
 
 CONTROL_UNREAL = "unreal"
 
-# Frozen v11 budgets. The linkage group is metered as one message, not per
+# The ``mode`` values on the wire and the one controller each has. A mode and
+# a control that do not pair up are not a statement either host can follow.
+MODE_CONTROL = {
+    REALTIME_MODE: CONTROL_MAYA,
+    LINKAGE_MODE: CONTROL_UNREAL,
+}
+
+MODES = tuple(MODE_CONTROL)
+
+# ``error.kind``: a scheduling refusal answers a group that Unreal's own
+# scheduling made obsolete; every other error is a failure.
+ERROR_KIND_SCHEDULING = "scheduling"
+
+ERROR_KIND_FAILURE = "failure"
+
+ERROR_KINDS = (ERROR_KIND_SCHEDULING, ERROR_KIND_FAILURE)
+
+# Frozen budgets. The linkage group is metered as one message, not per
 # object, so the framing ceiling is also the group ceiling.
 MAX_LINKAGE_GROUP_BYTES = MAX_MESSAGE_BYTES
 

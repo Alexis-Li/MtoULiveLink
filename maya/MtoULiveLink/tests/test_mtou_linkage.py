@@ -757,6 +757,89 @@ class LinkageProtocolTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mtou_protocol.make_leave_linkage_message(5, 1, "pause")
 
+    def test_a_mode_message_names_a_legal_mode_control_transition(self):
+        legal = (
+            (mtou_config.LINKAGE_MODE, mtou_config.CONTROL_UNREAL, "ready"),
+            (mtou_config.REALTIME_MODE, mtou_config.CONTROL_MAYA, "ready"),
+            (mtou_config.REALTIME_MODE, mtou_config.CONTROL_MAYA, "failed"),
+        )
+        for mode, control, transition in legal:
+            with self.subTest(mode=mode, control=control, transition=transition):
+                message = mtou_protocol.make_mode_message(
+                    5, 1, mode, control, transition, "detail")
+                self.assertEqual(
+                    (mode, control, transition),
+                    (message["mode"], message["control"], message["transition"]))
+        illegal = (
+            (mtou_config.REALTIME_MODE, mtou_config.CONTROL_UNREAL, "ready"),
+            (mtou_config.REALTIME_MODE, mtou_config.CONTROL_UNREAL, "failed"),
+            (mtou_config.LINKAGE_MODE, mtou_config.CONTROL_MAYA, "ready"),
+            (mtou_config.LINKAGE_MODE, mtou_config.CONTROL_MAYA, "failed"),
+            (mtou_config.LINKAGE_MODE, mtou_config.CONTROL_UNREAL, "failed"),
+            (mtou_config.CACHED_MODE, mtou_config.CONTROL_MAYA, "ready"),
+            (mtou_config.CACHED_MODE, mtou_config.CONTROL_UNREAL, "ready"),
+        )
+        for mode, control, transition in illegal:
+            with self.subTest(mode=mode, control=control, transition=transition):
+                with self.assertRaises(ValueError):
+                    mtou_protocol.make_mode_message(5, 1, mode, control, transition)
+
+    def test_the_wire_modes_exclude_cached_and_pair_with_one_control(self):
+        self.assertEqual(
+            (mtou_config.REALTIME_MODE, mtou_config.LINKAGE_MODE), mtou_config.MODES)
+        self.assertEqual(mtou_config.CONTROL_MAYA,
+                         mtou_config.MODE_CONTROL[mtou_config.REALTIME_MODE])
+        self.assertEqual(mtou_config.CONTROL_UNREAL,
+                         mtou_config.MODE_CONTROL[mtou_config.LINKAGE_MODE])
+        # The panel's cached state is internal and never a wire value.
+        self.assertNotIn(mtou_config.CACHED_MODE, mtou_config.MODES)
+
+    def test_a_mode_state_names_a_legal_mode_control_pair(self):
+        anchor = {"location_cm": [0.0, 0.0, 0.0],
+                  "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
+
+        def statement(mode, control, **extra):
+            message = {"type": "mode_state", "session_id": 1, "mode_revision": 2,
+                       "mode": mode, "control": control, "detail": ""}
+            message.update(extra)
+            return message
+
+        mtou_protocol.validate_reply(statement("realtime", "maya"))
+        mtou_protocol.validate_reply(statement("linkage", "unreal", anchor=anchor))
+        for mode, control in (("realtime", "unreal"), ("linkage", "maya"),
+                              ("cached", "maya"), ("cached", "unreal")):
+            with self.subTest(mode=mode, control=control):
+                with self.assertRaises(ValueError):
+                    mtou_protocol.validate_reply(
+                        statement(mode, control, anchor=anchor))
+
+    def test_an_error_names_its_kind_by_one_of_two_values(self):
+        base = {"type": "error", "code": "EVAL_STALE", "message": "m", "details": "d"}
+        for kind in (None, "scheduling", "failure"):
+            reply = dict(base) if kind is None else dict(base, kind=kind)
+            self.assertEqual(reply, mtou_protocol.validate_reply(reply))
+        for bad in ("fatal", "", "Scheduling", 7, True, None, ["failure"]):
+            with self.subTest(kind=bad):
+                with self.assertRaisesRegex(ValueError, "kind"):
+                    mtou_protocol.validate_reply(dict(base, kind=bad))
+        identity = dict(base, kind="scheduling", eval_id="seq@1", sample_serial=3)
+        self.assertEqual(identity, mtou_protocol.validate_reply(identity))
+        for field, value in (("eval_id", 3), ("sample_serial", "3"),
+                             ("sample_serial", 1.5), ("sample_serial", True)):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValueError):
+                    mtou_protocol.validate_reply(
+                        dict(base, kind="scheduling", **{field: value}))
+
+    def test_retired_messages_have_no_constructor_and_are_not_replies(self):
+        for name in ("make_cache_play_message", "make_cache_stop_message",
+                     "make_reference_query_message"):
+            self.assertFalse(hasattr(mtou_protocol, name), name)
+        with self.assertRaisesRegex(ValueError, "type"):
+            mtou_protocol.validate_reply({
+                "type": "reference_query", "session_id": 1, "transfer_id": "t",
+                "scope": {"level": "L"}})
+
     def test_hello_message_declares_units_and_capabilities(self):
         message = mtou_protocol.make_hello_message(
             "2024", "cm", 1.0, 24.0)

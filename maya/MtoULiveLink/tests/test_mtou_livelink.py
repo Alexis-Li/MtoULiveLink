@@ -1809,6 +1809,65 @@ class SenderLifecycleTests(unittest.TestCase):
         self.assertEqual("error", state)
         self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
 
+    def test_replies_naming_an_undefined_value_end_the_connection(self):
+        anchor = {"location_cm": [0.0, 0.0, 0.0],
+                  "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
+        undefined = {
+            "error kind": {"type": "error", "code": "EVAL_STALE", "message": "m",
+                           "details": "d", "kind": "fatal"},
+            "error kind type": {"type": "error", "code": "EVAL_STALE",
+                                "message": "m", "details": "d", "kind": 7},
+            "error eval_id type": {"type": "error", "code": "EVAL_STALE",
+                                   "message": "m", "details": "d",
+                                   "kind": "scheduling", "eval_id": 3},
+            "error sample_serial type": {
+                "type": "error", "code": "EVAL_STALE", "message": "m",
+                "details": "d", "kind": "scheduling", "sample_serial": "1"},
+            "cached mode_state": {
+                "type": "mode_state", "session_id": 1, "mode_revision": 2,
+                "mode": "cached", "control": "maya", "detail": ""},
+            "realtime under unreal": {
+                "type": "mode_state", "session_id": 1, "mode_revision": 2,
+                "mode": "realtime", "control": "unreal", "detail": ""},
+            "linkage under maya": {
+                "type": "mode_state", "session_id": 1, "mode_revision": 2,
+                "mode": "linkage", "control": "maya", "detail": "",
+                "anchor": anchor},
+            "retired reference_query": {
+                "type": "reference_query", "session_id": 1,
+                "transfer_id": "tx-1", "scope": {"level": "L_Main"}},
+        }
+        for name, message in undefined.items():
+            with self.subTest(name=name):
+                received = []
+                worker = mtou_session.SenderWorker(
+                    {"type": "init", "revision": 7},
+                    on_reply=lambda reply, received=received:
+                        received.append(reply) is None)
+                self._run_until_read(worker, self._ready_then(message))
+                state, _, _, diagnostic = worker.status()
+                self.assertEqual([], received)
+                self.assertEqual("error", state)
+                self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
+
+    def test_errors_with_and_without_a_kind_reach_the_handler(self):
+        errors = [
+            {"type": "error", "code": "EVAL_STALE", "message": "m", "details": "d"},
+            {"type": "error", "code": "EVAL_STALE", "message": "m", "details": "d",
+             "kind": "failure"},
+            {"type": "error", "code": "EVAL_STALE", "message": "m", "details": "d",
+             "kind": "scheduling", "eval_id": "seq@1", "sample_serial": 2},
+        ]
+        received = []
+        worker = mtou_session.SenderWorker(
+            {"type": "init", "revision": 7},
+            on_reply=lambda reply: received.append(reply) is None)
+        fake_socket = self._ready_then(*errors)
+        fake_socket.recv = (lambda size, recv=fake_socket.recv:
+                            recv(size) or b"\x00")
+        self._run_until_read(worker, fake_socket)
+        self.assertEqual(errors, received)
+
     def test_statements_right_after_ready_reach_the_handler_in_order(self):
         # Unreal may start linkage, offer a reference and confirm a removal the
         # moment the set is ready; the handler exists before the sender starts.
@@ -4649,7 +4708,7 @@ class ProtocolTests(unittest.TestCase):
             CORPUS["limits"]["max_reference_triangles"],
             mtou_config.MAX_REFERENCE_TRIANGLES)
         # The scheduler budget is not a corpus limit; one target in flight plus
-        # one replaceable target is the v10 scheduling contract.
+        # one replaceable target is the frozen scheduling contract.
         self.assertEqual(2, mtou_config.MAX_PENDING_LINKAGE_TARGETS)
 
     def _assert_maya_conformance_case(self, case):
@@ -4751,18 +4810,17 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(payload, actual)
             self.assertTrue(mtou_protocol.encode_message(actual))
             return
-        if operation == "cache_play":
-            payload = case["payload"]
-            actual = mtou_protocol.make_cache_play_message(payload["play_id"])
-            actual.update({key: value for key, value in payload.items()
-                           if key != "play_id"})
-            self.assertEqual(payload, actual)
-            self.assertTrue(mtou_protocol.encode_message(actual))
+        if operation == "unknown_type":
+            # A type the protocol does not define, whether it was never
+            # defined or retired, is refused whatever its fields are.
+            self.assertFalse(expected["accepted"])
+            self.assertTrue(expected["close"])
+            with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                mtou_protocol.validate_reply(case["payload"])
             return
-        if operation in ("cache_stop", "cache_clear", "cache_enter"):
+        if operation in ("cache_clear", "cache_enter"):
             payload = dict(case["payload"])
             builder = {
-                "cache_stop": mtou_protocol.make_cache_stop_message,
                 "cache_clear": mtou_protocol.make_cache_clear_message,
                 "cache_enter": mtou_protocol.make_cache_enter_message,
             }[operation]
@@ -4799,7 +4857,7 @@ class ProtocolTests(unittest.TestCase):
         if operation == "group":
             self._assert_group_case(case)
             return
-        if operation in ("reference_result", "reference_removed", "reference_query"):
+        if operation in ("reference_result", "reference_removed"):
             self._assert_reference_message_case(case)
             return
         if operation == "resource_limit":
@@ -4983,15 +5041,10 @@ class ProtocolTests(unittest.TestCase):
                     payload["session_id"], payload["transfer_id"],
                     payload["accepted"], payload["detail"], payload["counts"],
                     payload.get("container"))
-        elif case["operation"] == "reference_removed":
+        else:
             def build():
                 return mtou_protocol.make_reference_removed_message(
                     payload["session_id"], payload["detail"])
-        else:
-            def build():
-                return mtou_protocol.make_reference_query_message(
-                    payload["session_id"], payload["transfer_id"],
-                    payload["scope"])
         if expected["accepted"]:
             actual = build()
             self.assertEqual(payload, actual)

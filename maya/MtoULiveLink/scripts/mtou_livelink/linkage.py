@@ -8,7 +8,7 @@ touches Maya directly: the host adapter passed to it applies the time and
 camera, samples the objects and restores the captured state, so the state
 machine and its scheduling stay testable without a host.
 
-Scheduling follows the frozen v11 contract (protocol/README.md): one target is
+Scheduling follows the frozen contract (protocol/README.md): one target is
 being applied and one newer target may wait; an advancing desired target never
 cancels the work in flight, because Unreal shows that complete result and marks
 it as lagging instead of losing the only sample that was going to arrive.
@@ -19,7 +19,6 @@ second object is being removed no group is sent, so Unreal never receives a
 group of a set it is closing.
 """
 
-import re
 import threading
 import time
 
@@ -45,31 +44,12 @@ from .protocol import (
 )
 from .timecontrol import TimeControlRefused
 
-# Unreal refuses a pose group a mode change overtook with MODE_CONFLICT and
-# names the group's revision in ``details`` (MtoULinkageSession's staged-group
-# gate). The code alone also covers real conflicts, so only these two forms are
-# scheduling: a group that arrived during the transition, and a group of an
-# older revision. A paired upgrade guarantees both hosts share these strings,
-# as ``note_refused`` already relies on for EVAL_STALE.
-_GROUP_DURING_TRANSITION = re.compile(r"^target mode revision -?\d+$")
-_GROUP_REVISION = re.compile(r"^group mode revision (-?\d+), current (-?\d+)$")
-
-
 STALE_REFERENCE_MESSAGE = "场景参考是为目标的另一摆放导出的，不能用于当前镜头联动"
 
 
 def message_anchor(message):
     """The placement a linkage ``mode_state`` names (validated by the protocol)."""
     return message["anchor"]
-
-
-def is_scheduling_conflict(details):
-    """True when a MODE_CONFLICT answers a group that a mode change overtook."""
-    text = str(details or "").strip()
-    if _GROUP_DURING_TRANSITION.match(text):
-        return True
-    match = _GROUP_REVISION.match(text)
-    return bool(match) and int(match.group(1)) < int(match.group(2))
 
 
 class LinkageError(RuntimeError):
@@ -801,16 +781,21 @@ class LinkageSession(object):
         except Exception as exc:  # the transport may already be gone
             self._record_recovery("announce", exc)
 
-    def note_refused(self, detail=""):
-        """Count one answer Unreal refused because its target was cancelled.
+    def note_refused(self, detail="", eval_id=None, sample_serial=None):
+        """Count one answer Unreal refused as scheduling (``error.kind``).
 
-        When the refusal names the issued sample, that sample will never be
-        applied, so the issued slot is free for the newer target Unreal sent.
+        ``detail`` is only displayed. When ``eval_id`` and ``sample_serial``
+        name the issued sample, that sample will never be applied, so the
+        issued slot is free for the newer target Unreal sent; a refusal that
+        names another sample, or none, leaves the slot alone.
         """
         with self._lock:
             self._refused_count += 1
-            if self._issued is not None and detail \
-                    and "group eval {0},".format(self._issued.eval_id) in detail:
+            issued = self._issued
+            if (issued is not None and eval_id is not None
+                    and sample_serial is not None
+                    and issued.eval_id == eval_id
+                    and sample_serial == self._issued_sample_serial):
                 self._issued = None
             if detail:
                 self._detail = "已丢弃过期结果：{0}".format(detail)
