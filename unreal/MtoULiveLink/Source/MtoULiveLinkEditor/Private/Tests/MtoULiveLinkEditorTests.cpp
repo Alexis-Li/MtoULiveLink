@@ -4361,7 +4361,7 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     FSocket* AnimClient = ConnectClient();
     TestNotNull(TEXT("animation client connects"), AnimClient);
     const TArray<uint8> AnimInit = PacketFor(FString::Printf(
-        TEXT("{\"type\":\"init\",\"revision\":9,\"version\":11,\"object_id\":\"character\",\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"animation\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
+        TEXT("{\"type\":\"init\",\"revision\":9," MTOU_PROTOCOL_VERSION_FIELD ",\"object_id\":\"character\",\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"animation\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
         *BonesJson));
     TestTrue(TEXT("animation init is sent"), AnimClient && SendBytes(*AnimClient, AnimInit.GetData(), AnimInit.Num()));
     TArray<uint8> Payload;
@@ -4396,7 +4396,7 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("stale animation frame is sent before refresh"),
         AnimClient && SendBytes(*AnimClient, StaleAnimFrame.GetData(), StaleAnimFrame.Num()));
     // A real stale cached upload for the same old session, in wire order:
-    // enter, begin, one frame, end, then a play outcome request.
+    // enter, begin, one frame and end.
     const TArray<uint8> StaleAnimCacheEnter = PacketFor(TEXT("{\"type\":\"cache_enter\"}"));
     TestTrue(TEXT("stale animation cache entry is sent before refresh"),
         AnimClient && SendBytes(*AnimClient, StaleAnimCacheEnter.GetData(), StaleAnimCacheEnter.Num()));
@@ -4410,15 +4410,12 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     const TArray<uint8> StaleAnimCacheEnd = PacketFor(TEXT("{\"type\":\"cache_end\"}"));
     TestTrue(TEXT("stale animation cache end is sent before refresh"),
         AnimClient && SendBytes(*AnimClient, StaleAnimCacheEnd.GetData(), StaleAnimCacheEnd.Num()));
-    const TArray<uint8> StaleAnimCachePlay = PacketFor(TEXT("{\"type\":\"cache_play\",\"play_id\":1}"));
-    TestTrue(TEXT("stale animation cache play is sent before refresh"),
-        AnimClient && SendBytes(*AnimClient, StaleAnimCachePlay.GetData(), StaleAnimCachePlay.Num()));
     TestTrue(TEXT("worker admits the stale live frame and cached upload before refresh"),
         PollUntil([&]()
         {
             return FMtoURefreshEndsSessionTestAccess::HasPendingLiveFrame(*Source)
                 && Source->GetQueuedCacheFrameCount() == 1
-                && FMtoURefreshEndsSessionTestAccess::PendingCacheCommandCount(*Source) == 5;
+                && FMtoURefreshEndsSessionTestAccess::PendingCacheCommandCount(*Source) == 4;
         }));
     TWeakObjectPtr<USkeletalMesh> AnimReplaced = SecondMesh;
     const FMtoUPreviewReadiness AfterAnimRefresh = FMtoUPreviewPreparation::RefreshActor(*Actor);
@@ -4437,10 +4434,10 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
         FMtoURefreshEndsSessionTestAccess::IsPublishable(*Source, AnimSession));
     TestTrue(TEXT("stale items are still queued at the refresh boundary"),
         FMtoURefreshEndsSessionTestAccess::HasPendingLiveFrame(*Source)
-            && FMtoURefreshEndsSessionTestAccess::PendingCacheCommandCount(*Source) == 5);
+            && FMtoURefreshEndsSessionTestAccess::PendingCacheCommandCount(*Source) == 4);
     // Drive consumption/publication at the boundary: one Update must refuse
-    // the stale live frame, the whole cached upload, and its play outcome
-    // without publishing anything.
+    // the stale live frame and the whole cached upload without publishing
+    // anything.
     Source->Update();
     LiveLinkClient.ForceTick();
     FVector AnimHeldRoot = FVector::ZeroVector;
@@ -4520,7 +4517,7 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     FSocket* ModelClient = ConnectClient();
     TestNotNull(TEXT("model client connects"), ModelClient);
     const TArray<uint8> ModelInit = PacketFor(FString::Printf(
-        TEXT("{\"type\":\"init\",\"revision\":9,\"version\":11,\"object_id\":\"character\",\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"model\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[\"Corrective\"]}"),
+        TEXT("{\"type\":\"init\",\"revision\":9," MTOU_PROTOCOL_VERSION_FIELD ",\"object_id\":\"character\",\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"model\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[\"Corrective\"]}"),
         *BonesJson));
     TestTrue(TEXT("model init is sent"), ModelClient && SendBytes(*ModelClient, ModelInit.GetData(), ModelInit.Num()));
     Payload.Reset();
@@ -4626,9 +4623,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
         ModelClient && ReceiveOne(*ModelClient, Payload, [&]() { Source->Update(); }));
     TestTrue(TEXT("model cache Ready reply is well formed"),
         FromUtf8(Payload).Contains(TEXT("\"type\":\"cache_ready\"")));
-    const TArray<uint8> ModelCachePlay = PacketFor(TEXT("{\"type\":\"cache_play\",\"play_id\":1}"));
-    TestTrue(TEXT("model cache play is sent"),
-        ModelClient && SendBytes(*ModelClient, ModelCachePlay.GetData(), ModelCachePlay.Num()));
+    TestTrue(TEXT("model cache play is started from the actor"),
+        Source->StartActorCachedPlayback(*Actor));
     TestTrue(TEXT("model cached playback starts before refresh"),
         PollUntil([&]()
         {
@@ -5500,7 +5496,7 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
     FSocket* AnimClient = ConnectClient();
     TestNotNull(TEXT("animation client connects"), AnimClient);
     const TArray<uint8> AnimInit = PacketFor(FString::Printf(
-        TEXT("{\"type\":\"init\",\"revision\":9,\"version\":11,\"object_id\":\"character\",\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"animation\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
+        TEXT("{\"type\":\"init\",\"revision\":9," MTOU_PROTOCOL_VERSION_FIELD ",\"object_id\":\"character\",\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"animation\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
         *BonesJson));
     TestTrue(TEXT("animation init is sent"), AnimClient && SendBytes(*AnimClient, AnimInit.GetData(), AnimInit.Num()));
     TArray<uint8> Payload;
@@ -6390,7 +6386,7 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
                 *ComparisonTransformJson(State->Skeleton->GetRefBonePose()[Index]));
         }
         const FString Init = FString::Printf(
-            TEXT("{\"type\":\"init\",\"revision\":12,\"version\":11,\"object_id\":\"character\",\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"model\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[\"%s\",\"%s\",\"%s\"]}"),
+            TEXT("{\"type\":\"init\",\"revision\":12," MTOU_PROTOCOL_VERSION_FIELD ",\"object_id\":\"character\",\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],\"workflow\":\"model\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[\"%s\",\"%s\",\"%s\"]}"),
             *BonesJson, ComparisonGarmentMorph, ComparisonDriverOnlyMorph,
             ComparisonPartOnlyMorph);
         const TArray<uint8> InitBytes = ComparisonPacket(Init);
