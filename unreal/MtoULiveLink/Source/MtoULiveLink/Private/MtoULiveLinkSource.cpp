@@ -46,6 +46,26 @@ void NoteQueuePeak(TAtomic<int32>& Peak, int32 Value)
     {
     }
 }
+
+/**
+ * The worker refused a connection over its protocol version. This is the one
+ * place that holds both releases: a Maya component of another release may be
+ * too old to show Unreal's, so the Output Log names them both. An item the
+ * peer did not provide reads "unknown".
+ */
+void LogVersionRefusal(int32 MayaProtocolVersion, const FString& MayaPluginVersion)
+{
+    const auto Release = [](const FString& Version)
+    {
+        return Version.IsEmpty() ? FString(TEXT("unknown")) : Version;
+    };
+    UE_LOG(LogMtoULiveLinkSource, Warning,
+        TEXT("Refused a connection of another protocol version. Maya: plugin %s, protocol %d. "
+             "Unreal: plugin %s, protocol %d. Install both components from one release and "
+             "restart Maya and Unreal."),
+        *Release(MayaPluginVersion), MayaProtocolVersion,
+        *Release(FMtoUProtocol::PluginVersionName()), FMtoUProtocol::Version);
+}
 }
 
 namespace
@@ -1266,6 +1286,10 @@ uint32 FMtoULiveLinkSource::Run()
                             FString HelloErrorCode;
                             if (!FMtoUProtocol::ParseHello(Payload, Hello, HelloError, &HelloErrorCode))
                             {
+                                if (HelloErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                                {
+                                    LogVersionRefusal(Hello.Version, Hello.PluginVersion);
+                                }
                                 SendErrorAndDisconnect(HelloErrorCode, HelloError);
                                 break;
                             }
@@ -1287,6 +1311,11 @@ uint32 FMtoULiveLinkSource::Run()
                         FString ErrorCode;
                         if (!FMtoUProtocol::ParseInit(Payload, Init, Error, &ErrorCode))
                         {
+                            if (ErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                            {
+                                // An init names no plugin release.
+                                LogVersionRefusal(Init.Version, FString());
+                            }
                             SendErrorAndDisconnect(ErrorCode, Error);
                             break;
                         }

@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import pathlib
+import re
 import select
 import socket
 import struct
@@ -2227,6 +2228,225 @@ class SenderLifecycleTests(unittest.TestCase):
 
 
 
+class _ScriptedPeerSocket(object):
+    """A peer that answers with scripted replies and records what Maya sends."""
+
+    def __init__(self, replies):
+        self._incoming = b"".join(
+            mtou_protocol.encode_message(reply) for reply in replies)
+        self.sent = b""
+        self.send_all_calls = []
+        self.closed = False
+
+    def settimeout(self, timeout):
+        pass
+
+    def recv(self, size):
+        chunk, self._incoming = self._incoming[:size], self._incoming[size:]
+        return chunk
+
+    def send(self, data):
+        self.sent += bytes(data)
+        return len(data)
+
+    def sendall(self, packet):
+        self.send_all_calls.append(bytes(packet))
+
+    def close(self):
+        self.closed = True
+
+
+class VersionMismatchHandshakeTests(unittest.TestCase):
+    """A peer refuses the protocol version during the handshake: what Maya
+    shows of both releases, and that the refusal stays a refusal."""
+
+    ADVICE = "请从同一发行包重新安装两端组件，重启 Maya 和 UE 后连接。"
+    SUMMARY = "连接失败 · 插件协议版本不匹配"
+    UNKNOWN = "未知（对端未提供）"
+
+    def mismatch_error(self, **fields):
+        reply = {
+            "type": "error", "code": "PROTOCOL_VERSION_MISMATCH",
+            "message": "Unsupported protocol version.",
+            "details": "Unsupported protocol version.",
+        }
+        reply.update(fields)
+        return reply
+
+    def hello_ack(self, version):
+        return {
+            "type": "hello_ack", "version": version, "session_id": 4242,
+            "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
+            "targets": [],
+            "space": {"space_revision": 1,
+                      "anchor": {"translation": [0, 0, 0],
+                                 "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]}},
+        }
+
+    def handshake(self, *replies):
+        identity = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
+        init_message = mtou_protocol.make_init_message(
+            [["root", -1, identity]], [], 7)
+        hello_message = mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0)
+        worker = mtou_session.SenderWorker(init_message, hello_message)
+        peer = _ScriptedPeerSocket(replies)
+        states = []
+        set_status = worker._set_status
+
+        def record(state, *args, **kwargs):
+            states.append(state)
+            return set_status(state, *args, **kwargs)
+
+        def connect():
+            worker._socket = peer
+            return peer
+
+        with mock.patch.object(worker, "_connect", side_effect=connect), \
+             mock.patch.object(worker, "_set_status", side_effect=record):
+            worker.run()
+        # The refusal is final: the session never became ready, and nothing
+        # but the opening packet (hello, then init) went to the peer.
+        self.assertEqual(["error"], states)
+        self.assertEqual(worker._initial_packet, peer.sent)
+        self.assertEqual([], peer.send_all_calls)
+        self.assertTrue(peer.closed)
+        state, _, _, diagnostic = worker.status()
+        self.assertEqual("error", state)
+        return worker, peer, diagnostic
+
+    def maya_line(self):
+        return "Maya 端 · 插件 {0}，协议 {1}".format(
+            mtou_config.__version__, mtou_config.PROTOCOL_VERSION)
+
+    def test_the_greeting_names_the_loaded_plugin_version(self):
+        _, peer, _ = self.handshake(self.mismatch_error())
+
+        length = struct.unpack(">Q", peer.sent[:8])[0]
+        hello = json.loads(peer.sent[8:8 + length].decode("utf-8"))
+        self.assertEqual("hello", hello["type"])
+        self.assertEqual(mtou_config.__version__, hello["plugin_version"])
+        self.assertEqual(mtou_config.PROTOCOL_VERSION, hello["version"])
+
+    def test_both_releases_are_named_when_the_peer_provides_them(self):
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            kind="failure", protocol_version=13, plugin_version="1.1.0"))
+
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(self.SUMMARY, diagnostic["summary"])
+        self.assertEqual(
+            [self.maya_line(), "UE 端 · 插件 1.1.0，协议 13"],
+            list(diagnostic["version_lines"]))
+        self.assertEqual({
+            "maya": {"plugin_version": mtou_config.__version__,
+                     "protocol_version": mtou_config.PROTOCOL_VERSION},
+            "unreal": {"plugin_version": "1.1.0", "protocol_version": 13},
+        }, diagnostic["versions"])
+        self.assertEqual("\n\n".join([
+            self.SUMMARY,
+            self.maya_line() + "\nUE 端 · 插件 1.1.0，协议 13",
+            self.ADVICE,
+        ]), mtou_diagnostics.diagnostic_dialog_text(diagnostic))
+
+    def test_an_earlier_peer_without_release_fields_shows_unknown_not_its_text(self):
+        # The 1.0.0 release answers without kind or release fields; its text
+        # names its own protocol, which is not a field Maya reads.
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            message="Unsupported protocol version; expected 11.",
+            details="Unsupported protocol version; expected 11."))
+
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(
+            [self.maya_line(),
+             "UE 端 · 插件 {0}，协议 {0}".format(self.UNKNOWN)],
+            list(diagnostic["version_lines"]))
+        self.assertIsNone(diagnostic["versions"]["unreal"]["plugin_version"])
+        self.assertIsNone(diagnostic["versions"]["unreal"]["protocol_version"])
+        self.assertNotIn("11", diagnostic["version_lines"][1])
+        self.assertIn("expected 11", diagnostic["details"])
+
+    def test_a_peer_provides_only_one_of_the_two_items(self):
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            plugin_version="1.1.0"))
+        self.assertEqual(
+            "UE 端 · 插件 1.1.0，协议 {0}".format(self.UNKNOWN),
+            diagnostic["version_lines"][1])
+
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            protocol_version=13))
+        self.assertEqual(
+            "UE 端 · 插件 {0}，协议 13".format(self.UNKNOWN),
+            diagnostic["version_lines"][1])
+
+    def test_the_same_plugin_version_with_another_protocol_is_shown_and_refused(self):
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            kind="failure",
+            protocol_version=mtou_config.PROTOCOL_VERSION + 1,
+            plugin_version=mtou_config.__version__))
+
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(
+            [self.maya_line(),
+             "UE 端 · 插件 {0}，协议 {1}".format(
+                 mtou_config.__version__, mtou_config.PROTOCOL_VERSION + 1)],
+            list(diagnostic["version_lines"]))
+
+    def test_a_mistyped_release_field_is_an_invalid_message(self):
+        for field, value in (("plugin_version", 2), ("protocol_version", "13"),
+                             ("protocol_version", 13.5), ("protocol_version", True)):
+            with self.subTest(field=field, value=value):
+                _, _, diagnostic = self.handshake(
+                    self.mismatch_error(**{field: value}))
+                self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
+                self.assertNotIn("version_lines", diagnostic)
+                self.assertIn(field, diagnostic["details"])
+
+    def test_the_release_fields_belong_to_the_version_error_only(self):
+        # Another code carries no release; a field it happens to hold is an
+        # unknown field and is ignored.
+        _, _, diagnostic = self.handshake({
+            "type": "error", "code": "NO_BINDING_ACTOR",
+            "message": "No binding actor.", "details": "No binding actor.",
+            "plugin_version": 2, "protocol_version": "13"})
+
+        self.assertEqual("NO_BINDING_ACTOR", diagnostic["code"])
+        self.assertNotIn("version_lines", diagnostic)
+
+    def test_maya_refuses_a_hello_ack_of_another_protocol_as_a_mismatch(self):
+        worker, _, diagnostic = self.handshake(self.hello_ack(11))
+
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(self.SUMMARY, diagnostic["summary"])
+        # The protocol is the one the acknowledgement declared; the plugin
+        # version is not part of it.
+        self.assertEqual(
+            [self.maya_line(), "UE 端 · 插件 {0}，协议 11".format(self.UNKNOWN)],
+            list(diagnostic["version_lines"]))
+        self.assertIsNone(worker.hello_reply())
+
+    def test_a_hello_ack_without_an_integer_version_stays_an_invalid_message(self):
+        for version in ("11", 11.5, None, True):
+            with self.subTest(version=version):
+                reply = self.hello_ack(version)
+                if version is None:
+                    del reply["version"]
+                _, _, diagnostic = self.handshake(reply)
+                self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
+                self.assertNotIn("version_lines", diagnostic)
+
+    def test_an_error_after_ready_is_reported_as_the_handshake_reports_it(self):
+        error = self.mismatch_error(
+            kind="failure", protocol_version=13, plugin_version="1.1.0")
+        noted = []
+
+        _, _, handshake = self.handshake(error)
+        mtou_session.route_reply(
+            error, mtou_timecontrol.TimeControl(),
+            on_statement=lambda reply: True, note_reason=noted.append)
+
+        # One builder serves both: the same reason, so a repeat is recognised.
+        self.assertEqual([handshake], noted)
+
+
 class PlaybackCacheTests(unittest.TestCase):
     def _frame(self, value):
         return {"type": "frame", "transforms": [[value] * 10], "curves": []}
@@ -4136,6 +4356,65 @@ class ControllerLifecycleTests(unittest.TestCase):
         self.assertNotIn("arm -> arm_1", text)
         self.assertNotIn("|Group|Geometry|body", text)
 
+    def test_version_mismatch_is_shown_as_summary_versions_and_advice(self):
+        # The session copies a diagnostic into its event, which turns the
+        # version lines into a tuple; the panel renders it all the same.
+        diagnostic = mtou_diagnostics.error_reply_diagnostic({
+            "type": "error", "code": "PROTOCOL_VERSION_MISMATCH",
+            "message": "Unsupported protocol version; expected 13.",
+            "details": "Unsupported protocol version; expected 13.",
+            "kind": "failure", "protocol_version": 13, "plugin_version": "1.1.0"})
+        event = mtou_session.StreamingSessionEvent("failed", diagnostic=diagnostic)
+        self.assertIsInstance(event.diagnostic["version_lines"], tuple)
+        snapshot = character_snapshot(
+            1, "|root", "Clothes01", [("root", -1)], [], mesh_paths=["|body"])
+        scene = mock.Mock()
+        scene.snapshot.return_value = snapshot
+        fake_cmds = mock.MagicMock()
+        fake_cmds.control.return_value = True
+        fake_cmds.confirmDialog.return_value = "确定"
+        controller = mtou_controller.Controller()
+        session = object()
+        controller._session = session
+        controller._scene = scene
+        controller._set_connected = mock.Mock()
+
+        with patch_global("cmds", fake_cmds):
+            controller._on_streaming_session_event(session, event)
+
+        # The status bar shows the summary alone.
+        controller._set_connected.assert_called_once_with(
+            False, "连接失败 · 插件协议版本不匹配")
+        # The dialog: summary, both releases, then what to do.
+        dialog = fake_cmds.confirmDialog.call_args[1]
+        self.assertEqual("MtoU 连接问题", dialog["title"])
+        self.assertEqual("\n\n".join([
+            "连接失败 · 插件协议版本不匹配",
+            "Maya 端 · 插件 {0}，协议 {1}\nUE 端 · 插件 1.1.0，协议 13".format(
+                mtou_config.__version__, mtou_config.PROTOCOL_VERSION),
+            "请从同一发行包重新安装两端组件，重启 Maya 和 UE 后连接。",
+        ]), dialog["message"])
+        # 诊断详情 adds the releases and keeps the peer's own text.
+        with mock.patch.object(controller, "_refresh_fps", return_value=30.0):
+            text = controller._diagnostic_text()
+        self.assertIn("Error code: PROTOCOL_VERSION_MISMATCH", text)
+        self.assertIn(
+            "版本：\nMaya 端 · 插件 {0}，协议 {1}\nUE 端 · 插件 1.1.0，协议 13".format(
+                mtou_config.__version__, mtou_config.PROTOCOL_VERSION), text)
+        self.assertIn("expected 13", text)
+
+    def test_dialog_without_version_lines_is_summary_and_advice(self):
+        fake_cmds = mock.MagicMock()
+        fake_cmds.confirmDialog.return_value = "确定"
+        controller = mtou_controller.Controller()
+
+        with patch_global("cmds", fake_cmds):
+            controller._show_error(mtou_diagnostics.make_diagnostic("UNREAL_NOT_REACHABLE"))
+
+        summary, advice = mtou_diagnostics.DIAGNOSTICS["UNREAL_NOT_REACHABLE"]
+        self.assertEqual(
+            summary + "\n\n" + advice, fake_cmds.confirmDialog.call_args[1]["message"])
+
     def test_diagnostic_window_wraps_text_and_fills_resized_window(self):
         fake_cmds = mock.MagicMock()
         fake_cmds.window.side_effect = [False, "diagnosticWindow"]
@@ -4774,9 +5053,17 @@ class ProtocolTests(unittest.TestCase):
                          "cache_looped", "cache_loop_changed"):
             if expected["accepted"]:
                 self.assertEqual(case["payload"], mtou_protocol.validate_reply(case["payload"]))
+                if "peer_versions" in expected:
+                    self._assert_refusing_release(
+                        case, mtou_diagnostics.error_reply_diagnostic(case["payload"]))
             else:
-                with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                with self.assertRaisesRegex(
+                        ValueError, "|".join(expected["keywords"])) as caught:
                     mtou_protocol.validate_reply(case["payload"])
+                # The code is the one the session reports for the refusal.
+                self.assertEqual(
+                    expected["error_code"],
+                    mtou_session.invalid_reply_diagnostic(caught.exception)["code"])
             return
         if operation == "cache_begin":
             payload = case["payload"]
@@ -4839,8 +5126,14 @@ class ProtocolTests(unittest.TestCase):
             if expected["accepted"]:
                 self.assertEqual(payload, mtou_protocol.validate_reply(payload))
                 return
-            with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+            with self.assertRaisesRegex(
+                    ValueError, "|".join(expected["keywords"])) as caught:
                 mtou_protocol.validate_reply(payload)
+            # The code is the one the session reports for the refusal.
+            diagnostic = mtou_session.invalid_reply_diagnostic(caught.exception)
+            self.assertEqual(expected["error_code"], diagnostic["code"])
+            if "peer_versions" in expected:
+                self._assert_refusing_release(case, diagnostic)
             return
         if operation == "mode":
             self._assert_mode_case(case)
@@ -4876,6 +5169,29 @@ class ProtocolTests(unittest.TestCase):
             return
         self.fail("Unsupported Maya conformance operation: " + operation)
 
+    def _assert_refusing_release(self, case, diagnostic):
+        """Maya shows the peer's release as the case declares it, and nothing
+        the peer did not provide: the text of its ``details`` is not read."""
+        expected = case["expected"]["peer_versions"]
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(expected, diagnostic["versions"]["unreal"])
+
+        def shown(value):
+            return mtou_diagnostics.UNKNOWN_PEER_VALUE if value is None else str(value)
+
+        maya_line, unreal_line = diagnostic["version_lines"]
+        self.assertEqual("UE 端 · 插件 {0}，协议 {1}".format(
+            shown(expected["plugin_version"]), shown(expected["protocol_version"])),
+            unreal_line)
+        self.assertTrue(maya_line.startswith("Maya 端 · 插件 "))
+        details = case["payload"].get("details")
+        if details is not None:
+            self.assertEqual(details, diagnostic["details"])
+            if expected["protocol_version"] is None:
+                # A number in the peer's text is not a version Maya may show.
+                for number in re.findall(r"\d+", details):
+                    self.assertNotIn(number, unreal_line)
+
     def _assert_remove_object_case(self, case):
         """Maya's removal request names the second object and the new set."""
         payload = case["payload"]
@@ -4902,9 +5218,13 @@ class ProtocolTests(unittest.TestCase):
         expected = case["expected"]
         scene = payload["scene"]
         if expected["accepted"]:
+            # The corpus holds no value that depends on the product version:
+            # the greeting carries the plugin version the case declares, and
+            # none when the case declares none.
             actual = mtou_protocol.make_hello_message(
                 payload["maya_version"], scene["linear_unit"],
-                scene["unit_scale_cm"], scene["fps"])
+                scene["unit_scale_cm"], scene["fps"],
+                plugin_version=payload.get("plugin_version"))
             self.assertEqual(payload, actual)
             self.assertEqual(1.0, mtou_space.centimeters_per_unit(scene["linear_unit"]))
             self.assertEqual(

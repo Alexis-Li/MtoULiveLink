@@ -27,7 +27,12 @@ from .config import (
     WORKFLOW_MODEL,
     WORKFLOWS,
 )
-from .diagnostics import DIAGNOSTICS, error_reply_diagnostic, make_diagnostic
+from .diagnostics import (
+    DIAGNOSTICS,
+    diagnostic_dialog_text,
+    error_reply_diagnostic,
+    make_diagnostic,
+)
 from .legal import LEGAL_TEXT, LEGAL_TITLE
 from .linkage import LinkageError, LinkageSession
 from .mayaapi import cmds, om, omui
@@ -1210,6 +1215,9 @@ class Controller(object):
             "解决办法：{0}".format(solution),
             "Error code: {0}".format(diagnostic.get("code", "—")),
         ]
+        version_lines = diagnostic.get("version_lines")
+        if version_lines:
+            sections.append("版本：\n{0}".format("\n".join(version_lines)))
         if details and details not in (summary, solution):
             sections.append("错误详情：\n{0}".format(details))
         sections.append(self._objects_diagnostic_text())
@@ -1351,7 +1359,7 @@ class Controller(object):
         if diagnostic.get("duplicate_paths"):
             buttons.insert(0, "选中重名骨骼")
         result = cmds.confirmDialog(
-            title="MtoU 连接问题", message=diagnostic["summary"] + "\n\n" + diagnostic["solution"],
+            title="MtoU 连接问题", message=diagnostic_dialog_text(diagnostic),
             button=buttons, defaultButton="确定", cancelButton="确定")
         if result == "选中重名骨骼":
             self.select_duplicate_bones()

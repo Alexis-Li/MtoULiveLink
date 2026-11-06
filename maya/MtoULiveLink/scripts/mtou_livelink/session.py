@@ -30,9 +30,11 @@ from .diagnostics import (
     error_reply_diagnostic,
     filter_bone_driven_differences,
     make_diagnostic,
+    version_mismatch_diagnostic,
 )
 from .mayaapi import cmds, om
 from .protocol import (
+    ProtocolVersionMismatch,
     encode_message,
     exact_int,
     make_frame_message,
@@ -137,6 +139,19 @@ def merge_object_warnings(warnings):
             merged[key].extend(prefix + str(value) for value in warning.get(key) or ())
         merged["has_warning"] = merged["has_warning"] or bool(warning.get("has_warning"))
     return merged
+
+
+def invalid_reply_diagnostic(error):
+    """The diagnostic of a reply the protocol refuses.
+
+    A reply of another protocol version is a version mismatch, which names the
+    version it declared; every other refusal is an invalid message.
+    """
+    if isinstance(error, ProtocolVersionMismatch):
+        return version_mismatch_diagnostic(
+            protocol_version=error.peer_protocol_version,
+            message=str(error), details=str(error))
+    return make_diagnostic("INVALID_MESSAGE", str(error), details=str(error))
 
 
 class SenderWorker(threading.Thread):
@@ -412,10 +427,7 @@ class SenderWorker(threading.Thread):
             if reply is None:
                 return None
             if reply.get("type") == "error":
-                diagnostic = make_diagnostic(
-                    reply.get("code") or "INTERNAL_ERROR",
-                    reply.get("message") or "Unreal rejected the connection",
-                    details=reply.get("details") or reply.get("message") or "")
+                diagnostic = error_reply_diagnostic(reply)
                 self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
                 return None
             if reply.get("type") != "ready":
@@ -495,8 +507,7 @@ class SenderWorker(threading.Thread):
                     try:
                         reply = validate_reply(recv_message(sock))
                     except (ValueError, UnicodeError) as exc:
-                        diagnostic = make_diagnostic(
-                            "INVALID_MESSAGE", str(exc), details=str(exc))
+                        diagnostic = invalid_reply_diagnostic(exc)
                         self._set_status(
                             "error", diagnostic["summary"], diagnostic=diagnostic)
                         return
@@ -514,13 +525,12 @@ class SenderWorker(threading.Thread):
             if not self._stop_event.is_set():
                 reason = self._close_reason()
                 if isinstance(exc, (ValueError, UnicodeError, json.JSONDecodeError)):
-                    code = "INVALID_MESSAGE"
-                else:
-                    code = "STREAM_INTERRUPTED" if connected else "UNREAL_NOT_REACHABLE"
-                if code == "STREAM_INTERRUPTED" and reason is not None:
+                    diagnostic = invalid_reply_diagnostic(exc)
+                elif connected and reason is not None:
                     # Unreal closed the connection after the error it reported.
                     diagnostic = reason
                 else:
+                    code = "STREAM_INTERRUPTED" if connected else "UNREAL_NOT_REACHABLE"
                     diagnostic = make_diagnostic(code, str(exc), details=str(exc))
                 self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
         finally:

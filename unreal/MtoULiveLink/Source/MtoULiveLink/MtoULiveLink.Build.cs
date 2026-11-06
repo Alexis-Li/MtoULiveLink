@@ -11,7 +11,7 @@ public class MtoULiveLink : ModuleRules
         PublicDependencyModuleNames.AddRange(new[] { "Core", "CoreUObject", "Engine", "Json" });
         PrivateDependencyModuleNames.AddRange(new[]
         {
-            "Json", "LiveLinkAnimationCore", "LiveLinkInterface", "Sockets"
+            "Json", "LiveLinkAnimationCore", "LiveLinkInterface", "Projects", "Sockets"
         });
         if (Target.bBuildEditor)
         {

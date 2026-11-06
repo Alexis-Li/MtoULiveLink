@@ -92,6 +92,43 @@ class ProjectToolTests(unittest.TestCase):
             module.validate_corpus(invalid),
         )
 
+    def test_peer_versions_are_accepted_only_where_a_runner_judges_them(self):
+        module = _load_generator("generate_mtou_unreal_corpus_peer_versions")
+        corpus = module.load_corpus()
+        cases = {case["id"]: case for case in corpus["cases"]}
+        self.assertEqual([], module.validate_corpus(corpus))
+
+        def errors_with(case_id, **changes):
+            case = json.loads(json.dumps(cases[case_id]))
+            for key, value in changes.items():
+                if key == "peer_versions":
+                    case["expected"][key] = value
+                else:
+                    case[key] = value
+            return module.validate_corpus(dict(corpus, cases=[case]))
+
+        judged = "error-version-mismatch-names-refusing-release"
+        # A host that has no runner for it, an operation it does not belong
+        # to, and a malformed pair are all refused.
+        self.assertTrue(any("judged only for a Maya case" in error
+                            for error in errors_with(judged, applies_to=["maya", "unreal"])))
+        self.assertTrue(any("judged only for a Maya case" in error
+                            for error in errors_with("error-basic", peer_versions={
+                                "plugin_version": None, "protocol_version": None})))
+        self.assertTrue(any("judged only for a Maya case" in error
+                            for error in errors_with(
+                                "hello-ack-paired-target-is-accepted", peer_versions={
+                                    "plugin_version": None, "protocol_version": None})))
+        self.assertTrue(any("must hold plugin_version" in error
+                            for error in errors_with(judged, peer_versions={
+                                "plugin_version": "1.0.0"})))
+        self.assertTrue(any("plugin_version must be a string or null" in error
+                            for error in errors_with(judged, peer_versions={
+                                "plugin_version": 1, "protocol_version": 2})))
+        self.assertTrue(any("protocol_version must be an integer or null" in error
+                            for error in errors_with(judged, peer_versions={
+                                "plugin_version": "1.0.0", "protocol_version": True})))
+
     def test_both_components_share_the_product_version(self):
         self.assertEqual(_project_tools.maya_version(), _project_tools.unreal_version())
 

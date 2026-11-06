@@ -4295,6 +4295,131 @@
       }
     },
     {
+      "id": "error-version-mismatch-names-refusing-release",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "PROTOCOL_VERSION_MISMATCH",
+        "message": "Unsupported protocol version; expected 20.",
+        "details": "Unsupported protocol version; expected 20.",
+        "kind": "failure",
+        "protocol_version": 20,
+        "plugin_version": "2.0.0"
+      },
+      "expected": {
+        "accepted": true,
+        "close": true,
+        "peer_versions": {
+          "plugin_version": "2.0.0",
+          "protocol_version": 20
+        }
+      }
+    },
+    {
+      "id": "error-version-mismatch-from-earlier-peer",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "PROTOCOL_VERSION_MISMATCH",
+        "message": "Unsupported protocol version; expected 11.",
+        "details": "Unsupported protocol version; expected 11."
+      },
+      "expected": {
+        "accepted": true,
+        "close": true,
+        "peer_versions": {
+          "plugin_version": null,
+          "protocol_version": null
+        }
+      }
+    },
+    {
+      "id": "error-version-mismatch-same-plugin-other-protocol",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "PROTOCOL_VERSION_MISMATCH",
+        "message": "Unsupported protocol version; expected 11.",
+        "details": "Unsupported protocol version; expected 11.",
+        "kind": "failure",
+        "protocol_version": 11,
+        "plugin_version": "1.0.0"
+      },
+      "expected": {
+        "accepted": true,
+        "close": true,
+        "peer_versions": {
+          "plugin_version": "1.0.0",
+          "protocol_version": 11
+        }
+      }
+    },
+    {
+      "id": "error-version-mismatch-plugin-version-wrong-type-refused",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "PROTOCOL_VERSION_MISMATCH",
+        "message": "Unsupported protocol version; expected 20.",
+        "details": "Unsupported protocol version; expected 20.",
+        "kind": "failure",
+        "protocol_version": 20,
+        "plugin_version": 2
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "plugin_version"
+        ]
+      }
+    },
+    {
+      "id": "mixed-version-v11-hello-refused",
+      "operation": "hello",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 11,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "reference": true,
+          "cache": true,
+          "model": true
+        }
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "PROTOCOL_VERSION_MISMATCH",
+        "close": true,
+        "keywords": [
+          "version"
+        ]
+      }
+    },
+    {
       "id": "mixed-version-v9-init-refused",
       "operation": "init",
       "applies_to": [
@@ -4653,7 +4778,11 @@
         "close": true,
         "keywords": [
           "version"
-        ]
+        ],
+        "peer_versions": {
+          "plugin_version": null,
+          "protocol_version": 9
+        }
       }
     },
     {
@@ -4706,7 +4835,11 @@
         "close": true,
         "keywords": [
           "version"
-        ]
+        ],
+        "peer_versions": {
+          "plugin_version": null,
+          "protocol_version": 10
+        }
       }
     },
     {
@@ -4761,7 +4894,11 @@
         "close": true,
         "keywords": [
           "version"
-        ]
+        ],
+        "peer_versions": {
+          "plugin_version": null,
+          "protocol_version": 11
+        }
       }
     },
     {
@@ -4887,6 +5024,69 @@
         "keywords": [
           "1",
           "60"
+        ]
+      }
+    },
+    {
+      "id": "hello-plugin-version-is-accepted",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "reference": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": "0.0.0-example"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "hello-plugin-version-wrong-type-refused",
+      "operation": "hello",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "reference": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": 7
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "plugin_version"
         ]
       }
     },

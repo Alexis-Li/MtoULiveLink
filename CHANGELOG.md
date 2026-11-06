@@ -18,6 +18,12 @@ repository's issues.
   are shown under **关于** at the bottom right of the Maya panel and in Unreal's
   plugin entry. The license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
 
+### Changed
+
+- A refused protocol version now reads 连接失败 · 插件协议版本不匹配 and lists the plugin and
+  protocol version that Maya and Unreal each have loaded (未知（对端未提供） for an item the
+  other side did not provide), with the advice to reinstall both from one release. (#34)
+
 ### Fixed
 
 - **结束预览** during Cached Playback no longer freezes Unreal: the cache keeps the
