@@ -24,11 +24,16 @@
 ## 持续约束
 
 - 最终效果以 UE 场景和镜头为准，动画在 Maya 制作；沿用既有导出、导入与
-  Sequencer 组装流程，产品不创建动画或预览资产。
+  Sequencer 组装流程，产品不在 UE 中创建动画或预览资产。
 - 独立道具和不同骨架角色不套用 Additional Parts，也不自动重定向。
-- 场景参考范围必须显式，不能悄悄改成 Actor 选择；不交付图片数据，允许材质
-  分配及外部图片路径引用。
-- 共同原点／摆放同时适用于相机、参考和动画对象。
+- 镜头导入独立于连接与角色：UE 把 Level Sequence 的镜头导出为镜头包，Maya
+  据此生成相机，画框参数尽量与 UE 一致，无法对应的列为近似项；相机以 UE
+  为准，单向导入（[#40](https://github.com/Alexis-Li/MtoULiveLink/issues/40)）。
+- 附带场景由用户勾选内容，结果与引擎「导出选中项」后在 Maya 默认导入一致，
+  产品不追加坐标变换；不交付图片数据，允许材质分配及外部图片路径引用。
+- 镜头与场景使用 UE 关卡世界坐标。连接时 Maya 世界坐标默认也对应关卡世界
+  坐标，Binding 的摆放不改变角色与相机位置；以 Binding 为原点只在用户选择时
+  使用（[#41](https://github.com/Alexis-Li/MtoULiveLink/issues/41)）。
 - 真实输入变化结束流（[ADR 0002](adr/0002-end-streaming-when-preview-inputs-change.md)）；
   预览网格保持瞬态（[ADR 0001](adr/0001-keep-preview-meshes-transient.md)）。
 
