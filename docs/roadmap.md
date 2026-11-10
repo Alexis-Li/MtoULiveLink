@@ -15,8 +15,6 @@
 - **镜头联动**：Maya 跟随 UE Level Sequence 的时间与求值相机，互斥时间控制，
   整组姿势一致显示，两端都可返回实时或结束预览
   （[ADR 0014](adr/0014-one-time-authority-and-staged-pose-groups.md)）。
-- **场景参考**：UE 按显式关卡范围导出静态参考几何，Maya 校验后导入，
-  与角色和相机处于同一共同空间。
 
 宿主：Windows 64 位，Maya 2024（Maya 2022.4 支持），stock UE 5.7.4；
 仅编辑器内使用。线上协议见 [protocol/](../protocol/README.md)。

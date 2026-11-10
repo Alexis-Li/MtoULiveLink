@@ -69,9 +69,7 @@ set of two objects and checks:
   `arms.chains` cut a synthetic arms target from the second object's full
   body, which replaces it, renegotiates only the arms' required bones and must
   show Maya's arm bones and Morphs. `arms.unstreamed` names bones it must not
-  require;
-- with `reference_probe`, a scene reference exported and imported in the set's
-  common space.
+  require.
 
 **Sustained load (`sustained{seconds, delays_ms[]}`).** It measures INT-10
 after the first scenario's playback. For each delay the looping sequence plays
@@ -217,8 +215,8 @@ Pass `--old-entry` the 0.9.0 `MtoULiveLink.py`, available with
 
 ### Window check
 
-`maya/MtoULiveLink/tests/maya_gui_window_check.py` closes the panel, the
-scene-reference and the 对象配对 windows from their title bars (`WM_CLOSE`),
+`maya/MtoULiveLink/tests/maya_gui_window_check.py` closes the panel and
+the 对象配对 window from their title bars (`WM_CLOSE`),
 repeats close and reopen, switches workflow and scenes, and quits Maya in each
 state. A scenario passes only when Maya exits with code 0, in time, without a
 crash log and without a Python traceback in its Script Editor history.

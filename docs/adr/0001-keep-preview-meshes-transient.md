@@ -29,8 +29,3 @@ body and enabled Additional Parts, and preserve readiness and the session.
 Invalidation releases the generated mesh in either selection. Display and pose
 evaluation details and remaining visual acceptance are recorded in the
 [comparison record](../history/issue-51-garment-comparison-acceptance.md).
-
-This lifetime boundary applies to Generated Preview Skeletal Meshes. It does
-not decide storage or transport for the scene reference, which Maya imports
-into a tool-owned container as the
-[wire protocol](../../protocol/README.md#scene-reference-handoff) describes.

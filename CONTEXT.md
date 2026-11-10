@@ -256,15 +256,3 @@ The state in which nothing is in flight, no newer target waits, and the last
 group was applied. Lagging but complete groups are shown as lagging and are not
 convergence.
 _Avoid_: Sync, lock, in-step
-
-**Scene reference handoff**:
-One finished Unreal export of an explicitly selected level scope, delivered as
-files beside a manifest with a transfer identity, a content digest and the space
-revision it belongs to. Maya imports it only after validating it.
-_Avoid_: Reference download, level copy, geometry stream
-
-**Reference container**:
-The single tool-owned Maya transform and namespace that holds the imported scene
-reference, marked with its ownership value so an update can replace, roll back
-or remove only what the tool created.
-_Avoid_: Reference group, import root, staging scene
