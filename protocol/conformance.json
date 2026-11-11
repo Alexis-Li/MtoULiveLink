@@ -4405,7 +4405,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -4740,7 +4739,6 @@
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -4797,7 +4795,6 @@
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -4854,7 +4851,6 @@
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -4919,7 +4915,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -4947,7 +4942,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -4979,7 +4973,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -5012,7 +5005,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -5046,7 +5038,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -5075,7 +5066,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -5102,7 +5092,6 @@
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -5153,7 +5142,6 @@
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -5197,7 +5185,6 @@
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -7347,241 +7334,6 @@
       }
     },
     {
-      "id": "reference-offer-is-accepted",
-      "operation": "reference_offer",
-      "applies_to": [
-        "maya"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "directory": "handoff/transfer-1",
-        "manifest_digest": "sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
-        "scope": {
-          "level": "/Game/Maps/Lvl",
-          "sublevels": [
-            "/Game/Maps/Lvl/Sub"
-          ],
-          "completeness": "complete",
-          "unloaded_sublevels": []
-        },
-        "space_revision": 1,
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 2048
-        }
-      },
-      "expected": {
-        "accepted": true,
-        "close": false
-      },
-      "linkage": {
-        "session_id": 4242,
-        "mode_revision": 4,
-        "set_revision": 1,
-        "space_revision": 1,
-        "active": true
-      }
-    },
-    {
-      "id": "reference-offer-stale-space-revision-refused",
-      "operation": "reference_offer",
-      "applies_to": [
-        "maya"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "directory": "handoff/transfer-1",
-        "manifest_digest": "sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
-        "scope": {
-          "level": "/Game/Maps/Lvl",
-          "sublevels": [
-            "/Game/Maps/Lvl/Sub"
-          ],
-          "completeness": "complete",
-          "unloaded_sublevels": []
-        },
-        "space_revision": 0,
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 2048
-        }
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "SPACE_REVISION_STALE",
-        "close": false,
-        "keywords": [
-          "space revision"
-        ]
-      },
-      "linkage": {
-        "session_id": 4242,
-        "mode_revision": 4,
-        "set_revision": 1,
-        "space_revision": 1,
-        "active": true
-      }
-    },
-    {
-      "id": "reference-offer-empty-digest-refused",
-      "operation": "reference_offer",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "directory": "handoff/transfer-1",
-        "manifest_digest": "",
-        "scope": {
-          "level": "/Game/Maps/Lvl",
-          "sublevels": [
-            "/Game/Maps/Lvl/Sub"
-          ],
-          "completeness": "complete",
-          "unloaded_sublevels": []
-        },
-        "space_revision": 1,
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 2048
-        }
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "INVALID_MESSAGE",
-        "close": false,
-        "keywords": [
-          "manifest_digest"
-        ]
-      },
-      "linkage": {
-        "session_id": 4242,
-        "mode_revision": 4,
-        "set_revision": 1,
-        "space_revision": 1,
-        "active": true
-      }
-    },
-    {
-      "id": "reference-offer-non-positive-byte-count-refused",
-      "operation": "reference_offer",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "directory": "handoff/transfer-1",
-        "manifest_digest": "sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
-        "scope": {
-          "level": "/Game/Maps/Lvl",
-          "sublevels": [
-            "/Game/Maps/Lvl/Sub"
-          ],
-          "completeness": "complete",
-          "unloaded_sublevels": []
-        },
-        "space_revision": 1,
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 0
-        }
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "INVALID_MESSAGE",
-        "close": false,
-        "keywords": [
-          "bytes"
-        ]
-      },
-      "linkage": {
-        "session_id": 4242,
-        "mode_revision": 4,
-        "set_revision": 1,
-        "space_revision": 1,
-        "active": true
-      }
-    },
-    {
-      "id": "reference-result-unknown-transfer-id-refused",
-      "operation": "reference_result",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_result",
-        "session_id": 4242,
-        "transfer_id": "",
-        "accepted": false,
-        "detail": "no handoff of that identity",
-        "counts": {
-          "objects": 0,
-          "triangles": 0,
-          "bytes": 0
-        }
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "INVALID_MESSAGE",
-        "close": false,
-        "keywords": [
-          "transfer_id"
-        ]
-      }
-    },
-    {
-      "id": "reference-result-import-is-accepted",
-      "operation": "reference_result",
-      "applies_to": [
-        "maya"
-      ],
-      "payload": {
-        "type": "reference_result",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "accepted": true,
-        "detail": "imported 12 objects",
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 2048
-        },
-        "container": "MtoU_UE_SceneRef"
-      },
-      "expected": {
-        "accepted": true,
-        "close": false
-      }
-    },
-    {
-      "id": "reference-removed-is-accepted",
-      "operation": "reference_removed",
-      "applies_to": [
-        "maya"
-      ],
-      "payload": {
-        "type": "reference_removed",
-        "session_id": 4242,
-        "detail": "user removed the tool-owned container"
-      },
-      "expected": {
-        "accepted": true,
-        "close": false
-      }
-    },
-    {
       "id": "retired-reference-query-is-unknown",
       "operation": "unknown_type",
       "applies_to": [
@@ -7598,6 +7350,69 @@
             "/Game/Maps/Lvl/Sub"
           ]
         }
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "type"
+        ]
+      }
+    },
+    {
+      "id": "retired-reference-offer-is-unknown",
+      "operation": "unknown_type",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "reference_offer",
+        "session_id": 4242,
+        "transfer_id": "transfer-1"
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "type"
+        ]
+      }
+    },
+    {
+      "id": "retired-reference-result-is-unknown",
+      "operation": "unknown_type",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "reference_result",
+        "session_id": 4242,
+        "transfer_id": "transfer-1",
+        "accepted": true
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "type"
+        ]
+      }
+    },
+    {
+      "id": "retired-reference-removed-is-unknown",
+      "operation": "unknown_type",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "reference_removed",
+        "session_id": 4242
       },
       "expected": {
         "accepted": false,
@@ -7628,52 +7443,6 @@
         "close": false,
         "keywords": [
           "max_linkage_group_bytes"
-        ]
-      }
-    },
-    {
-      "id": "resource-reference-objects-over-budget",
-      "operation": "resource_limit",
-      "applies_to": [
-        "maya",
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "budget": "max_reference_objects",
-        "measured": 20001,
-        "limit": 20000,
-        "unit": "objects"
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "RESOURCE_LIMIT",
-        "close": false,
-        "keywords": [
-          "max_reference_objects"
-        ]
-      }
-    },
-    {
-      "id": "resource-reference-triangles-over-budget",
-      "operation": "resource_limit",
-      "applies_to": [
-        "maya",
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "budget": "max_reference_triangles",
-        "measured": 20000001,
-        "limit": 20000000,
-        "unit": "triangles"
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "RESOURCE_LIMIT",
-        "close": false,
-        "keywords": [
-          "max_reference_triangles"
         ]
       }
     },
@@ -7897,9 +7666,6 @@
     "max_message_bytes": 33554432,
     "max_linkage_group_bytes": 33554432,
     "max_control_queue": 16,
-    "max_reference_bytes": 268435456,
-    "max_reference_objects": 20000,
-    "max_reference_triangles": 20000000,
     "max_cache_payload_bytes": 1073741824,
     "max_cache_frame_count": 20000,
     "max_set_objects": 2
