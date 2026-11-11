@@ -14512,7 +14512,6 @@ bool FMtoUErrorKindEncodingTest::RunTest(const FString& Parameters)
             FMtoUProtocol::IsDefinedMessageType(Defined));
     }
     for (const TCHAR* Undefined : {TEXT("cache_play"), TEXT("cache_stop"), TEXT("reference_query"),
-            TEXT("reference_offer"), TEXT("reference_result"), TEXT("reference_removed"),
             TEXT("cache_other"), TEXT("cache_"), TEXT("error"), TEXT("mode_state"), TEXT("")})
     {
         TestFalse(*FString::Printf(TEXT("'%s' is not a defined type"), Undefined),
@@ -15407,10 +15406,6 @@ bool FMtoUUndefinedTypeSocketTest::RunTest(const FString& Parameters)
         {TEXT("cache_stop"), TEXT("{\"type\":\"cache_stop\"}")},
         {TEXT("reference_query"), TEXT("{\"type\":\"reference_query\",\"session_id\":1,"
              "\"transfer_id\":\"transfer-1\",\"scope\":{\"level\":\"/Game/Maps/Level\"}}")},
-        {TEXT("reference_result"), TEXT("{\"type\":\"reference_result\",\"session_id\":1,"
-             "\"transfer_id\":\"transfer-1\",\"accepted\":true,\"detail\":\"imported\"}")},
-        {TEXT("reference_removed"), TEXT("{\"type\":\"reference_removed\",\"session_id\":1,"
-             "\"detail\":\"removed\"}")},
         {TEXT("warp"), TEXT("{\"type\":\"warp\"}")},
     };
 
