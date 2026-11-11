@@ -41,19 +41,17 @@ expects), ``sample_plugins`` (with ``name``), ``set_secondary``,
 ``secondary_is_primary`` (**设为副对象** with the main character's root
 selected), ``objects_window`` (``target`` ``open``/``close``),
 ``drop_secondary_once`` (the next linkage group leaves out the second object;
-this disposable process only), ``import_reference`` (the 场景参考 window's
-**导入/更新参考**), ``reference_snapshot`` (the world bounding-box centre of
-every transform under the reference container whose name holds ``name``),
-``resources`` (the census in ``resources``: live OpenMaya callbacks counted at
-their registration, the tool's scriptJobs, Python threads, open sockets,
-``MtoU_*`` nodes and MtoU windows), ``close_panel`` (the panel window closes),
-``open_panel`` (``run()`` again, then set the role and connect),
-``new_scene``, ``reopen_scene`` (the fixture scene again, then connect),
-``lock_link_camera`` (``target`` ``unlock`` unlocks and deletes it), ``quit``. Each runs the handler
-of the panel control it names. The result file always carries the latest
-linkage status, the object set and the panel's workflow, mode, cache state,
-status line and ``controls`` (whether 进入联动, 返回实时, 结束预览, 实时预览, 缓存播放
-and 捕获并上传 are enabled); ``ack`` names the last finished command.
+this disposable process only), ``resources`` (the census in ``resources``:
+live OpenMaya callbacks counted at their registration, the tool's scriptJobs,
+Python threads, open sockets, ``MtoU_*`` nodes and MtoU windows),
+``close_panel`` (the panel window closes), ``open_panel`` (``run()`` again,
+then set the role and connect), ``new_scene``, ``reopen_scene`` (the fixture
+scene again, then connect), ``lock_link_camera`` (``target`` ``unlock``
+unlocks and deletes it), ``quit``. Each runs the handler of the panel control
+it names. The result file always carries the latest linkage status, the
+object set and the panel's workflow, mode, cache state, status line and
+``controls`` (whether 进入联动, 返回实时, 结束预览, 实时预览, 缓存播放 and
+捕获并上传 are enabled); ``ack`` names the last finished command.
 
 ``prefs`` describes the preferences this Maya started with, read before Maya
 can save them again: the ``pluginPrefs.mel`` in this Maya's own preference
@@ -477,8 +475,7 @@ def census():
                 sockets += 1
         except Exception:
             continue
-    windows = [name for name in ("MtoULiveLinkWindow", "MtoULiveLinkReferenceWindow",
-                                 "MtoULiveLinkObjectsWindow")
+    windows = [name for name in ("MtoULiveLinkWindow", "MtoULiveLinkObjectsWindow")
                if cmds.window(name, exists=True)]
     return {"callbacks": len(LIVE_CALLBACKS), "callback_families": families,
             "script_jobs": len(jobs),
@@ -590,10 +587,6 @@ def run_command(command):
             CONTROLLER.open_objects_window()
     elif action == "drop_secondary_once":
         drop_secondary_once()
-    elif action == "import_reference":
-        CONTROLLER.import_reference()
-    elif action == "reference_snapshot":
-        RESULT["reference_nodes"] = reference_nodes(command.get("name") or "")
     elif action == "resources":
         RESULT["resources"] = census()
     elif action == "scene_state":
@@ -651,24 +644,6 @@ def drop_secondary_once():
     linkage.make_group_message = incomplete
 
 
-def reference_nodes(fragment):
-    """World bounding-box centres (cm) of the reference container's matching transforms."""
-    nodes = {}
-    # The importer reports the group it placed, inside its own namespace.
-    report = CONTROLLER.reference_report().get("report") or {}
-    group = (report.get("container") or {}).get("group_path")
-    if not group or not cmds.objExists(group):
-        return nodes
-    for path in cmds.listRelatives(group, allDescendents=True, type="transform",
-                                   fullPath=True) or []:
-        name = path.split("|")[-1]
-        if fragment in name and cmds.listRelatives(path, shapes=True, type="mesh"):
-            box = cmds.exactWorldBoundingBox(path)
-            nodes[name] = [(box[0] + box[3]) / 2.0, (box[1] + box[4]) / 2.0,
-                           (box[2] + box[5]) / 2.0]
-    return nodes
-
-
 PANEL_CONTROLS = (("enter", "_enter_linkage_button"), ("leave_realtime", "_leave_linkage_button"),
                   ("leave_end", "_end_linkage_button"), ("realtime", "_realtime_mode_button"),
                   ("cached", "_cached_mode_button"), ("capture", "_capture_button"))
@@ -692,8 +667,6 @@ def tick():
         # Unreal's last applied evidence, one component row per object.
         applied = getattr(CONTROLLER._linkage, "_applied", None)
         RESULT["applied"] = dict(applied) if applied else None
-        RESULT["reference"] = {"offered": bool(CONTROLLER.reference_offer()),
-                               "report": CONTROLLER.reference_report()}
         RESULT["connected"] = CONTROLLER._session is not None and CONTROLLER._session_ready()
         # 连接 does nothing while an ending session is still being torn down.
         RESULT["session_open"] = CONTROLLER._session is not None

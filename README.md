@@ -5,9 +5,8 @@
 MtoU_LiveLink connects Maya to Unreal Editor on the same computer so you can
 preview character animation, BlendShapes, and garment changes in Unreal while
 working in Maya. It supports real-time preview and cached animation playback,
-follows a Level Sequence's camera and time in Maya, adds a second skeletal
-object beside the main character, and imports an Unreal level as reference
-geometry in Maya, without creating animation or preview assets.
+follows a Level Sequence's camera and time in Maya, and adds a second skeletal
+object beside the main character, without creating animation or preview assets.
 
 ## Compatibility
 
@@ -118,8 +117,8 @@ on the Binding. All enabled parts pose and display under one connection:
    and connection states plus the next step), **角色组成** (Primary and expandable
    Additional Parts), and **预览控制** (Binding and generated mesh asset fields,
    Refresh, Delete, and cache playback). Expand **高级设置与诊断** for the full
-   selectable report; **复制完整诊断** copies it, including the linkage and
-   scene-reference details, for a problem report. An empty diagnostic does not
+   selectable report; **复制完整诊断** copies it, including the linkage
+   details, for a problem report. An empty diagnostic does not
    occupy the daily view.
    The connection reads 未连接 before the first session, 已连接 while streaming,
    and 连接已中断 after a session ends; reconnect in Maya after an interruption.
@@ -130,7 +129,7 @@ on the Binding. All enabled parts pose and display under one connection:
    on the left; bone/BlendShape counts and cache on the right; a long name is
    shortened, hover it for the full name), Preview & Playback (preview mode,
    transmission cap, and cache actions in Cached Playback), Camera Linkage (one
-   status line, the linkage buttons, and the scene-reference window), Tools
+   status line and the linkage buttons), Tools
    (Display and duplicate-bone selection), and Diagnostics (status and
    诊断详情, whose **复制完整诊断** copies the whole report). The warning switch
    sits below Diagnostics.
@@ -251,39 +250,6 @@ refused with 副对象与主角色在 UE 中的放置不一致. Cached Playback 
 workflow support one character: remove the second object first. If removing
 the object cannot restore its tracks, the connection ends and both hosts name
 what to restore by hand.
-
-## Scene reference in Maya
-
-Unreal can export an explicit level scope as static reference geometry so Maya
-shows the same surroundings. The reference is a display aid: no preview
-workflow requires it, and the handoff never delivers image data.
-
-1. In Unreal, choose the level and the sublevels to include under **场景参考**
-   and run the export. Unreal reports the result, for example 已导出 152 个对象，
-   可在 Maya 导入, and says when a requested sublevel was not loaded. Pair the
-   target first (see camera linkage) so the reference lines up with it.
-2. In Maya, click **打开场景参考窗口** on the main panel's **镜头联动** card. The
-   window shows the source level and sublevels, the size (for example 152 个对象，
-   约 120 万三角面) and whether the handoff is 可导入, 已导入 (with the time) or
-   已过期 and needs a new export from Unreal. Click **导入/更新参考**: Maya
-   validates the handoff and its size budgets before it touches the scene,
-   imports into its own container, and states the result in one sentence.
-   Discarded nodes, rollback and leftovers are listed only when an import fails.
-   The handoff identity, digest, space revision and budgets are in 诊断详情.
-3. **移除参考** deletes only that container; **恢复上次更新** finishes or
-   discards an interrupted update. If you parented one of your own objects under
-   the reference, or created one in its `MtoU_UE_SceneRef` namespace, the update
-   and the removal are refused and name it: move it out of the reference and that
-   namespace, then try again.
-
-The reference is placed in the same frame as the character and the linked
-camera, so it follows a moved or rotated target. The placement is the paired
-target's position when Unreal exports. Export and import again after moving or
-rotating the target, and for any reference exported by an earlier version; if
-the status line says the manifest carried no anchor, the reference sits at the
-Maya origin until you do. Camera linkage does not start while the imported
-reference belongs to another placement (场景参考属于旧的共同空间): export and
-import it again, or click **移除参考** to continue without it.
 
 ## Garment model preview
 

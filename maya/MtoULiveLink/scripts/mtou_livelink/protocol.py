@@ -158,7 +158,6 @@ def make_cache_begin_message(revision, start_frame, end_frame, fps, payload_size
 
 DEFAULT_CAPABILITIES = {
     "linkage": True,
-    "reference": True,
     "cache": True,
     "model": True,
 }
@@ -295,39 +294,6 @@ def make_remove_object_message(session_id, object_id, set_revision, detail=""):
     }
 
 
-def make_reference_result_message(session_id, transfer_id, accepted, detail,
-                                  counts=None, container=None, code=None):
-    counts = counts or {}
-    message = {
-        "type": "reference_result",
-        "session_id": _positive_int(session_id, "session id"),
-        "transfer_id": str(transfer_id),
-        "accepted": bool(accepted),
-        "detail": str(detail),
-        "counts": {
-            "objects": _positive_int(counts.get("objects", 0), "object count", allow_zero=True),
-            "triangles": _positive_int(
-                counts.get("triangles", 0), "triangle count", allow_zero=True),
-            "bytes": _positive_int(counts.get("bytes", 0), "byte count", allow_zero=True),
-        },
-    }
-    if container:
-        message["container"] = str(container)
-    if code:
-        # The stable refusal code, so the other host reports the actual reason
-        # instead of guessing one.
-        message["code"] = str(code)
-    return message
-
-
-def make_reference_removed_message(session_id, detail=""):
-    return {
-        "type": "reference_removed",
-        "session_id": _positive_int(session_id, "session id"),
-        "detail": str(detail),
-    }
-
-
 def _positive_int(value, label, allow_zero=False):
     number = exact_int(value)
     minimum = 0 if allow_zero else 1
@@ -423,8 +389,8 @@ def finite_float(value):
 def validate_anchor(anchor):
     """A linkage ``mode_state`` names the target's placement.
 
-    The shape is the handoff manifest's ``world.anchor``: ``location_cm[3]``
-    and ``rotation_deg{roll, pitch, yaw}``, all finite.
+    The shape is ``location_cm[3]`` and ``rotation_deg{roll, pitch, yaw}``,
+    all finite.
     """
     if not isinstance(anchor, dict):
         raise ValueError("a linkage mode_state must name its anchor")
@@ -554,15 +520,6 @@ def validate_reply(reply):
             "lag_seconds": (int, float),
             "components": list,
             "reason": str,
-        },
-        "reference_offer": {
-            "session_id": (int, float),
-            "transfer_id": str,
-            "directory": str,
-            "manifest_digest": str,
-            "scope": dict,
-            "space_revision": (int, float),
-            "counts": dict,
         },
     }
     # ``source_frame`` is present only once the attempt has applied a pose; a

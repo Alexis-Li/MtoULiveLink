@@ -9,7 +9,6 @@
 
 #include "MtoULinkage.h"
 #include "MtoULinkageEditor.h"
-#include "MtoUSceneRefExport.h"
 
 #include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
@@ -690,78 +689,6 @@ bool CanRemoveSecondary(const FMtoULinkageView& View)
     return Secondary && Secondary->bNegotiated && !View.bRemovingObject && !View.bTransitioning;
 }
 
-/** Formats the scene-reference handoff result into the panel's one report line. */
-FText SceneReferenceResultText(const FMtoUSceneRefExportResult& Result)
-{
-    if (!Result.Error.IsEmpty())
-    {
-        return FText::Format(LOCTEXT("SceneReferenceFailed", "场景参考：{0}"),
-            FText::FromString(Result.Error));
-    }
-    if (Result.Directory.IsEmpty())
-    {
-        return LOCTEXT("SceneReferenceIdle", "场景参考：尚未导出。");
-    }
-    const FText Objects = FText::AsNumber(Result.ExportedObjectCount);
-    if (Result.bScopeComplete)
-    {
-        return FText::Format(LOCTEXT("SceneReferenceValue", "已导出 {0} 个对象，可在 Maya 导入。"), Objects);
-    }
-    // The export names why its scope is partial; the panel says which reason
-    // applies so the user knows what to load or select.
-    if (!Result.UnloadedSublevels.IsEmpty())
-    {
-        return FText::Format(LOCTEXT("SceneReferenceUnloadedValue",
-            "已导出 {0} 个对象，可在 Maya 导入；勾选的 {1} 个子关卡未加载，未包含在内，加载后重新导出即可补上。"),
-            Objects, FText::AsNumber(Result.UnloadedSublevels.Num()));
-    }
-    if (!Result.ExcludedSublevels.IsEmpty())
-    {
-        // Excluded names were selected but the world does not stream them.
-        return FText::Format(LOCTEXT("SceneReferenceExcludedValue",
-            "已导出 {0} 个对象，可在 Maya 导入；勾选的 {1} 个子关卡不在当前世界中，未包含在内。请检查关卡的流式设置，或重新选择子关卡。"),
-            Objects, FText::AsNumber(Result.ExcludedSublevels.Num()));
-    }
-    return FText::Format(LOCTEXT("SceneReferencePartitionedValue",
-        "已导出 {0} 个对象，可在 Maya 导入；World Partition 世界只包含当前已加载区域的内容。"), Objects);
-}
-
-FText SceneReferenceDiagnosticsText(const FMtoUSceneRefExportResult& Result)
-{
-    if (Result.Directory.IsEmpty() && Result.Error.IsEmpty())
-    {
-        return FText::GetEmpty();
-    }
-    TArray<FString> Lines;
-    Lines.Add(TEXT("场景参考诊断"));
-    Lines.Add(FString::Printf(TEXT("交付 ID：%s"), Result.TransferId.IsEmpty() ? TEXT("—") : *Result.TransferId));
-    Lines.Add(FString::Printf(TEXT("清单摘要：%s"), Result.ManifestDigest.IsEmpty() ? TEXT("—") : *Result.ManifestDigest));
-    Lines.Add(FString::Printf(TEXT("目录：%s"), Result.Directory.IsEmpty() ? TEXT("—") : *Result.Directory));
-    Lines.Add(FString::Printf(TEXT("范围：%s · 常驻关卡 %s · 范围%s"),
-        *Result.ScopeName, *Result.LevelPackage,
-        Result.bScopeComplete ? TEXT("完整") : TEXT("未确认")));
-    Lines.Add(FString::Printf(TEXT("子关卡：请求 %s · 已加载 %s · 排除 %s · 未加载 %s"),
-        *FString::Join(Result.RequestedSublevels, TEXT(", ")),
-        *FString::Join(Result.LoadedSublevels, TEXT(", ")),
-        *FString::Join(Result.ExcludedSublevels, TEXT(", ")),
-        *FString::Join(Result.UnloadedSublevels, TEXT(", "))));
-    Lines.Add(FString::Printf(TEXT("对象 %d · 三角形 %d · 顶点 %d · 字节 %lld（几何 %lld + 清单 %lld）"),
-        Result.ExportedObjectCount, Result.TriangleCount, Result.VertexCount,
-        Result.GeometryBytes + Result.ManifestBytes, Result.GeometryBytes, Result.ManifestBytes));
-    Lines.Add(FString::Printf(TEXT("跳过 Actor %d · 抑制组件 %d · 图片数据 %s"),
-        Result.SkippedActorCount, Result.SuppressedComponentCount,
-        Result.bImageDataDetected ? TEXT("有") : TEXT("无")));
-    for (const FString& Warning : Result.Warnings)
-    {
-        Lines.Add(FString::Printf(TEXT("告警：%s"), *Warning));
-    }
-    if (!Result.Error.IsEmpty())
-    {
-        Lines.Add(FString::Printf(TEXT("错误：%s"), *Result.Error));
-    }
-    return FText::FromString(FString::Join(Lines, TEXT("\n")));
-}
-
 /** Builds the one status view from an already-read axis snapshot. */
 FMtoULiveLinkActorDetails::FStatusView BuildStatusView(
     AMtoULiveLinkActor& Target, const FMtoUPreviewReadiness& Readiness)
@@ -892,16 +819,6 @@ FText FMtoULiveLinkActorDetails::FormatLinkageRecovery(const FMtoULinkageView& V
 FText FMtoULiveLinkActorDetails::FormatLinkageDiagnostics(const FMtoULinkageView& View)
 {
     return LinkageDiagnosticsText(View);
-}
-
-FText FMtoULiveLinkActorDetails::FormatSceneReferenceResult(const FMtoUSceneRefExportResult& Result)
-{
-    return SceneReferenceResultText(Result);
-}
-
-FText FMtoULiveLinkActorDetails::FormatSceneReferenceDiagnostics(const FMtoUSceneRefExportResult& Result)
-{
-    return SceneReferenceDiagnosticsText(Result);
 }
 
 bool FMtoULiveLinkActorDetails::bExpandAllGroups = false;
@@ -1661,224 +1578,6 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
             })
         );
 
-    IDetailCategoryBuilder& SceneReference = DetailBuilder.EditCategory(
-        "MtoU Scene Reference", LOCTEXT("SceneReferenceCategory", "场景参考"),
-        ECategoryPriority::Default);
-    SceneReference.InitiallyCollapsed(!bExpandAllGroups);
-
-    UWorld* PanelWorld = Actor.IsValid() ? Actor->GetWorld() : nullptr;
-    struct FMtoUSublevelChoice
-    {
-        FString Package;
-        TSharedPtr<bool> bRequested;
-    };
-    const TSharedPtr<TArray<FMtoUSublevelChoice>> SublevelChoices =
-        MakeShared<TArray<FMtoUSublevelChoice>>();
-    const TSharedPtr<FMtoUSceneRefExportResult> ReferenceResult =
-        MakeShared<FMtoUSceneRefExportResult>();
-    const TSharedPtr<FText> ReferenceMessage = MakeShared<FText>();
-    if (PanelWorld)
-    {
-        for (ULevelStreaming* Streaming : PanelWorld->GetStreamingLevels())
-        {
-            if (Streaming && Streaming->GetLoadedLevel())
-            {
-                FMtoUSublevelChoice Choice;
-                Choice.Package = FPaths::GetBaseFilename(
-                    Streaming->GetWorldAsset().ToSoftObjectPath().GetLongPackageName());
-                Choice.bRequested = MakeShared<bool>(false);
-                SublevelChoices->Add(MoveTemp(Choice));
-            }
-        }
-    }
-
-    SceneReference.AddCustomRow(LOCTEXT("SceneReferenceScopeFilter", "范围 关卡"))
-        .WholeRowContent()
-        [
-            SNew(SVerticalBox)
-            + SVerticalBox::Slot().AutoHeight()
-            [
-                SNew(STextBlock)
-                .AutoWrapText(true)
-                .Text_Lambda([Actor]()
-                {
-                    const UWorld* World = Actor.IsValid() ? Actor->GetWorld() : nullptr;
-                    const ULevel* Level = World ? World->PersistentLevel : nullptr;
-                    return FText::Format(LOCTEXT("SceneReferenceLevel", "常驻关卡：{0}"),
-                        Level ? FText::FromString(Level->GetPackage()->GetName())
-                              : LOCTEXT("SceneReferenceNoWorld", "未知"));
-                })
-                .ToolTipText(LOCTEXT("SceneReferenceScopeTip",
-                    "范围是显式的：当前常驻关卡加上勾选的已加载子关卡；不会自动加载任何子关卡。"))
-            ]
-            + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
-            [
-                SNew(STextBlock)
-                .AutoWrapText(true)
-                .ColorAndOpacity(FSlateColor::UseSubduedForeground())
-                .Text_Lambda([Actor]()
-                {
-                    const UWorld* World = Actor.IsValid() ? Actor->GetWorld() : nullptr;
-                    if (!World)
-                    {
-                        return LOCTEXT("SceneReferenceNoLevels", "子关卡：无世界");
-                    }
-                    if (World->IsPartitionedWorld())
-                    {
-                        return LOCTEXT("SceneReferencePartitioned",
-                            "子关卡：该世界为 World Partition，范围只含已加载单元格内容。");
-                    }
-                    if (World->GetStreamingLevels().IsEmpty())
-                    {
-                        return LOCTEXT("SceneReferenceNoSublevels", "子关卡：该世界没有流式子关卡。");
-                    }
-                    return LOCTEXT("SceneReferenceSublevelCount", "子关卡：见下方勾选。");
-                })
-            ]
-        ];
-
-    if (SublevelChoices->Num() > 0)
-    {
-        TSharedRef<SVerticalBox> SublevelList = SNew(SVerticalBox);
-        for (const FMtoUSublevelChoice& Choice : *SublevelChoices)
-        {
-            SublevelList->AddSlot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 2.0f)
-                [
-                    SNew(SCheckBox)
-                    .Content()
-                    [
-                        SNew(STextBlock).Text(FText::FromString(Choice.Package))
-                    ]
-                    .ToolTipText(LOCTEXT("SceneReferenceSublevelTip",
-                        "勾选后进入显式范围；未加载的子关卡不会出现在这里。"))
-                    .IsChecked_Lambda([Choice]()
-                    {
-                        return Choice.bRequested.IsValid() && *Choice.bRequested
-                            ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-                    })
-                    .OnCheckStateChanged_Lambda([Choice](ECheckBoxState State)
-                    {
-                        if (Choice.bRequested.IsValid())
-                        {
-                            *Choice.bRequested = State == ECheckBoxState::Checked;
-                        }
-                    })
-                ];
-        }
-        SceneReference.AddCustomRow(LOCTEXT("SceneReferenceSublevelsFilter", "已加载子关卡"))
-            .WholeRowContent()
-            [
-                SNew(SVerticalBox)
-                + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 4.0f)
-                [
-                    SNew(STextBlock)
-                    .AutoWrapText(true)
-                    .ColorAndOpacity(FSlateColor::UseSubduedForeground())
-                    .Text(LOCTEXT("SceneReferenceSublevelsHint",
-                        "勾选要放进移交的子关卡；未勾选的子关卡保持不动。"))
-                ]
-                + SVerticalBox::Slot().AutoHeight()
-                [
-                    SublevelList
-                ]
-            ];
-    }
-
-    SceneReference.AddCustomRow(LOCTEXT("SceneReferenceActionsFilter", "导出 移交"))
-        .WholeRowContent()
-        [
-            SNew(SVerticalBox)
-            + SVerticalBox::Slot().AutoHeight()
-            [
-                SNew(SHorizontalBox)
-                + SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 8.0f, 0.0f)
-                [
-                    SNew(SButton)
-                    .Text(LOCTEXT("SceneReferenceExport", "导出场景参考"))
-                    .ToolTipText(LOCTEXT("SceneReferenceExportTip",
-                        "用引擎自己的 FBX 关卡导出具名范围内的静态网格，写清单并检查无图片数据后移交给 Maya。"))
-                    .IsEnabled_Lambda([Actor]()
-                    {
-                        return Actor.IsValid() && Actor->GetWorld() != nullptr;
-                    })
-                    .OnClicked_Lambda([Actor, SublevelChoices, ReferenceResult, ReferenceMessage]()
-                    {
-                        AMtoULiveLinkActor* Target = Actor.Get();
-                        UWorld* World = Target ? Target->GetWorld() : nullptr;
-                        if (!World)
-                        {
-                            return FReply::Handled();
-                        }
-                        TArray<FString> Requested;
-                        for (const FMtoUSublevelChoice& Choice : *SublevelChoices)
-                        {
-                            if (Choice.bRequested.IsValid() && *Choice.bRequested)
-                            {
-                                Requested.Add(Choice.Package);
-                            }
-                        }
-                        *ReferenceMessage = FText::GetEmpty();
-                        FScopedSlowTask ExportTask(1.0f,
-                            LOCTEXT("SceneReferenceExportProgress", "导出场景参考"));
-                        ExportTask.MakeDialog();
-                        if (!FMtoUSceneRefExport::Run(*World, Requested, *ReferenceResult))
-                        {
-                            *ReferenceMessage = FText::Format(
-                                LOCTEXT("SceneReferenceExportRefused", "导出失败：{0}"),
-                                FText::FromString(ReferenceResult->Error));
-                        }
-                        else if (ReferenceResult->bImageDataDetected)
-                        {
-                            *ReferenceMessage = LOCTEXT("SceneReferenceImageData",
-                                "导出的移交包含图片数据，已拒绝。");
-                        }
-                        return FReply::Handled();
-                    })
-                ]
-            ]
-            + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)
-            [
-                SNew(STextBlock)
-                .AutoWrapText(true)
-                .Text_Lambda([Actor, ReferenceResult, ReferenceMessage]()
-                {
-                    if (!ReferenceMessage->IsEmpty())
-                    {
-                        return *ReferenceMessage;
-                    }
-                    return SceneReferenceResultText(*ReferenceResult);
-                })
-                .Visibility_Lambda([Actor, ReferenceResult, ReferenceMessage]()
-                {
-                    return !ReferenceMessage->IsEmpty() || !ReferenceResult->Directory.IsEmpty()
-                        || !ReferenceResult->Error.IsEmpty()
-                        ? EVisibility::Visible : EVisibility::Collapsed;
-                })
-            ]
-            + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)
-            [
-                SNew(STextBlock)
-                .AutoWrapText(true)
-                .ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.35f, 0.25f)))
-                .Text_Lambda([ReferenceResult]()
-                {
-                    if (ReferenceResult->bSucceeded)
-                    {
-                        return FText::GetEmpty();
-                    }
-                    return FText::Format(LOCTEXT("SceneReferenceError", "场景参考错误：{0}"),
-                        FText::FromString(ReferenceResult->Error));
-                })
-                .Visibility_Lambda([ReferenceResult]()
-                {
-                    return ReferenceResult->bSucceeded || ReferenceResult->Error.IsEmpty()
-                        ? EVisibility::Collapsed : EVisibility::Visible;
-                })
-            ]
-        ];
-
     IDetailCategoryBuilder& Advanced = DetailBuilder.EditCategory(
         "MtoU Advanced", LOCTEXT("AdvancedCategory", "高级设置与诊断"),
         ECategoryPriority::Default);
@@ -1909,13 +1608,12 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
             })
         ];
     // The full report: the preview and connection diagnostics plus the linkage
-    // read-back and the handoff identity the groups above leave out.
-    auto FullDiagnostics = [Status, ReferenceResult]()
+    // read-back the groups above leave out.
+    auto FullDiagnostics = [Status]()
     {
         const FText Parts[] = {
             Status->Get().RawDiagnostics,
-            LinkageDiagnosticsText(MtoUGetLinkageView()),
-            SceneReferenceDiagnosticsText(*ReferenceResult)};
+            LinkageDiagnosticsText(MtoUGetLinkageView())};
         TArray<FString> Sections;
         for (const FText& Section : Parts)
         {
@@ -1927,7 +1625,7 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
         return FText::FromString(FString::Join(Sections, TEXT("\n\n")));
     };
     FDetailWidgetRow& DiagnosticsRow = Advanced.AddCustomRow(
-        LOCTEXT("DiagnosticsFilter", "错误详情 原始诊断 镜头联动 场景参考"));
+        LOCTEXT("DiagnosticsFilter", "错误详情 原始诊断 镜头联动"));
     DiagnosticsRow.WholeRowContent()
         [
             SNew(SVerticalBox)

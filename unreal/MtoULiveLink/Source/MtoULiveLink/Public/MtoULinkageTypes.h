@@ -231,8 +231,8 @@ struct MTOULIVELINK_API FMtoULinkageHooks
     TFunction<bool(FString& OutReason)> ValidateTakeover;
     /**
      * The common anchor of the takeover: the primary target's placement.
-     * Linkage's `mode_state` names it so Maya can tell a scene reference
-     * exported for another placement from a current one.
+     * Linkage's `mode_state` names it as the static anchor `A` of the
+     * common space the targets and the linkage camera share.
      */
     TFunction<bool(FTransform& OutAnchor)> GetAnchor;
     /** Report a new view snapshot for the panel. */

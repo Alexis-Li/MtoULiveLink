@@ -5,7 +5,7 @@
 证据见[项目历史](history/README.md)。本文只记录现行范围、仍然有效的产品约束
 和下一阶段的候选方向；候选项立项时在 Issue 中定义需求与验收。
 
-## 1.0.0 范围
+## 现行范围
 
 - **实时预览**：Animation 与 Model 两种工作流，单角色或主角色加一个独立
   骨骼对象（道具或副角色），Additional Parts 属于同一角色的组成。
@@ -15,8 +15,6 @@
 - **镜头联动**：Maya 跟随 UE Level Sequence 的时间与求值相机，互斥时间控制，
   整组姿势一致显示，两端都可返回实时或结束预览
   （[ADR 0014](adr/0014-one-time-authority-and-staged-pose-groups.md)）。
-- **场景参考**：UE 按显式关卡范围导出静态参考几何，Maya 校验后导入，
-  与角色和相机处于同一共同空间。
 
 宿主：Windows 64 位，Maya 2024（Maya 2022.4 支持），stock UE 5.7.4；
 仅编辑器内使用。线上协议见 [protocol/](../protocol/README.md)。

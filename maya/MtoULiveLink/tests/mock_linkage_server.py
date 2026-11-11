@@ -120,7 +120,7 @@ class MockUnrealPeer(object):
             "type": "hello_ack",
             "version": PROTOCOL_VERSION,
             "session_id": self.session_id,
-            "capabilities": {"linkage": True, "reference": True},
+            "capabilities": {"linkage": True},
             "targets": [{"object_id": self.object_id, "kind": "binding_actor",
                          "binding_path": "/Game/Test/BP_Target", "generation": "1"}],
             "space": {"space_revision": self.space_revision,
@@ -258,9 +258,6 @@ class MockUnrealPeer(object):
                 "control": "maya",
                 "detail": "Maya restored its own state",
             })
-            return
-        if message_type == "reference_result":
-            self.identity.setdefault("reference", []).append(message)
             return
         if message_type == "frame":
             # Realtime frames resume after linkage; the peer only counts them.

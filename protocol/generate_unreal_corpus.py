@@ -20,8 +20,8 @@ OUTPUT_PATH = (
 )
 # Every wire operation protocol/README.md defines: negotiation, realtime frames,
 # the cache upload and its outcomes, the linkage pairing, the exclusive
-# time-control state, the complete pose group, the application acknowledgement,
-# the scene-reference handoff and the removal of the second object of a set.
+# time-control state, the complete pose group, the application acknowledgement
+# and the removal of the second object of a set.
 # ``unknown_type`` is a message whose ``type`` the protocol does not define: a
 # retired type belongs here.
 OPERATIONS = {
@@ -38,7 +38,6 @@ OPERATIONS = {
     "camera_time",
     "group",
     "applied",
-    "reference_offer", "reference_result", "reference_removed",
     "remove_object", "object_removed",
     "resource_limit",
     "unknown_type",
@@ -51,9 +50,6 @@ LIMIT_KEYS = (
     "max_message_bytes",
     "max_linkage_group_bytes",
     "max_control_queue",
-    "max_reference_bytes",
-    "max_reference_objects",
-    "max_reference_triangles",
     "max_cache_payload_bytes",
     "max_cache_frame_count",
     "max_set_objects",
@@ -68,8 +64,7 @@ ERROR_CODES = {
     "MODE_CONFLICT", "CACHE_NOT_CLEARED",
     "SET_REVISION_STALE", "SPACE_REVISION_STALE", "EVAL_STALE",
     "RESOURCE_LIMIT",
-    "REFERENCE_STALE", "REFERENCE_DIGEST_MISMATCH", "REFERENCE_IMAGE_DATA",
-    "REFERENCE_OVER_BUDGET", "CONTAINER_NOT_OWNED", "RECOVERY_REFUSED",
+    "RECOVERY_REFUSED",
     "LINKAGE_NOT_ACTIVE",
     "CACHE_METADATA_INVALID", "CACHE_PAYLOAD_TOO_LARGE",
     "CACHE_FRAME_INDEX_INVALID", "CACHE_FRAME_CONTENTS_INVALID",
@@ -78,7 +73,7 @@ ERROR_CODES = {
 # Message types a linkage case may declare the pre-state of. Each one carries
 # the identity an adapter must match before it answers.
 LINKAGE_OPERATIONS = {
-    "camera_time", "applied", "mode_state", "reference_offer", "leave_linkage",
+    "camera_time", "applied", "mode_state", "leave_linkage",
     "remove_object",
 }
 # Stable object ids of a set: the primary character and the second object.

@@ -11,6 +11,11 @@ repository's issues.
 
 - Update the Maya and Unreal components together: protocol v12 refuses a mixed
   pair before it touches either scene. (#14)
+- The scene reference is removed: Unreal's **场景参考** group in the Binding Actor
+  Details and Maya's **打开场景参考窗口** button and **MtoU 场景参考** window no longer
+  exist, and the Maya and Unreal components must be updated together. (#42)
+- You can delete by hand any `MtoU_UE_SceneRef` node an earlier version imported
+  into a Maya scene. Camera import follows in #40. (#42)
 
 ### Added
 
@@ -32,8 +37,7 @@ repository's issues.
 - During Cached Playback, Unreal's **进入联动** is disabled and the 镜头联动 status reads
   缓存播放中; an entry from either host is refused before any Sequencer track is muted,
   so the cache upload is not interrupted. (#9)
-- During Cached Playback, scene-reference offers and second-object removals from Unreal
-  still reach Maya. (#9)
+- During Cached Playback, second-object removals from Unreal still reach Maya. (#9)
 - An Unreal error is shown once and the same way whatever modes the connection used.
   When Unreal then closes the connection, the Maya panel shows that reason, also during
   Cached Playback and linkage, instead of a generic disconnect; an error that only

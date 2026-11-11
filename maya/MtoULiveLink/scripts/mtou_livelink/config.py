@@ -136,36 +136,6 @@ LINKAGE_CONVERGENCE_SECONDS = 2.0
 # the same 2.5x convergence window Unreal allows for Maya's confirmation.
 LINKAGE_MODE_CONFIRMATION_SECONDS = LINKAGE_CONVERGENCE_SECONDS * 2.5
 
-# Scene-reference handoff budgets, enforced by the Maya importer before any
-# staging node is created.
-MAX_REFERENCE_BYTES = 256 * 1024 * 1024
-
-MAX_REFERENCE_OBJECTS = 20000
-
-MAX_REFERENCE_TRIANGLES = 20000000
-
-# Tool-owned scene-reference container and its ownership mark.
-REFERENCE_CONTAINER = "MtoU_UE_SceneRef"
-
-REFERENCE_MARK_ATTRIBUTE = "mtouSceneRefContainer"
-
-REFERENCE_MARK_VALUE = "mtou-scene-ref-container/1"
-
-# The anchor the container was placed for, so a reference exported before the
-# target moved cannot enter linkage as if it were current.
-REFERENCE_ANCHOR_ATTRIBUTE = "mtouSceneRefAnchor"
-
-# The UUIDs of every node one import created, so cleanup deletes only those:
-# a namespace alone does not prove where a node came from.
-REFERENCE_INVENTORY_ATTRIBUTE = "mtouSceneRefNodes"
-
-# A reference matches the linkage anchor within the common-anchor tolerances.
-REFERENCE_ANCHOR_TOLERANCE_CM = 0.01
-
-REFERENCE_ANCHOR_TOLERANCE_DEG = 0.01
-
-REFERENCE_GRAY_SHADER = "MtoU_UE_SceneRef_Gray"
-
 # Tool-owned temporary camera that follows the Unreal evaluated camera.
 LINK_CAMERA_NAME = "MtoU_LinkCamera"
 

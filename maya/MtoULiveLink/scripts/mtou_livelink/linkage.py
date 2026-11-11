@@ -44,13 +44,6 @@ from .protocol import (
 )
 from .timecontrol import TimeControlRefused
 
-STALE_REFERENCE_MESSAGE = "场景参考是为目标的另一摆放导出的，不能用于当前镜头联动"
-
-
-def message_anchor(message):
-    """The placement a linkage ``mode_state`` names (validated by the protocol)."""
-    return message["anchor"]
-
 
 class LinkageError(RuntimeError):
     """A refusal with a stable protocol code.
@@ -366,15 +359,13 @@ class LinkageSession(object):
         return applied.get("applied") is True
 
     # ------------------------------------------------------------- transitions
-    def enter(self, mode_revision, remote=False, anchor=None):
+    def enter(self, mode_revision, remote=False):
         """Take linkage control: capture Maya state and announce the new mode.
 
         ``remote`` marks a transition Unreal started: Maya's ``mode`` message is
         then the answer Unreal waits for (Unreal echoes it with ``mode_state``),
         and a refusal is announced as a failed transition so Unreal hands its
-        borrowed writers back at once. ``anchor`` is the placement that
-        ``mode_state`` named; a scene reference placed for another one refuses
-        the entry before Maya changes anything.
+        borrowed writers back at once.
         """
         revision = exact_int(mode_revision)
         if revision is None or revision < 1:
@@ -390,15 +381,6 @@ class LinkageSession(object):
                     "MODE_CONFLICT",
                     "mode revision {0} is not newer than {1}".format(
                         revision, self._mode_revision))
-        problem = self._host.stale_reference(anchor) if anchor is not None else None
-        if problem:
-            if remote:
-                self._announce_failed(revision, problem)
-            self._emit(LinkageEvent(
-                "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
-                mode_revision=self._mode_revision, detail=problem,
-                diagnostic=self._diagnostic("REFERENCE_STALE", problem)))
-            raise LinkageError("REFERENCE_STALE", STALE_REFERENCE_MESSAGE, problem)
         try:
             # The connection delivers targets and receipts to the lease holder.
             lease = self._session.time_control.acquire(
@@ -621,8 +603,6 @@ class LinkageSession(object):
           and calls :meth:`enter` with ``remote=True``;
         - ``"left"``: Unreal left linkage, refused or failed the transition and
           Maya restored itself (any residual is in the recovery records);
-        - ``"refused"``: Unreal confirmed a placement the scene reference was
-          not exported for; Maya failed the transition and restored itself;
         - ``"noted"``: nothing to do (an echo, or a stale statement).
         """
         validate_reply(message)
@@ -641,10 +621,8 @@ class LinkageSession(object):
                         message.get("session_id"), self._session_id))
             active = self._mode == LINKAGE_MODE
             current = self._mode_revision
-            confirming = False
             if mode == LINKAGE_MODE:
                 if active and revision == current:
-                    confirming = self._awaiting_confirmation
                     self._awaiting_confirmation = False
                     self._detail = detail or self._detail
                     outcome = "confirmed"
@@ -672,11 +650,6 @@ class LinkageSession(object):
                 outcome = "noted"
         if outcome == "left":
             return self._follow_remote_exit(revision, current, detail)
-        if confirming:
-            problem = self._host.stale_reference(message_anchor(message))
-            if problem:
-                self._fail_entered(revision, problem, "REFERENCE_STALE")
-                return "refused"
         if outcome != "enter":
             self._emit(LinkageEvent(
                 "mode", mode=self.mode(), control=self._control,
@@ -799,17 +772,6 @@ class LinkageSession(object):
                 self._issued = None
             if detail:
                 self._detail = "已丢弃过期结果：{0}".format(detail)
-
-    def note_reference_offer(self, message):
-        """Accept the handoff descriptor the panel will offer to the user."""
-        validate_reply(message)
-        with self._lock:
-            self._check_identity_locked(message)
-        self._emit(LinkageEvent(
-            "reference", mode=self._mode, control=self._control,
-            mode_revision=self._mode_revision,
-            detail=str(message.get("transfer_id") or "")))
-        return True
 
     def _check_identity_locked(self, message):
         session_id = exact_int(message.get("session_id"))

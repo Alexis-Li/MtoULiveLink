@@ -14,9 +14,9 @@ class AMtoULiveLinkActor;
  *
  * The runtime module owns the connection, the explicit pairing, the mode
  * transitions and the staged pose-group application. The editor module owns
- * the Level Sequence writers, the evaluated camera/time and the scene-reference
- * handoff, and reaches the runtime only through these functions; neither module
- * includes the other's private headers.
+ * the Level Sequence writers and the evaluated camera/time, and reaches the
+ * runtime only through these functions; neither module includes the other's
+ * private headers.
  *
  * Every function runs on the game thread.
  */
@@ -61,14 +61,3 @@ MTOULIVELINK_API bool MtoURequestLinkageEnter(int32 ModeRevision, FString& OutEr
 /** Leave the linkage mode for `realtime` or `end`. */
 MTOULIVELINK_API bool MtoURequestLinkageLeave(
     const FString& Target, int32 ModeRevision, FString& OutError);
-
-/** Tell Maya that a finished reference handoff is available to import. */
-MTOULIVELINK_API bool MtoUOfferReferenceHandoff(
-    const FString& TransferId,
-    const FString& Directory,
-    const FString& ManifestDigest,
-    const TSharedPtr<class FJsonObject>& Scope,
-    int64 ByteCount,
-    int32 ObjectCount,
-    int32 TriangleCount,
-    FString& OutError);

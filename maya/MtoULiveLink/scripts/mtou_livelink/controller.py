@@ -3,7 +3,6 @@
 # Licensed under the GPL with additional terms; see NOTICE.
 """Product controller: panel, session and scene state authority."""
 
-import contextlib
 import time
 
 from . import mayaapi
@@ -16,12 +15,8 @@ from .config import (
     DEFAULT_PLAYBACK_CAP,
     ERROR_KIND_SCHEDULING,
     LINKAGE_MODE,
-    MAX_REFERENCE_BYTES,
-    MAX_REFERENCE_OBJECTS,
-    MAX_REFERENCE_TRIANGLES,
     PLAYBACK_CAP_CHOICES,
     REALTIME_MODE,
-    REFERENCE_CONTAINER,
     SECONDARY_OBJECT_ID,
     WORKFLOW_ANIMATION,
     WORKFLOW_MODEL,
@@ -39,8 +34,6 @@ from .mayaapi import cmds, om, omui
 from .protocol import (
     exact_int,
     make_mode_message,
-    make_reference_removed_message,
-    make_reference_result_message,
     validate_reply,
 )
 from .scene import CharacterScene, CharacterSceneError, long_transform, require_maya, selected_root
@@ -55,14 +48,6 @@ from .ui.layout import (
     text_units,
 )
 from .ui.objects_window import OBJECTS_WINDOW_NAME, ObjectsWindow
-from .ui.reference_window import (
-    REFERENCE_WINDOW_NAME,
-    ReferenceWindow,
-    import_time_label,
-    reference_counts_summary,
-    reference_report_lines,
-    reference_scope_summary,
-)
 from .ui.style import (
     BUTTON_HEIGHT,
     CARD_CONTENT,
@@ -140,20 +125,15 @@ class Controller(object):
         self._linkage = None
         self._linkage_pump = None
         self._linkage_pump_generation = 0
-        self._reference_busy = 0
         self._linkage_last_recovery = []
         self._linkage_event = None
         self._reported_linkage_failure = None
         # Unreal errors this connection already reported in a dialog; the
         # same error ending the connection does not open a second one.
         self._reported_errors = set()
-        self._reference_offer = None
-        self._reference_report = {"action": None, "report": None}
-        self._reference_window = None
         self._enter_linkage_button = None
         self._leave_linkage_button = None
         self._end_linkage_button = None
-        self._reference_window_button = None
         self._link_status_text = None
         # The independent object beside the primary character; it joins the
         # set the next connection negotiates. The pairing window shows it.
@@ -308,7 +288,7 @@ class Controller(object):
         cmds.setParent("..")
 
         # Card 5 · single-character linkage: one status line, enter and leave,
-        # and the scene-reference window.
+        # and the object pairing window.
         linkage_card = cmds.frameLayout(label="镜头联动", collapsable=False,
                                         marginWidth=CARD_MARGIN, marginHeight=CARD_MARGIN)
         cmds.columnLayout(adjustableColumn=True, rowSpacing=0)
@@ -335,11 +315,7 @@ class Controller(object):
             label="打开对象配对窗口", height=BUTTON_HEIGHT,
             annotation="设置或移除与主角色一起预览的副对象。",
             command=lambda *_: self.open_objects_window())
-        self._reference_window_button = cmds.button(
-            label="打开场景参考窗口", height=BUTTON_HEIGHT,
-            annotation="查看、导入、移除或恢复 UE 场景参考。",
-            command=lambda *_: self.open_reference_window())
-        self._grid_row([self._objects_window_button, self._reference_window_button],
+        self._grid_row([self._objects_window_button],
                        height=BUTTON_HEIGHT + GRID_GAP, top=GRID_GAP)
         cmds.setParent("..")
         cmds.setParent("..")
@@ -1222,7 +1198,6 @@ class Controller(object):
             sections.append("错误详情：\n{0}".format(details))
         sections.append(self._objects_diagnostic_text())
         sections.append(self._linkage_diagnostic_text())
-        sections.append(self._reference_diagnostic_text())
         return "\n\n".join(sections)
 
     def _linkage_diagnostic_text(self):
@@ -1262,33 +1237,6 @@ class Controller(object):
             "逐资源恢复：{0}".format("无" if not records else "{0} 项".format(len(records))),
         ]
         lines.extend("  {0}".format(record) for record in records)
-        return "\n".join(lines)
-
-    def _reference_diagnostic_text(self):
-        """场景参考 handoff identity, frozen budgets and the full last report."""
-        offer = self._reference_offer
-        lines = ["场景参考："]
-        if isinstance(offer, dict) and offer:
-            space_revision = offer.get("space_revision")
-            lines.extend([
-                "交接 ID：{0}".format(offer.get("transfer_id") or "—"),
-                "目录：{0}".format(offer.get("directory") or "—"),
-                "范围：{0}".format(reference_scope_summary(offer)),
-                "摘要：{0}".format(
-                    offer.get("manifest_digest") or offer.get("digest") or "—"),
-                "计数：{0}".format(reference_counts_summary(offer.get("counts"))),
-                "空间版本：{0}".format(
-                    "—" if space_revision is None else space_revision),
-            ])
-        else:
-            lines.append("交接：暂无")
-        budget = self.reference_budget()
-        lines.append("冻结上限：字节 {0:,}（{1:g} MiB）· 对象 {2:,} · 三角面 {3:,}".format(
-            int(budget["bytes"]), float(budget["bytes"]) / (1024 * 1024),
-            int(budget["objects"]), int(budget["triangles"])))
-        lines.append("上次结果：")
-        lines.extend("  {0}".format(line)
-                     for line in reference_report_lines(self.reference_report()))
         return "\n".join(lines)
 
     def show_legal_notice(self, *unused):
@@ -1482,11 +1430,10 @@ class Controller(object):
             return
         self._start_linkage()
 
-    def _start_linkage(self, remote_revision=None, remote_anchor=None):
+    def _start_linkage(self, remote_revision=None):
         """Enter linkage for the panel's action or for Unreal's transition.
 
-        ``remote_revision`` is the revision of a transition Unreal started and
-        ``remote_anchor`` the target placement its ``mode_state`` named.
+        ``remote_revision`` is the revision of a transition Unreal started.
         Every refusal of such a transition is announced to Unreal as failed,
         so it hands back the writers it borrowed instead of waiting out its
         own confirmation timeout.
@@ -1553,7 +1500,7 @@ class Controller(object):
             linkage.set_session_id(session_id)
             # The linkage session takes the time-control lease, or refuses
             # with the reason, before Maya changes anything.
-            linkage.enter(revision, remote=remote, anchor=remote_anchor)
+            linkage.enter(revision, remote=remote)
         except StreamingSessionError as error:
             linkage.close()
             refuse(make_diagnostic(
@@ -1607,8 +1554,7 @@ class Controller(object):
         linkage = self._linkage
         if linkage is None:
             if reply.get("mode") == LINKAGE_MODE and revision > self._linkage_revision:
-                self._start_linkage(remote_revision=revision,
-                                    remote_anchor=reply.get("anchor"))
+                self._start_linkage(remote_revision=revision)
             else:
                 self._note_linkage_revision(revision)
             return
@@ -1618,20 +1564,12 @@ class Controller(object):
             self._report_linkage_refusal(error)
             return
         if outcome == "enter":
-            self._start_linkage(remote_revision=revision,
-                                remote_anchor=reply.get("anchor"))
+            self._start_linkage(remote_revision=revision)
             return
         self._note_linkage_revision(linkage.mode_revision())
         if outcome == "left":
             self._finish_linkage_exit(
                 linkage, "已按 Unreal 的指令退出镜头联动：Maya 暂停在恢复帧，连接不变")
-        elif outcome == "refused":
-            self._finish_linkage_exit(
-                linkage, "未进入镜头联动：Maya 已恢复原状态，连接不变")
-            if not linkage.recovery_records():
-                # Without a residual the exit reported nothing; the refusal
-                # itself is what the user must act on.
-                self._report_linkage_failure(self._linkage_event.diagnostic)
         self._update_linkage_status()
         self._update_mode_controls()
 
@@ -1673,8 +1611,7 @@ class Controller(object):
             self._start_linkage_pump()
             return
         # The dispatcher stays installed for the session's lifetime: Unreal
-        # answers a leave with a mode statement, and it may push a reference
-        # offer while Maya is merely streaming realtime. Leaving released the
+        # answers a leave with a mode statement. Leaving released the
         # linkage lease when linkage held one; 结束预览 during Cached Playback
         # leaves the cache's lease alone.
         self._note_linkage_revision(linkage.mode_revision())
@@ -1688,9 +1625,8 @@ class Controller(object):
         self._update_mode_controls()
 
     def _shutdown_linkage(self):
-        """Release every linkage resource and drop the reference window."""
+        """Release every linkage resource."""
         self._stop_linkage_pump()
-        self._close_sub_windows()
         linkage, self._linkage = self._linkage, None
         if linkage is None:
             return
@@ -1762,9 +1698,6 @@ class Controller(object):
             # Unreal ended the connection; the session's terminal event then
             # restores Maya on the main thread.
             return
-        if self._reference_busy:
-            # A reference action is running; the next pump step samples.
-            return
         if linkage.confirmation_overdue():
             linkage.expire_unconfirmed()
             self._finish_linkage_exit(
@@ -1793,8 +1726,6 @@ class Controller(object):
         if kind == "mode_state":
             self._defer_ui(lambda reply=dict(reply):
                            self._on_remote_mode_state(reply, holder.get("session")))
-        elif kind == "reference_offer":
-            self.offer_reference(reply)
         elif kind == "object_removed":
             self._on_object_removed(reply, holder)
         elif kind == "error":
@@ -2009,40 +1940,10 @@ class Controller(object):
             "结束预览：Unreal 仍保留预览接管，结束后恢复原写入者。"
             if held else "进入镜头联动后可结束预览。")
         self._set_tooltip(
-            self._reference_window_button, "查看、导入、移除或恢复 UE 场景参考。")
-        self._set_tooltip(
             self._objects_window_button,
             "设置或移除与主角色一起预览的副对象（当前：主角色和副对象）。"
             if self._secondary_scene is not None else
             "设置或移除与主角色一起预览的副对象（当前：只有主角色）。")
-
-    # ---------------------------------------------------------- linkage UI
-    def open_reference_window(self):
-        """Show the scene-reference detail window, reusing the instance."""
-        window = self._reference_window
-        if window is not None and window.exists():
-            window.show()
-            return window
-        self._reference_window = None
-        if cmds is not None and cmds.window(REFERENCE_WINDOW_NAME, exists=True):
-            cmds.deleteUI(REFERENCE_WINDOW_NAME)
-        window = ReferenceWindow(self)
-        self._reference_window = window
-        return window
-
-    def close_reference_window(self):
-        """Delete this detail window only; the reference state survives."""
-        window, self._reference_window = self._reference_window, None
-        if window is not None:
-            window.close()
-
-    def reference_window_closed(self, window):
-        """Maya closed ``window`` itself: forget it without deleting anything."""
-        if self._reference_window is window:
-            self._reference_window = None
-
-    def _close_sub_windows(self):
-        self.close_reference_window()
 
     # ------------------------------------------------------------ object set
     def _session_has_secondary(self):
@@ -2317,285 +2218,6 @@ class Controller(object):
         if window is not None and window.exists():
             window.refresh()
 
-    def _refresh_reference_window(self):
-        window = self._reference_window
-        if window is not None:
-            window.refresh()
-
-    # -------------------------------------------------------- scene reference
-    def offer_reference(self, offer):
-        """Store the handoff descriptor Unreal offered for import."""
-        self._reference_offer = _copy_reference_offer(offer)
-        self._defer_ui(self._refresh_reference_window)
-
-    def reference_offer(self):
-        """The stored handoff offer, or None when nothing was offered."""
-        offer = self._reference_offer
-        return dict(offer) if isinstance(offer, dict) else None
-
-    def reference_budget(self):
-        """The frozen scene-reference budgets."""
-        return {"bytes": MAX_REFERENCE_BYTES,
-                "objects": MAX_REFERENCE_OBJECTS,
-                "triangles": MAX_REFERENCE_TRIANGLES}
-
-    def reference_report(self):
-        """The last reference action, its report, handoff and finish time."""
-        outcome = self._reference_report
-        return {"action": outcome.get("action"),
-                "report": dict(outcome.get("report") or {}),
-                "transfer_id": outcome.get("transfer_id"),
-                "time": outcome.get("time")}
-
-    def reference_state(self):
-        """Return ``(state, tooltip)``: whether the offered handoff can be imported."""
-        offer = self._reference_offer
-        if not isinstance(offer, dict) or not offer:
-            return "暂无交接", "先在 UE 的“场景参考”中导出，再回到这里导入。"
-        outcome = self._reference_report
-        report = outcome.get("report") or {}
-        current = (outcome.get("action") == "import"
-                   and outcome.get("transfer_id") == offer.get("transfer_id"))
-        session_space = exact_int(getattr(self._session, "space_revision", None))
-        offer_space = exact_int(offer.get("space_revision"))
-        if (current and report.get("code") == "REFERENCE_STALE") or (
-                session_space is not None and offer_space is not None
-                and offer_space != session_space):
-            return ("已过期，请在 UE 重新导出",
-                    "这份交接属于旧的共同空间；在 UE 重新导出场景参考后再导入。")
-        if current and report.get("accepted"):
-            return ("已导入（{0}）".format(import_time_label(outcome.get("time"))),
-                    "再次点击“导入/更新参考”会用这份交接替换场景中的参考。")
-        return "可导入", "点击“导入/更新参考”把这份交接导入 Maya。"
-
-    def reference_window_controls(self):
-        """Enablement and tooltips for the reference window's buttons."""
-        ready = self._session_ready()
-        offer = self._reference_offer
-        import_enabled = bool(offer) and ready
-        if import_enabled:
-            import_tooltip = "按冻结上限校验并导入 UE 交接的场景参考。"
-        elif not offer:
-            import_tooltip = "先在 Unreal 中导出场景参考交接。"
-        else:
-            import_tooltip = "需要已连接的 Unreal 会话来汇报导入结果。"
-        return {
-            "import": (import_enabled, import_tooltip),
-            "remove": (True, "删除工具自己创建的参考容器，不触碰其他节点。"),
-            "recover": (True, "完成或放弃上一次被中断的参考更新。"),
-        }
-
-    def import_reference(self):
-        """Validate one offered handoff, then import it under the budgets."""
-        require_maya()
-        handoff = self._reference_handoff()
-        if handoff is None:
-            self._warn("没有待导入的场景参考交接。")
-            return
-        if not self._session_ready():
-            self._show_error(make_diagnostic(
-                "STREAM_INTERRUPTED",
-                "导入场景参考需要已连接的 Unreal 会话。",
-                solution="请先连接 Unreal，再导入它交接的参考。"))
-            return
-        reference = self._reference_module_or_report()
-        if reference is None:
-            return
-        budget = self.reference_budget()
-        try:
-            with self._holding_live_samples():
-                report = reference.inspect(handoff, budget)
-        except reference.ReferenceRefused as error:
-            self._report_reference_refusal(error, record=True)
-            return
-        if not (isinstance(report, dict) and report.get("accepted")):
-            # Validation reported a problem instead of raising it: nothing is
-            # staged, and the report card carries the reason.
-            self._reference_report = self._reference_outcome("import", report)
-            self._warn("场景参考未通过校验：{0}".format(
-                (report or {}).get("detail") if isinstance(report, dict) else "未知原因"))
-            self._refresh_reference_window()
-            return
-        try:
-            with self._holding_live_samples():
-                report = reference.import_handoff(handoff, budget)
-        except reference.ReferenceRefused as error:
-            self._report_reference_refusal(error, record=True)
-            return
-        self._reference_report = self._reference_outcome("import", report)
-        self._submit_reference_result(report)
-        self._set_text(self._status_text, self._reference_outcome_text(report))
-        self._refresh_reference_window()
-
-    def remove_reference(self):
-        """Remove only the tool-owned reference container."""
-        require_maya()
-        reference = self._reference_module_or_report()
-        if reference is None:
-            return
-        try:
-            with self._holding_live_samples():
-                report = self._reference_container(reference).remove()
-        except reference.ReferenceRefused as error:
-            self._report_reference_refusal(error)
-            return
-        self._reference_report = self._reference_outcome("remove", report)
-        self._submit_reference_removed(report)
-        self._set_text(self._status_text, self._reference_outcome_text(report))
-        self._refresh_reference_window()
-
-    def recover_reference(self):
-        """Finish or discard the interrupted reference update."""
-        require_maya()
-        reference = self._reference_module_or_report()
-        if reference is None:
-            return
-        try:
-            with self._holding_live_samples():
-                report = self._reference_container(reference).recover()
-        except reference.ReferenceRefused as error:
-            self._report_reference_refusal(error)
-            return
-        self._reference_report = self._reference_outcome("recover", report)
-        self._set_text(self._status_text, self._reference_outcome_text(report))
-        self._refresh_reference_window()
-
-    @contextlib.contextmanager
-    def _holding_live_samples(self):
-        """No live sample or linkage group while a reference action runs.
-
-        The FBX import and the container swap are long Maya commands during
-        which Maya can run this tool's timers; a pose read from the half-built
-        scene would fail and end the connection.
-        """
-        self._reference_busy += 1
-        hold = getattr(self._session, "holding_samples", None)
-        try:
-            with hold() if callable(hold) else contextlib.nullcontext():
-                yield
-        finally:
-            self._reference_busy -= 1
-
-    def _reference_module_or_report(self):
-        """The scene-reference module, or None after reporting why it is gone."""
-        try:
-            from . import reference
-        except ImportError as error:
-            self._show_error(make_diagnostic("INTERNAL_ERROR", str(error),
-                                             details=str(error)))
-            return None
-        return reference
-
-    def _reference_container(self, reference):
-        offer = self._reference_offer
-        space_revision = offer.get("space_revision") if offer else None
-        return reference.ReferenceContainer(
-            container=REFERENCE_CONTAINER, space_revision=space_revision,
-            budget=self.reference_budget())
-
-    def _reference_handoff(self):
-        """Map the stored offer onto the reference module's handoff shape."""
-        offer = self._reference_offer
-        if not isinstance(offer, dict) or not offer:
-            return None
-        handoff = {
-            "transfer_id": offer.get("transfer_id"),
-            "directory": offer.get("directory"),
-            "digest": offer.get("manifest_digest"),
-            "space_revision": offer.get("space_revision"),
-        }
-        scope = offer.get("scope")
-        if isinstance(scope, dict):
-            handoff["scope"] = dict(scope)
-        counts = offer.get("counts")
-        if isinstance(counts, dict):
-            handoff["counts"] = dict(counts)
-        return handoff
-
-    def _submit_reference_result(self, report):
-        """Tell Unreal how the local import, swap or removal ended."""
-        session = self._session
-        session_id = self._session_id_of(session)
-        if session is None or session_id is None:
-            self._warn("场景参考结果无法发送给 Unreal：没有已连接的会话。")
-            return
-        offer = self._reference_offer or {}
-        counts = report.get("counts") if isinstance(report, dict) else {}
-        container = report.get("container") if isinstance(report, dict) else {}
-        container_name = container.get("name") if isinstance(container, dict) else None
-        message = make_reference_result_message(
-            session_id, offer.get("transfer_id") or "",
-            bool(report.get("accepted")), str(report.get("detail") or ""),
-            counts=counts if isinstance(counts, dict) else {},
-            container=container_name,
-            code=report.get("code") if isinstance(report, dict) else None)
-        try:
-            session.submit_linkage(message)
-        except (StreamingSessionError, RuntimeError, TypeError, ValueError) as error:
-            self._warn("场景参考结果发送失败：{0}".format(error))
-
-    def _submit_reference_removed(self, report):
-        """Tell Unreal the tool-owned container is gone."""
-        session = self._session
-        session_id = self._session_id_of(session)
-        if session is None or session_id is None:
-            self._warn("移除结果无法发送给 Unreal：没有已连接的会话。")
-            return
-        message = make_reference_removed_message(
-            session_id, str((report or {}).get("detail") or ""))
-        try:
-            session.submit_linkage(message)
-        except (StreamingSessionError, RuntimeError, TypeError, ValueError) as error:
-            self._warn("移除结果发送失败：{0}".format(error))
-
-    def _reference_outcome(self, action, report):
-        """One stored reference result, tied to the offered handoff and its time."""
-        offer = self._reference_offer or {}
-        return {"action": action, "report": report,
-                "transfer_id": offer.get("transfer_id"), "time": time.time()}
-
-    def _report_reference_refusal(self, error, record=False):
-        code = getattr(error, "code", None) or "INTERNAL_ERROR"
-        detail = getattr(error, "detail", None) or str(error)
-        if record:
-            # A refused import is the window's last result too, so its state
-            # line can say a stale handoff needs a new export.
-            self._reference_report = self._reference_outcome(
-                "import", {"accepted": False, "code": code, "detail": detail})
-            self._refresh_reference_window()
-        diagnostic = make_diagnostic(
-            code if code in DIAGNOSTICS else "INTERNAL_ERROR", detail,
-            details=detail)
-        self._last_diagnostic = diagnostic
-        self._show_error(diagnostic)
-
-    def _reference_outcome_text(self, report):
-        """One status line for the main panel after a reference action."""
-        if not isinstance(report, dict):
-            return "场景参考操作已完成。"
-        if report.get("rolled_back"):
-            return "场景参考：导入失败已回滚（{0}）".format(report.get("detail") or "")
-        if report.get("accepted"):
-            counts = report.get("counts") or {}
-            text = "场景参考：已导入 {0} 个对象".format(counts.get("objects") or 0)
-            anchor = report.get("anchor")
-            if isinstance(anchor, dict) and anchor.get("source") == "absent":
-                text += "；交接清单未带锚点，参考位于 Maya 原点，请在 Unreal 重新导出并再次导入"
-            return text
-        if report.get("removed"):
-            return "场景参考：已移除 {0} 个节点".format(report.get("nodes_removed") or 0)
-        detail = report.get("detail")
-        return "场景参考：{0}".format(detail) if detail else "场景参考操作已完成。"
-
-    @staticmethod
-    def _warn(message):
-        if cmds is None:
-            return
-        try:
-            cmds.warning("MtoU_LiveLink {0}".format(message))
-        except (AttributeError, RuntimeError, TypeError):
-            pass
-
     def close(self, *unused):
         """Maya is closing the panel: release what it owns, never delete it again."""
         self._remove_maya_exit_callback()
@@ -2823,15 +2445,3 @@ def _enter_linkage_reason(ready, cached_owner, active, mode=REALTIME_MODE):
     if not ready:
         return "请先设置角色并连接 Unreal，并在 UE 中配对镜头联动目标。"
     return ""
-
-
-def _copy_reference_offer(offer):
-    """One stored copy of the offered handoff, safe to read from any thread."""
-    if not isinstance(offer, dict):
-        return None
-    copied = dict(offer)
-    for name in ("scope", "counts"):
-        value = copied.get(name)
-        if isinstance(value, dict):
-            copied[name] = dict(value)
-    return copied

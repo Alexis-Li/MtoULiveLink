@@ -14,8 +14,6 @@ struct FMtoUHelloMessage;
 struct FMtoUModeMessage;
 struct FMtoULeaveLinkageMessage;
 struct FMtoUPoseGroupMessage;
-struct FMtoUReferenceResultMessage;
-struct FMtoUReferenceRemovedMessage;
 struct FMtoURemoveObjectMessage;
 struct FMtoUAppliedComponent;
 
@@ -136,10 +134,6 @@ public:
     void NoteLeaveLinkage(const FMtoULeaveLinkageMessage& Message, double NowSeconds);
     /** One complete pose sample answering one target. */
     void StagePoseGroup(const FMtoUPoseGroupMessage& Message, double NowSeconds);
-    /** The local handoff import, swap or removal finished. */
-    void NoteReferenceResult(const FMtoUReferenceResultMessage& Message);
-    /** The user removed the tool-owned reference container. */
-    void NoteReferenceRemoved(const FMtoUReferenceRemovedMessage& Message);
 
     /** The negotiated identity of the streaming session: its primary object. */
     void NegotiateIdentity(const FString& ObjectId, int32 SetRevision, int32 SpaceRevision);
@@ -195,11 +189,6 @@ public:
     /** Leave the linkage mode for `realtime` or `end`. */
     bool RequestLeave(const FString& Target, int32 ModeRevision,
         FString& OutError, FString& OutErrorCode);
-
-    /** Tell Maya that a finished reference handoff is available to import. */
-    bool OfferReferenceHandoff(const FString& TransferId, const FString& Directory,
-        const FString& ManifestDigest, const TSharedPtr<FJsonObject>& Scope,
-        int64 ByteCount, int32 ObjectCount, int32 TriangleCount, FString& OutError);
 
     /** Reply sink installed by the owning source; runs on the Game Thread. */
     TFunction<void(TArray<uint8>&&, bool bControl)> SendReply;
@@ -317,7 +306,4 @@ private:
     bool bIssueOpen = false;
     /** Its record in `Stats.Records`, or INDEX_NONE once records are full. */
     int32 IssuedRecord = INDEX_NONE;
-    // Transfers this session offered, so a reference result for a handoff that
-    // was never offered cannot report an outcome.
-    TSet<FString> OfferedTransferIds;
 };

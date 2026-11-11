@@ -78,7 +78,6 @@
 #include "Input/Reply.h"
 #include "Misc/ScopeExit.h"
 #include "MtoULiveLinkActorDetails.h"
-#include "MtoUSceneRefExport.h"
 
 #include <limits>
 
@@ -733,7 +732,7 @@ bool FMtoUDetailsLinkageStatusTextTest::RunTest(const FString& Parameters)
     FMtoULinkageView Overdue = Synced;
     Overdue.AppliedLagSeconds = 0.1;
     Overdue.TargetOverdueSeconds = 2.4;
-    Overdue.Detail = TEXT("Offered reference handoff tx-1.");
+    Overdue.Detail = TEXT("Greeted maya-host (Maya 2024).");
     TestEqual(TEXT("an overdue target makes the status lag"), Status(Overdue, SequenceTime),
         FString(TEXT("镜头联动中 · Unreal 控制时间 · Maya 跟不上")));
     TestTrue(TEXT("an overdue target reports its wait"),
@@ -775,61 +774,6 @@ bool FMtoUDetailsLinkageStatusTextTest::RunTest(const FString& Parameters)
         FMtoULiveLinkActorDetails::CanEnterLinkage(Paired, TransitionTime));
     TestFalse(TEXT("an unpaired target cannot enter"),
         FMtoULiveLinkActorDetails::CanEnterLinkage(Idle, MayaTime));
-    return true;
-}
-
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUDetailsSceneReferenceTextTest,
-    "MtoULiveLink.Editor.DetailsSceneReferenceText",
-    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FMtoUDetailsSceneReferenceTextTest::RunTest(const FString& Parameters)
-{
-    (void)Parameters;
-    FMtoUSceneRefExportResult Result;
-    TestEqual(TEXT("nothing exported yet"),
-        FMtoULiveLinkActorDetails::FormatSceneReferenceResult(Result).ToString(),
-        FString(TEXT("场景参考：尚未导出。")));
-    TestTrue(TEXT("no diagnostics before an export"),
-        FMtoULiveLinkActorDetails::FormatSceneReferenceDiagnostics(Result).IsEmpty());
-
-    Result.bSucceeded = true;
-    Result.Directory = TEXT("Saved/MtoU/Handoff/tx-1");
-    Result.TransferId = TEXT("tx-20261022-0153-8f2c");
-    Result.ManifestDigest = TEXT("sha256:abcd");
-    Result.ExportedObjectCount = 152;
-    Result.TriangleCount = 1203344;
-    Result.GeometryBytes = 48000000;
-    Result.ManifestBytes = 213004;
-    const FString Line = FMtoULiveLinkActorDetails::FormatSceneReferenceResult(Result).ToString();
-    TestEqual(TEXT("an export in the user's terms"), Line, FString(TEXT("已导出 152 个对象，可在 Maya 导入。")));
-    for (const TCHAR* Internal : {TEXT("tx-"), TEXT("字节"), TEXT("三角形"), TEXT("交付"), TEXT("sha256")})
-    {
-        TestFalse(*FString::Printf(TEXT("the result line hides '%s'"), Internal), Line.Contains(Internal));
-    }
-    const FString Diagnostics = FMtoULiveLinkActorDetails::FormatSceneReferenceDiagnostics(Result).ToString();
-    for (const TCHAR* Expected : {TEXT("tx-20261022-0153-8f2c"), TEXT("sha256:abcd"), TEXT("三角形 1203344"),
-             TEXT("字节 48213004")})
-    {
-        TestTrue(*FString::Printf(TEXT("diagnostics keep '%s'"), Expected), Diagnostics.Contains(Expected));
-    }
-
-    // A partial scope names its own reason.
-    Result.bScopeComplete = false;
-    Result.UnloadedSublevels = {TEXT("Level_D003CP6_Act01_FX")};
-    TestTrue(TEXT("an unloaded requested sublevel is named"),
-        FMtoULiveLinkActorDetails::FormatSceneReferenceResult(Result).ToString().Contains(TEXT("1 个子关卡未加载")));
-    Result.UnloadedSublevels.Reset();
-    Result.ExcludedSublevels = {TEXT("Level_D003CP6_Act01_Light"), TEXT("Level_D003CP6_Act01_Prop")};
-    const FString Excluded = FMtoULiveLinkActorDetails::FormatSceneReferenceResult(Result).ToString();
-    TestTrue(TEXT("selected sublevels the world does not stream are named"),
-        Excluded.Contains(TEXT("勾选的 2 个子关卡不在当前世界中")));
-    TestTrue(TEXT("the remedy names the level streaming"), Excluded.Contains(TEXT("流式设置")));
-    TestFalse(TEXT("sublevels missing from the world are not called unloaded"), Excluded.Contains(TEXT("未加载，")));
-    Result.ExcludedSublevels.Reset();
-    const FString Partitioned = FMtoULiveLinkActorDetails::FormatSceneReferenceResult(Result).ToString();
-    TestTrue(TEXT("a World Partition scope says it holds loaded content only"),
-        Partitioned.Contains(TEXT("World Partition")));
-    TestFalse(TEXT("a World Partition scope mentions no sublevel"), Partitioned.Contains(TEXT("子关卡")));
     return true;
 }
 
@@ -6739,20 +6683,16 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
 
 // ---------------------------------------------------------------------------
 // Protocol v10 linkage: the editor half of the boundary (writer takeover,
-// camera/time evaluation) and the scene-reference handoff.
+// camera/time evaluation).
 // ---------------------------------------------------------------------------
 
 #include "MtoULinkageEditor.h"
-#include "MtoUSceneRefExport.h"
 
 #include "Camera/CameraComponent.h"
 #include "CineCameraActor.h"
 #include "CineCameraComponent.h"
-#include "Components/PointLightComponent.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Components/StaticMeshComponent.h"
-#include "Engine/StaticMesh.h"
 #include "LevelSequence.h"
 #include "LevelSequenceActor.h"
 #include "LevelSequencePlayer.h"
@@ -7463,289 +7403,6 @@ bool FMtoULinkageCameraTimeTest::RunTest(const FString& Parameters)
         }
     }
     Player->Stop();
-    return true;
-}
-
-// The scene-reference handoff: its scope, its manifest and its image-data check.
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(
-    FMtoUSceneRefExportTest,
-    "MtoULiveLinkEditor.SceneReferenceExport",
-    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
-
-bool FMtoUSceneRefExportTest::RunTest(const FString& Parameters)
-{
-    (void)Parameters;
-
-    // A produced file that carries embedded media is image data.
-    const FString EmbeddedPath = FPaths::Combine(
-        FPaths::ProjectSavedDir(), TEXT("MtoUSceneRefTest"), TEXT("embedded_media.fbx"));
-    {
-        FString Content;
-        Content += TEXT("Texture: \"T_Rock\"\n");
-        Content += TEXT("{\n");
-        Content += TEXT("    Type: \"TextureVideoClip\"\n");
-        Content += TEXT("    FileName: \"t_rock.png\"\n");
-        Content += TEXT("    Content: ,\n");
-        Content += TEXT("     \"iVBORw0KGgoAAAANSUhEUg\"\n");
-        Content += TEXT("}\n");
-        if (!TestTrue(TEXT("the synthetic media fixture is written"),
-                FFileHelper::SaveStringToFile(Content, *EmbeddedPath)))
-        {
-            return false;
-        }
-        FMtoUTextureScan Scan;
-        FMtoUSceneRefExport::ScanFbxTextureReferences(EmbeddedPath, Scan);
-        TestEqual(TEXT("the fixture records one texture"), Scan.TextureRecords, 1);
-        TestEqual(TEXT("the fixture records embedded media"), Scan.EmbeddedMediaRecords, 1);
-        FMtoUSceneRefExportResult MediaResult;
-        MediaResult.TextureScan = Scan;
-        TestTrue(TEXT("embedded media is image data"),
-            FMtoUSceneRefExport::HasImageData(MediaResult));
-    }
-
-    UWorld* World = CreateLinkageWorld(TEXT("SceneReferenceWorld"));
-    if (!TestNotNull(TEXT("editor world"), World))
-    {
-        return false;
-    }
-    UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
-    if (!TestNotNull(TEXT("fixture Cube"), Cube))
-    {
-        return false;
-    }
-    // A non-ANSI label: the manifest still reaches Maya as UTF-8.
-    const FString ReferenceLabel = TEXT("测试石块");
-    AActor* Reference = SpawnLinkageAnchor(*World, *ReferenceLabel);
-    UStaticMeshComponent* Mesh =
-        NewObject<UStaticMeshComponent>(Reference, TEXT("ReferenceMesh"));
-    Mesh->SetupAttachment(Reference->GetRootComponent());
-    Mesh->SetStaticMesh(Cube);
-    Mesh->RegisterComponent();
-    // A non-geometry component the export must suppress for its own duration.
-    UPointLightComponent* Light = NewObject<UPointLightComponent>(Reference, TEXT("ReferenceLight"));
-    Light->SetupAttachment(Reference->GetRootComponent());
-    Light->RegisterComponent();
-
-    FMtoUSceneRefExportResult Result;
-    const bool bExported = FMtoUSceneRefExport::Run(*World, {}, Result);
-    if (!TestTrue(TEXT("the reference export succeeds"), bExported))
-    {
-        AddError(Result.Error);
-        return false;
-    }
-    TestTrue(TEXT("the scope is the loaded persistent level"),
-        Result.LevelPackage.Contains(TEXT("SceneReferenceWorld")));
-    TestEqual(TEXT("the persistent level is complete"), Result.bScopeComplete, true);
-    TestTrue(TEXT("the scope exports the static mesh"), Result.ExportedObjectCount >= 1);
-    TestTrue(TEXT("the scope counts render triangles"), Result.TriangleCount > 0);
-    TestTrue(TEXT("the light is suppressed"), Result.SuppressedComponentCount >= 1);
-    TestTrue(TEXT("the geometry file is named after the scope"),
-        Result.GeometryFile.EndsWith(TEXT(".fbx")));
-    TestTrue(TEXT("the manifest is named after the scope"),
-        Result.ManifestFile.EndsWith(TEXT(".manifest.json")));
-    TestTrue(TEXT("the handoff carries no image data"), !Result.bImageDataDetected);
-    TestEqual(TEXT("the texture scan finds no embedded media"),
-        Result.TextureScan.EmbeddedMediaRecords, 0);
-    TestTrue(TEXT("the manifest digest is computed"), Result.ManifestDigest.Len() > 0);
-    TestTrue(TEXT("the handoff identity is computed"),
-        Result.TransferId.StartsWith(TEXT("mtou-scene-ref-")));
-
-    // The frozen importer refuses a manifest without an objects list, and each
-    // entry is what the Maya side compares against the imported file.
-    const FString ManifestPath = FPaths::Combine(Result.Directory, *Result.ManifestFile);
-    TArray<uint8> ManifestFileBytes;
-    if (!TestTrue(TEXT("the manifest is read back"),
-            FFileHelper::LoadFileToArray(ManifestFileBytes, *ManifestPath)
-            && ManifestFileBytes.Num() > 0))
-    {
-        return false;
-    }
-    // Maya reads the file as UTF-8 with no BOM and hashes its bytes.
-    TestEqual(TEXT("the manifest starts with its JSON object, not a BOM"),
-        ManifestFileBytes[0], static_cast<uint8>('{'));
-    const FUTF8ToTCHAR ManifestDecoded(
-        reinterpret_cast<const UTF8CHAR*>(ManifestFileBytes.GetData()), ManifestFileBytes.Num());
-    const FString ManifestText(ManifestDecoded.Length(), ManifestDecoded.Get());
-    TestTrue(TEXT("the UTF-8 manifest carries the non-ANSI label"),
-        ManifestText.Contains(ReferenceLabel));
-    {
-        TArray<uint8> DigestInput = ManifestFileBytes;
-        TArray<uint8> GeometryFileBytes;
-        FFileHelper::LoadFileToArray(GeometryFileBytes,
-            *FPaths::Combine(Result.Directory, *Result.GeometryFile));
-        DigestInput.Append(GeometryFileBytes);
-        TestEqual(TEXT("the digest covers the manifest bytes on disk and the geometry"),
-            Result.ManifestDigest, FMD5::HashBytes(DigestInput.GetData(), DigestInput.Num()));
-    }
-    TSharedPtr<FJsonObject> ManifestJson;
-    const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(ManifestText);
-    if (!TestTrue(TEXT("the manifest is JSON"), FJsonSerializer::Deserialize(Reader, ManifestJson)
-            && ManifestJson.IsValid()))
-    {
-        return false;
-    }
-    const TSharedPtr<FJsonObject>* Identity = nullptr;
-    FString ManifestTransferId;
-    TestTrue(TEXT("the manifest carries the export's own transfer id"),
-        ManifestJson->TryGetObjectField(TEXT("identity"), Identity) && Identity != nullptr
-        && (*Identity)->TryGetStringField(TEXT("transfer_id"), ManifestTransferId)
-        && ManifestTransferId == Result.TransferId);
-    const TArray<TSharedPtr<FJsonValue>>* ManifestObjects = nullptr;
-    if (!TestTrue(TEXT("the manifest carries an objects list"),
-            ManifestJson->TryGetArrayField(TEXT("objects"), ManifestObjects)
-            && ManifestObjects != nullptr))
-    {
-        return false;
-    }
-    TestEqual(TEXT("the manifest records one entry per exported object"),
-        ManifestObjects->Num(), Result.ExportedObjectCount);
-    bool bSawMatrix = false;
-    bool bSawCentroid = false;
-    for (const TSharedPtr<FJsonValue>& Entry : *ManifestObjects)
-    {
-        const TSharedPtr<FJsonObject>* Object = nullptr;
-        if (!TestTrue(TEXT("one manifest object is an object"), Entry.IsValid()
-                && Entry->TryGetObject(Object) && Object != nullptr && (*Object).IsValid()))
-        {
-            return false;
-        }
-        FString NodeName;
-        TestTrue(TEXT("the manifest object names its node"),
-            (*Object)->TryGetStringField(TEXT("node_name"), NodeName) && !NodeName.IsEmpty());
-        bool bManifestExported = false;
-        TestTrue(TEXT("the manifest object claims the export"),
-            (*Object)->TryGetBoolField(TEXT("exported"), bManifestExported) && bManifestExported);
-        const TArray<TSharedPtr<FJsonValue>>* Matrix = nullptr;
-        if (!TestTrue(TEXT("the manifest object carries a world matrix"),
-                (*Object)->TryGetArrayField(TEXT("world_matrix"), Matrix)
-                && Matrix != nullptr && Matrix->Num() == 16))
-        {
-            return false;
-        }
-        bool bMatrixNumeric = true;
-        for (const TSharedPtr<FJsonValue>& Value : *Matrix)
-        {
-            double Ignored = 0.0;
-            if (!Value.IsValid() || !Value->TryGetNumber(Ignored))
-            {
-                bMatrixNumeric = false;
-            }
-        }
-        TestTrue(TEXT("the world matrix is 16 numbers"), bMatrixNumeric);
-        bSawMatrix = true;
-        const TSharedPtr<FJsonObject>* Bounds = nullptr;
-        if (TestTrue(TEXT("the manifest object carries world bounds"),
-                (*Object)->TryGetObjectField(TEXT("world_bounds_cm"), Bounds)
-                && Bounds != nullptr && (*Bounds).IsValid()))
-        {
-            const TSharedPtr<FJsonObject>* Size = nullptr;
-            if (TestTrue(TEXT("the world bounds carry a size"),
-                    (*Bounds)->TryGetObjectField(TEXT("size"), Size)
-                    && Size != nullptr && (*Size).IsValid()))
-            {
-                double SizeX = 0.0;
-                double SizeY = 0.0;
-                double SizeZ = 0.0;
-                TestTrue(TEXT("the size is three numbers"),
-                    (*Size)->TryGetNumberField(TEXT("x"), SizeX)
-                    && (*Size)->TryGetNumberField(TEXT("y"), SizeY)
-                    && (*Size)->TryGetNumberField(TEXT("z"), SizeZ));
-                TestTrue(TEXT("the size is positive for the fixture cube"),
-                    SizeX > 0.0 && SizeY > 0.0 && SizeZ > 0.0);
-            }
-        }
-        if (const TSharedPtr<FJsonObject>* Centroid = nullptr;
-            (*Object)->TryGetObjectField(TEXT("world_surface_centroid_cm"), Centroid)
-            && Centroid != nullptr && (*Centroid).IsValid())
-        {
-            double CentroidX = 0.0;
-            TestTrue(TEXT("the centroid is a number triple"),
-                (*Centroid)->TryGetNumberField(TEXT("x"), CentroidX));
-            bSawCentroid = true;
-        }
-    }
-    TestTrue(TEXT("at least one manifest object carried a matrix"), bSawMatrix);
-    TestTrue(TEXT("the manifest object carries the surface centroid"), bSawCentroid);
-
-    TestTrue(TEXT("the directory holds the produced files"),
-        IFileManager::Get().FileExists(*FPaths::Combine(
-            Result.Directory, *Result.GeometryFile)));
-
-    // An explicitly requested sublevel the world does not stream is reported.
-    FMtoUSceneRefExportResult Excluded;
-    const bool bExcludedRun = FMtoUSceneRefExport::Run(
-        *World, { FString(TEXT("NotStreamedAnywhere")) }, Excluded);
-    TestTrue(TEXT("the run still succeeds"), bExcludedRun);
-    TestEqual(TEXT("the unstreamed sublevel is excluded"),
-        Excluded.ExcludedSublevels.Num(), 1);
-    TestEqual(TEXT("an excluded sublevel makes the scope incomplete"),
-        Excluded.bScopeComplete, false);
-    TestTrue(TEXT("the exclusion is reported"), Excluded.Warnings.Num() > 0);
-
-    // The manifest names the anchor it was exported against: identity while
-    // nothing is paired, the paired target's placement once one is.
-    const auto ReadAnchor = [this](const FMtoUSceneRefExportResult& Run, FVector& OutLocation, FRotator& OutRotation)
-    {
-        FString Text;
-        TSharedPtr<FJsonObject> Json;
-        const TSharedPtr<FJsonObject>* WorldObject = nullptr;
-        const TSharedPtr<FJsonObject>* AnchorObject = nullptr;
-        const TSharedPtr<FJsonObject>* RotationObject = nullptr;
-        const TArray<TSharedPtr<FJsonValue>>* Location = nullptr;
-        if (!TestTrue(TEXT("the manifest is read back for the anchor"),
-                FFileHelper::LoadFileToString(Text, *FPaths::Combine(Run.Directory, *Run.ManifestFile))
-                && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Text), Json) && Json.IsValid()
-                && Json->TryGetObjectField(TEXT("world"), WorldObject)
-                && (*WorldObject)->TryGetObjectField(TEXT("anchor"), AnchorObject)
-                && (*AnchorObject)->TryGetArrayField(TEXT("location_cm"), Location) && Location->Num() == 3
-                && (*AnchorObject)->TryGetObjectField(TEXT("rotation_deg"), RotationObject)))
-        {
-            return false;
-        }
-        OutLocation = FVector((*Location)[0]->AsNumber(), (*Location)[1]->AsNumber(), (*Location)[2]->AsNumber());
-        OutRotation = FRotator(
-            (*RotationObject)->GetNumberField(TEXT("pitch")),
-            (*RotationObject)->GetNumberField(TEXT("yaw")),
-            (*RotationObject)->GetNumberField(TEXT("roll")));
-        return true;
-    };
-    FVector UnpairedLocation;
-    FRotator UnpairedRotation;
-    if (ReadAnchor(Result, UnpairedLocation, UnpairedRotation))
-    {
-        TestTrue(TEXT("an unpaired export names the identity anchor"),
-            UnpairedLocation.IsNearlyZero(1e-6) && UnpairedRotation.IsNearlyZero(1e-6));
-    }
-
-    const FTransform PairedPlacement(FRotator(-4.0, 37.0, 3.0), FVector(60.0, 40.0, 0.0));
-    AMtoULiveLinkActor* Paired = World->SpawnActor<AMtoULiveLinkActor>(
-        PairedPlacement.GetLocation(), PairedPlacement.Rotator());
-    UMtoULiveLinkBinding* PairedBinding = NewObject<UMtoULiveLinkBinding>(GetTransientPackage());
-    TStrongObjectPtr<UMtoULiveLinkBinding> PairedBindingGuard(PairedBinding);
-    if (TestNotNull(TEXT("the paired target is created"), Paired))
-    {
-        Paired->SetBinding(PairedBinding);
-        FString PairError;
-        TestTrue(TEXT("the target is paired"), MtoUPairLinkageTarget(*Paired, TEXT("character"), PairError));
-        FMtoULinkageEditor::SetObservedLinkageActor(Paired);
-        FMtoUSceneRefExportResult PairedRun;
-        if (TestTrue(TEXT("the paired export succeeds"), FMtoUSceneRefExport::Run(*World, {}, PairedRun)))
-        {
-            FVector Location;
-            FRotator Rotation;
-            if (ReadAnchor(PairedRun, Location, Rotation))
-            {
-                TestTrue(TEXT("the anchor is the target's location"),
-                    Location.Equals(PairedPlacement.GetLocation(), 1e-3));
-                TestTrue(TEXT("the anchor is the target's rotation"),
-                    FMath::Abs(FRotator::NormalizeAxis(Rotation.Roll - 3.0)) < 1e-3
-                    && FMath::Abs(FRotator::NormalizeAxis(Rotation.Pitch + 4.0)) < 1e-3
-                    && FMath::Abs(FRotator::NormalizeAxis(Rotation.Yaw - 37.0)) < 1e-3);
-            }
-        }
-        MtoUClearLinkageTarget(*Paired);
-        FMtoULinkageEditor::SetObservedLinkageActor(nullptr);
-    }
     return true;
 }
 

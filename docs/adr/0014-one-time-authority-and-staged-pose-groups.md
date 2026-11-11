@@ -29,9 +29,3 @@ Returning to realtime restores Maya's timeline, view and gate and keeps Maya
 paused while Unreal keeps its takeover; only ending the preview returns the
 original writers. Restores are per resource and idempotent, and a residual failure
 is reported instead of being hidden behind a successful disconnect.
-
-The scene reference follows the same ownership discipline: it lives in one
-tool-owned container with an ownership mark, is imported through a staging
-namespace, and is swapped, rolled back or removed only after the new content was
-validated. A failed or interrupted update therefore never destroys the previous
-reference, and a stale revision cannot enter linkage by renaming its version.
