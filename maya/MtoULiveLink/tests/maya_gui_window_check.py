@@ -52,6 +52,11 @@ CLOSE_CYCLES = 20
 OWNED_ROUNDS = 3
 WAIT_SECONDS = 15.0
 WM_CLOSE = 0x0010
+# An open panel holds the timeUnitChanged scriptJob and the before-new and
+# before-open OpenMaya callbacks. Its after-open scriptJobs exist only for a
+# message whose callback Maya refused, which Maya 2022 and later never do.
+PANEL_SCRIPT_JOBS = 1
+SCENE_REPLACE_CALLBACKS = 2
 
 
 # ------------------------------------------------------------------ in Maya
@@ -176,9 +181,12 @@ def _in_maya():
             yield from open_objects()
             yield from close_natively(OBJECTS)
             check_panel_usable(label)
+            entry = snapshot(label)
             expect(label + " state", objects_windows() == 0
                    and panel.CONTROLLER._objects_window is None
-                   and snapshot(label)["script_jobs"] == 3, str(objects_windows()))
+                   and entry["script_jobs"] == PANEL_SCRIPT_JOBS
+                   and entry["scene_replace_callbacks"] == SCENE_REPLACE_CALLBACKS,
+                   "objects windows {0}, {1}".format(objects_windows(), entry))
 
     def objects_owned_paths():
         scene = evidence / (step + "-scene.ma")
@@ -208,8 +216,9 @@ def _in_maya():
             yield from until_idle("open scene")
             expect(label + " open scene keeps one objects window", objects_windows() <= 1)
             entry = snapshot(label)
-            expect(label + " state", entry["windows"][MAIN] == 1 and entry["script_jobs"] == 3
-                   and entry["scene_replace_callbacks"] == 2, str(entry))
+            expect(label + " state", entry["windows"][MAIN] == 1
+                   and entry["script_jobs"] == PANEL_SCRIPT_JOBS
+                   and entry["scene_replace_callbacks"] == SCENE_REPLACE_CALLBACKS, str(entry))
         yield from open_objects()
 
     # ------------------------------------------------------------- runner
