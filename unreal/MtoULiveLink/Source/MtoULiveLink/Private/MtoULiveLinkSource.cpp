@@ -1271,15 +1271,36 @@ uint32 FMtoULiveLinkSource::Run()
                         break;
                     }
 
+                    FString MessageType;
+                    {
+                        FString TypeError;
+                        if (!FMtoUProtocol::PeekType(Payload, MessageType, TypeError))
+                        {
+                            SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), TypeError);
+                            break;
+                        }
+                    }
+
+                    // Version pairing precedes connection and time-authority
+                    // gates. Keep the parsed frame for realtime below; other
+                    // parse errors still follow those gates' existing rules.
+                    FMtoUFrameMessage Frame;
+                    FString FrameErrorCode;
+                    const bool bFrameParsed = MessageType == TEXT("frame")
+                        && FMtoUProtocol::ParseFrame(Payload, Frame, Error, &FrameErrorCode);
+                    if (MessageType == TEXT("frame") && !bFrameParsed
+                        && FrameErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                    {
+                        SendErrorAndDisconnect(FrameErrorCode, Error);
+                        break;
+                    }
+
                     if (!bInitReceived)
                     {
                         // The greeting opens a v10 connection. A mismatched
                         // version is refused here, before any target is
                         // discovered or a writer is muted.
-                        FString FirstType;
-                        FString FirstTypeError;
-                        if (FMtoUProtocol::PeekType(Payload, FirstType, FirstTypeError)
-                            && FirstType == TEXT("hello"))
+                        if (MessageType == TEXT("hello"))
                         {
                             FMtoUHelloMessage Hello;
                             FString HelloError;
@@ -1337,16 +1358,6 @@ uint32 FMtoULiveLinkSource::Run()
                             TEXT("INVALID_MESSAGE"),
                             TEXT("A frame was received before the init message was accepted."));
                         break;
-                    }
-
-                    FString MessageType;
-                    {
-                        FString TypeError;
-                        if (!FMtoUProtocol::PeekType(Payload, MessageType, TypeError))
-                        {
-                            SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), TypeError);
-                            break;
-                        }
                     }
 
                     // A type the protocol does not define, a retired one
@@ -1597,11 +1608,16 @@ uint32 FMtoULiveLinkSource::Run()
                         continue;
                     }
 
-                    FMtoUFrameMessage Frame;
                     bool bStructuralError = true;
-                    if (!FMtoUProtocol::ParseFrame(Payload, Frame, Error))
+                    if (!bFrameParsed)
                     {
-                        SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), Error);
+                        if (MessageType != TEXT("frame"))
+                        {
+                            // Other defined types that cannot arrive here
+                            // retain the parser's structural error response.
+                            FMtoUProtocol::ParseFrame(Payload, Frame, Error, &FrameErrorCode);
+                        }
+                        SendErrorAndDisconnect(FrameErrorCode, Error);
                         break;
                     }
                     if (!FMtoUProtocol::ValidateFrame(

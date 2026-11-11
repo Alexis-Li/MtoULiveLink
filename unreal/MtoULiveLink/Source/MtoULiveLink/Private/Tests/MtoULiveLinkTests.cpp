@@ -1079,7 +1079,7 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
     TMap<FString, int32> GroupAppliedSamples;
     // A refused protocol version is answered with an error that names this
     // side's release: the protocol it implements and the plugin version the
-    // engine loaded from the descriptor. Every init, hello and cache_begin case
+    // engine loaded from the descriptor. Every init, hello, frame and cache_begin case
     // that expects PROTOCOL_VERSION_MISMATCH has the error its refusal sends
     // encoded and judged here; a counter shows that none was only executed.
     const FString DescriptorVersion = LoadedPluginVersionName();
@@ -1134,7 +1134,7 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
         Expected->TryGetStringField(TEXT("error_code"), ExpectedErrorCode);
         if (ExpectedErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH")
             && (Operation == TEXT("init") || Operation == TEXT("hello")
-                || Operation == TEXT("cache_begin")))
+                || Operation == TEXT("frame") || Operation == TEXT("cache_begin")))
         {
             ++VersionRefusalCases;
         }
@@ -1678,8 +1678,9 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             }
             FMtoUFrameMessage Message;
             FString Error;
+            FString ErrorCode;
             bool bStructural = true;
-            bool bAccepted = FMtoUProtocol::ParseFrame(Bytes, Message, Error);
+            bool bAccepted = FMtoUProtocol::ParseFrame(Bytes, Message, Error, &ErrorCode);
             if (bAccepted && Case->HasField(TEXT("expected_counts")))
             {
                 const TSharedPtr<FJsonObject> Counts = Case->GetObjectField(TEXT("expected_counts"));
@@ -1706,10 +1707,19 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             TestEqual(*FString::Printf(TEXT("%s acceptance"), *Id), bAccepted, bExpectedAccepted);
             TestEqual(*FString::Printf(TEXT("%s close classification"), *Id),
                 !bAccepted && bStructural, bExpectedClose);
-            if (!bAccepted && Keywords)
+            if (!bAccepted)
             {
-                TestTrue(*FString::Printf(TEXT("%s diagnostic keywords"), *Id),
-                    ContainsKeywords(Error, *Keywords));
+                TestEqual(*FString::Printf(TEXT("%s stable error code"), *Id),
+                    ErrorCode, Expected->GetStringField(TEXT("error_code")));
+                if (ErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                {
+                    JudgeVersionRefusal(Id, ErrorCode, Error);
+                }
+                if (Keywords)
+                {
+                    TestTrue(*FString::Printf(TEXT("%s diagnostic keywords"), *Id),
+                        ContainsKeywords(Error, *Keywords));
+                }
             }
             continue;
         }
@@ -12841,8 +12851,56 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     TestTrue(TEXT("source reaches listening state"), WaitForStatus(Source, TEXT("Listening on")));
 
-    // The refusal the worker itself answers, without any game-thread state.
-    const auto ExpectVersionRefusal = [&](const TArray<uint8>& Message)
+    const auto Pump = [&]() { Source->Update(); };
+    // A close is checked only after an actual framed JSON error. A peer that
+    // silently closes, or returns the wrong code, cannot satisfy this check.
+    const auto ExpectErrorAndClose = [&](FSocket& Client, const FString& ExpectedCode)
+    {
+        FMtoULinkageReplyReader Reader;
+        TArray<uint8> Payload;
+        TSharedPtr<FJsonObject> Refusal;
+        if (TestTrue(TEXT("the message is answered with an error"),
+                Reader.Next(Client, TEXT("error"), Payload, Pump))
+            && TestTrue(TEXT("the refusal is JSON"),
+                JsonObjectFromBytes(Payload, Refusal) && Refusal.IsValid()))
+        {
+            TestEqual(TEXT("the refusal carries the frozen code"),
+                Refusal->GetStringField(TEXT("code")), ExpectedCode);
+            TestEqual(TEXT("the refusal is a failure"),
+                Refusal->GetStringField(TEXT("kind")), FString(TEXT("failure")));
+            if (ExpectedCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+            {
+                TestEqual(TEXT("the refusal names the protocol Unreal implements"),
+                    static_cast<int32>(Refusal->GetNumberField(TEXT("protocol_version"))),
+                    static_cast<int32>(MTOU_PROTOCOL_VERSION));
+                TestEqual(TEXT("the refusal names the loaded plugin version"),
+                    Refusal->GetStringField(TEXT("plugin_version")), LoadedPluginVersionName());
+            }
+        }
+        // Keep the same decoder while awaiting close, so trailing packets or
+        // partial replies cannot be lost at TCP read boundaries.
+        const bool bClosed = PollUntil([&]()
+        {
+            Pump();
+            uint8 Buffer[4096];
+            int32 Read = 0;
+            const bool bOpen = Client.Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read);
+            if (bOpen && Read > 0)
+            {
+                Reader.Decoder.Append(Buffer, Read);
+            }
+            TArray<uint8> Trailing;
+            FString DecodeError;
+            while (Reader.Decoder.Pop(Trailing, DecodeError) == EMtoUDecodeResult::Message)
+            {
+                Reader.OtherTypes.Add(TEXT("trailing"));
+            }
+            return !bOpen;
+        }, 10.0);
+        TestTrue(TEXT("the refused connection is closed within the deadline"), bClosed);
+        TestEqual(TEXT("nothing follows the refusal"), Reader.OtherTypes.Num(), 0);
+    };
+    const auto ExpectRefusal = [&](const TArray<uint8>& Message, const FString& ExpectedCode)
     {
         FSocket* Client = ConnectLoopback(*SocketSubsystem, Port);
         TestNotNull(TEXT("legacy client connects"), Client);
@@ -12852,89 +12910,17 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
         }
         TestTrue(TEXT("the legacy message is sent"),
             SendBytes(*Client, Message.GetData(), Message.Num()));
-        const bool bRefused = PollUntil([&]()
-        {
-            uint8 Buffer[4096];
-            int32 Read = 0;
-            if (Client->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read) && Read > 0)
-            {
-                FMtoUFrameDecoder Decoder;
-                Decoder.Append(Buffer, Read);
-                TArray<uint8> Payload;
-                FString Error;
-                return Decoder.Pop(Payload, Error) == EMtoUDecodeResult::Message
-                    && FromUtf8(Payload).Contains(TEXT("PROTOCOL_VERSION_MISMATCH"));
-            }
-            return !Client->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read);
-        });
-        TestTrue(TEXT("a mismatched version is refused with the frozen code"), bRefused);
+        ExpectErrorAndClose(*Client, ExpectedCode);
         DestroySocket(*SocketSubsystem, Client);
     };
 
-    // What Maya opens a connection with: its greeting and every init in one
-    // packet. The refusal has to come from the greeting alone and has to be
-    // the worker's own: it arrives while the game thread runs its updates, and
-    // nothing follows it (no answer to the init, no NO_BINDING_ACTOR, which a
-    // discovered target would have produced), the connection is closed.
+    // Maya pipelines hello and init. With no actor placed, a discovered init
+    // would produce NO_BINDING_ACTOR; only the greeting refusal may arrive.
     const auto ExpectRefusalBeforeDiscovery = [&](const FString& Greeting, const FString& Init)
     {
-        FSocket* Client = ConnectLoopback(*SocketSubsystem, Port);
-        TestNotNull(TEXT("mismatched client connects"), Client);
-        if (!Client)
-        {
-            return;
-        }
         TArray<uint8> Opening = Packet(Greeting);
         Opening.Append(Packet(Init));
-        TestTrue(TEXT("the opening packet is sent"),
-            SendBytes(*Client, Opening.GetData(), Opening.Num()));
-        FMtoULinkageReplyReader Reader;
-        const auto Pump = [&]() { Source->Update(); };
-        TArray<uint8> Payload;
-        TSharedPtr<FJsonObject> Refusal;
-        if (TestTrue(TEXT("the greeting is answered with an error"),
-                Reader.Next(*Client, TEXT("error"), Payload, Pump))
-            && TestTrue(TEXT("the refusal is JSON"),
-                JsonObjectFromBytes(Payload, Refusal) && Refusal.IsValid()))
-        {
-            TestEqual(TEXT("the refusal carries the frozen code"),
-                Refusal->GetStringField(TEXT("code")), FString(TEXT("PROTOCOL_VERSION_MISMATCH")));
-            TestEqual(TEXT("the refusal is a failure"),
-                Refusal->GetStringField(TEXT("kind")), FString(TEXT("failure")));
-            TestEqual(TEXT("the refusal names the protocol Unreal implements"),
-                static_cast<int32>(Refusal->GetNumberField(TEXT("protocol_version"))),
-                static_cast<int32>(MTOU_PROTOCOL_VERSION));
-            TestEqual(TEXT("the refusal names the loaded plugin version"),
-                Refusal->GetStringField(TEXT("plugin_version")), LoadedPluginVersionName());
-        }
-        // Read until the peer closes while the game thread keeps updating,
-        // recording every packet that arrives after the refusal. The close is
-        // the state awaited; the deadline only bounds a hang.
-        const bool bClosed = PollUntil([&]()
-        {
-            Pump();
-            uint8 Buffer[4096];
-            int32 Read = 0;
-            const bool bOpen = Client->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read);
-            if (bOpen && Read > 0)
-            {
-                Reader.Decoder.Append(Buffer, Read);
-            }
-            TArray<uint8> Trailing;
-            FString DecodeError;
-            while (Reader.Decoder.Pop(Trailing, DecodeError) == EMtoUDecodeResult::Message)
-            {
-                TSharedPtr<FJsonObject> Object;
-                Reader.OtherTypes.Add(
-                    (JsonObjectFromBytes(Trailing, Object) && Object.IsValid())
-                        ? Object->GetStringField(TEXT("type"))
-                        : FString(TEXT("invalid")));
-            }
-            return !bOpen;
-        }, 10.0);
-        TestTrue(TEXT("the refused connection is closed within the deadline"), bClosed);
-        TestEqual(TEXT("nothing follows the refusal"), Reader.OtherTypes.Num(), 0);
-        DestroySocket(*SocketSubsystem, Client);
+        ExpectRefusal(Opening, TEXT("PROTOCOL_VERSION_MISMATCH"));
     };
 
     // A greeting of a newer Maya release names it: protocol 13, plugin 1.1.0.
@@ -12953,43 +12939,195 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
         TEXT("{\"type\":\"init\",\"version\":11,\"revision\":9,\"workflow\":\"animation\","
              "\"blendshapes_enabled\":true,\"bones\":[[\"root\",-1,"
              "[0,0,0,0,0,0,1,1,1,1]]],\"curves\":[]}"));
-    // The v9 message set kept as regression: a v9 init, frame and cache_begin
-    // against the current adapter. The init is refused with the version code;
-    // a frame or cache_begin before any init is refused as invalid.
-    ExpectVersionRefusal(Packet(
+    // Explicit frame version mismatches are refused even before init. A
+    // legacy frame without a version still follows the invalid-state rule.
+    ExpectRefusal(Packet(
         TEXT("{\"type\":\"init\",\"version\":9,\"revision\":9,\"workflow\":\"animation\","
              "\"blendshapes_enabled\":true,\"bones\":[[\"root\",-1,"
-             "[0,0,0,0,0,0,1,1,1,1]]],\"curves\":[]}")));
-    ExpectVersionRefusal(Packet(
-        TEXT("{\"type\":\"frame\",\"transforms\":[[0,0,0,0,0,0,1,1,1,1]],\"curves\":[]}")));
-    ExpectVersionRefusal(Packet(
+             "[0,0,0,0,0,0,1,1,1,1]]],\"curves\":[]}")), TEXT("PROTOCOL_VERSION_MISMATCH"));
+    AddInfo(TEXT("versioned frame before init"));
+    ExpectRefusal(Packet(
+        TEXT("{\"type\":\"frame\",\"version\":9,\"transforms\":[],\"curves\":[]}")),
+        TEXT("PROTOCOL_VERSION_MISMATCH"));
+    ExpectRefusal(Packet(
+        TEXT("{\"type\":\"frame\",\"transforms\":[[0,0,0,0,0,0,1,1,1,1]],\"curves\":[]}")), TEXT("INVALID_MESSAGE"));
+    ExpectRefusal(Packet(
         TEXT("{\"type\":\"cache_begin\",\"upload_id\":1,\"revision\":9,\"fps\":30.0,"
-             "\"start_frame\":1,\"end_frame\":2,\"frame_count\":2,\"payload_size\":64}")));
+             "\"start_frame\":1,\"end_frame\":2,\"frame_count\":2,\"payload_size\":64}")), TEXT("INVALID_MESSAGE"));
 
     // A mismatched pair never partially succeeds: the listener returns to its
-    // greeting state and a matching v10 greeting is answered normally, also
+    // greeting state and a matching greeting is answered normally, also
     // when it names its release.
-    FSocket* Client = ConnectLoopback(*SocketSubsystem, Port);
-    TestNotNull(TEXT("v10 client connects"), Client);
-    if (Client)
+    UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false);
+    if (!TestNotNull(TEXT("editor world is created"), World) || !GEngine)
     {
+        Source->StopListener();
+        LiveLinkClient.RemoveSource(Source);
+        return false;
+    }
+    FWorldContext& WorldContext = GEngine->CreateNewWorldContext(EWorldType::Editor);
+    WorldContext.SetCurrentWorld(World);
+    World->InitializeActorsForPlay(FURL());
+    AMtoULiveLinkActor* Actor = AddBoundActor(*World);
+    TestNotNull(TEXT("a binding actor is placed for the frame scenario"), Actor);
+    if (Actor)
+    {
+        Actor->PostRegisterAllComponents();
+    }
+    if (Actor)
+    {
+        const USkeletalMesh* Mesh = Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset();
+        const TArray<uint8> Init = Packet(FString::Printf(
+            TEXT("{\"type\":\"init\"," MTOU_PROTOCOL_VERSION_FIELD ",\"revision\":9,"
+                 "\"workflow\":\"animation\",\"blendshapes_enabled\":true,"
+                 "\"bones\":[%s],\"curves\":[],\"object_id\":\"character\","
+                 "\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"]}"),
+            *ReferenceSkeletonBonesJson(Mesh->GetRefSkeleton())));
+        const TArray<uint8> MismatchedFrame = Packet(
+            TEXT("{\"type\":\"frame\",\"version\":9,\"transforms\":[],\"curves\":[]}"));
+        // Both packets are drained in one worker pass. The init has been
+        // received, but bReady cannot change until the next reply-drain pass.
+        AddInfo(TEXT("versioned frame after init, before ready"));
+        TArray<uint8> Opening = Init;
+        Opening.Append(MismatchedFrame);
+        ExpectRefusal(Opening, TEXT("PROTOCOL_VERSION_MISMATCH"));
+        Pump();
+
+        const TSharedPtr<FMtoULiveLinkSource> PreviousSource = MtoUSetActiveSource(Source);
+        TestTrue(TEXT("the actor is paired for linkage scenarios"), PairLinkageTarget(Actor));
+        FMtoULinkageTestHooks Hooks;
+        Hooks.Install();
+        MtoUSetLinkageHooks(Hooks.Hooks);
         const TArray<uint8> Hello = Packet(
             TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD ",\"host\":\"maya\","
                  "\"maya_version\":\"2024\",\"plugin_version\":\"1.1.0\","
                  "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1.0,\"fps\":24.0},"
                  "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
-        TestTrue(TEXT("the v10 greeting is sent"),
-            SendBytes(*Client, Hello.GetData(), Hello.Num()));
-        TArray<uint8> Payload;
-        TestTrue(TEXT("the v10 greeting is answered"), ReceivePacket(
-            *Client, Payload, [&]() { Source->Update(); }));
-        TestTrue(TEXT("the answer is a greeting acknowledgement"),
-            FromUtf8(Payload).Contains(TEXT("\"type\":\"hello_ack\"")));
-        DestroySocket(*SocketSubsystem, Client);
+        for (const FString Scenario : {TEXT("realtime"), TEXT("linkage transition"),
+                TEXT("linkage active"), TEXT("malformed realtime"),
+                TEXT("unversioned malformed realtime")})
+        {
+            AddInfo(Scenario);
+            FSocket* Client = ConnectLoopback(*SocketSubsystem, Port);
+            if (!TestNotNull(TEXT("matching-version client connects"), Client))
+            {
+                continue;
+            }
+            FMtoULinkageReplyReader Reader;
+            TArray<uint8> Payload;
+            TestTrue(TEXT("the matching-version greeting is sent"),
+                SendBytes(*Client, Hello.GetData(), Hello.Num()));
+            TestTrue(TEXT("the matching-version greeting is answered"),
+                Reader.Next(*Client, TEXT("hello_ack"), Payload, Pump));
+            TSharedPtr<FJsonObject> Ack;
+            TestTrue(TEXT("the acknowledgement is JSON"), JsonObjectFromBytes(Payload, Ack));
+            TestTrue(TEXT("matching init is sent"), SendBytes(*Client, Init.GetData(), Init.Num()));
+            if (TestTrue(TEXT("the frame scenario reaches ready"),
+                    Reader.Next(*Client, TEXT("ready"), Payload, Pump)))
+            {
+                if (Scenario == TEXT("realtime"))
+                {
+                    const TArray<uint8> MatchingFrame = Packet(FString::Printf(
+                        TEXT("{\"type\":\"frame\"," MTOU_PROTOCOL_VERSION_FIELD
+                             ",\"transforms\":[%s],\"curves\":[]}"),
+                        *PoseTransformsJson(Mesh->GetRefSkeleton())));
+                    TestTrue(TEXT("the same-version realtime frame is sent"),
+                        SendBytes(*Client, MatchingFrame.GetData(), MatchingFrame.Num()));
+                    TestTrue(TEXT("the same-version realtime frame reaches Live Link"), PollUntil([&]()
+                    {
+                        Pump();
+                        LiveLinkClient.ForceTick();
+                        FLiveLinkSubjectFrameData Evaluated;
+                        if (!LiveLinkClient.EvaluateFrameFromSource_AnyThread(
+                                FLiveLinkSubjectKey(SourceGuid, FName(TEXT("MtoU_Character"))),
+                                ULiveLinkAnimationRole::StaticClass(), Evaluated))
+                        {
+                            return false;
+                        }
+                        const FLiveLinkAnimationFrameData* Animation =
+                            Evaluated.FrameData.Cast<FLiveLinkAnimationFrameData>();
+                        return Animation && Animation->Transforms.Num() == Mesh->GetRefSkeleton().GetNum();
+                    }));
+                }
+                const TArray<uint8> MalformedFrame = Packet(
+                    TEXT("{\"type\":\"frame\"," MTOU_PROTOCOL_VERSION_FIELD
+                         ",\"transforms\":\"malformed\",\"curves\":[]}"));
+                const bool bLinkage = Scenario.StartsWith(TEXT("linkage"));
+                if (bLinkage)
+                {
+                    FString EnterError;
+                    TestTrue(TEXT("linkage entry is accepted"), MtoURequestLinkageEnter(1, EnterError));
+                    Pump(); // Publish the worker's active/awaiting-peer mirrors.
+                    TestTrue(TEXT("linkage is awaiting the peer"), MtoUGetLinkageView().bTransitioning);
+                    TestTrue(TEXT("the entry statement is received"),
+                        Reader.Next(*Client, TEXT("mode_state"), Payload, Pump));
+                    if (Scenario == TEXT("linkage active") && Ack.IsValid())
+                    {
+                        const TArray<uint8> Confirmation = Packet(FString::Printf(
+                            TEXT("{\"type\":\"mode\",\"session_id\":%d,\"mode_revision\":1,"
+                                 "\"mode\":\"linkage\",\"control\":\"unreal\","
+                                 "\"transition\":\"ready\",\"detail\":\"following\"}"),
+                            static_cast<int32>(Ack->GetNumberField(TEXT("session_id")))));
+                        TestTrue(TEXT("Maya confirms linkage"),
+                            SendBytes(*Client, Confirmation.GetData(), Confirmation.Num()));
+                        TestTrue(TEXT("linkage becomes active"), PollUntil([&]()
+                        {
+                            Pump();
+                            return !MtoUGetLinkageView().bTransitioning;
+                        }));
+                        TestTrue(TEXT("the confirmation statement is received"),
+                            Reader.Next(*Client, TEXT("mode_state"), Payload, Pump));
+                        // The same-version malformed frame is still refused
+                        // by mode ownership, keeping the connection alive.
+                        TestTrue(TEXT("same-version frame is sent during active linkage"),
+                            SendBytes(*Client, MalformedFrame.GetData(), MalformedFrame.Num()));
+                        TestTrue(TEXT("active linkage refuses that frame"),
+                            Reader.Next(*Client, TEXT("error"), Payload, Pump));
+                        TSharedPtr<FJsonObject> Conflict;
+                        if (TestTrue(TEXT("the mode refusal is JSON"), JsonObjectFromBytes(Payload, Conflict)))
+                        {
+                            TestEqual(TEXT("same-version frame preserves the mode refusal"),
+                                Conflict->GetStringField(TEXT("code")), FString(TEXT("MODE_CONFLICT")));
+                        }
+                    }
+                }
+                if (Scenario.Contains(TEXT("malformed")))
+                {
+                    const TArray<uint8> Invalid = Scenario.StartsWith(TEXT("unversioned"))
+                        ? Packet(TEXT("{\"type\":\"frame\",\"transforms\":\"malformed\",\"curves\":[]}"))
+                        : MalformedFrame;
+                    TestTrue(TEXT("the malformed realtime frame is sent"),
+                        SendBytes(*Client, Invalid.GetData(), Invalid.Num()));
+                    ExpectErrorAndClose(*Client, TEXT("INVALID_MESSAGE"));
+                }
+                else
+                {
+                    // During entry the same-version malformed frame is still
+                    // dropped; it must not answer before the version refusal.
+                    TArray<uint8> Frames = Scenario == TEXT("linkage transition")
+                        ? MalformedFrame : TArray<uint8>();
+                    Frames.Append(MismatchedFrame);
+                    TestTrue(TEXT("the mismatched frame is sent"),
+                        SendBytes(*Client, Frames.GetData(), Frames.Num()));
+                    ExpectErrorAndClose(*Client, TEXT("PROTOCOL_VERSION_MISMATCH"));
+                }
+            }
+            DestroySocket(*SocketSubsystem, Client);
+            TestTrue(TEXT("the ended session is cleared before reconnecting"), PollUntil([&]()
+            {
+                Pump();
+                return MtoUGetLinkageView().Identity.SessionId == 0;
+            }));
+        }
+        MtoUSetLinkageHooks(FMtoULinkageHooks());
+        MtoUClearLinkageTarget(*Actor);
+        MtoUSetActiveSource(PreviousSource);
     }
 
     Source->StopListener();
     LiveLinkClient.RemoveSource(Source);
+    World->DestroyWorld(false);
+    GEngine->DestroyWorldContext(World);
     return true;
 }
 
