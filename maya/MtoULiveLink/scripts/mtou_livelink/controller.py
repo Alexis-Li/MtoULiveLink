@@ -1095,6 +1095,7 @@ class Controller(object):
             # whatever drives time on the connection.
             session = StreamingSession.start(
                 self._scene, fps, on_event, playback_cap=self._playback_cap,
+                maya_version=cmds.about(version=True),
                 workflow=self._workflow,
                 blendshapes_enabled=self._blendshapes_enabled,
                 secondary_scene=secondary, on_statement=on_statement)

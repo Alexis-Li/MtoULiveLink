@@ -300,7 +300,8 @@ public:
         FMtoURemoveObjectMessage& OutMessage,
         FString& OutError,
         FString* OutErrorCode = nullptr);
-    static bool ParseFrame(const TArray<uint8>& Payload, FMtoUFrameMessage& OutMessage, FString& OutError);
+    static bool ParseFrame(const TArray<uint8>& Payload, FMtoUFrameMessage& OutMessage,
+        FString& OutError, FString* OutErrorCode = nullptr);
     static bool PeekType(const TArray<uint8>& Payload, FString& OutType, FString& OutError);
     /**
      * True for a `type` Maya may send to Unreal. Any other type, a retired one

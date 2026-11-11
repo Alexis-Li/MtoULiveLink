@@ -241,7 +241,8 @@ bool ParseFrameBody(
     int32 ExpectedCurveCount,
     FMtoUFrameMessage& OutMessage,
     FString& OutError,
-    bool* bOutCountMismatch = nullptr)
+    bool* bOutCountMismatch = nullptr,
+    FString* OutErrorCode = nullptr)
 {
     if (bOutCountMismatch)
     {
@@ -264,6 +265,10 @@ bool ParseFrameBody(
         OutError = FString::Printf(
             TEXT("Unsupported protocol version; expected %d."),
             FMtoUProtocol::Version);
+        if (OutErrorCode)
+        {
+            *OutErrorCode = TEXT("PROTOCOL_VERSION_MISMATCH");
+        }
         return false;
     }
 
@@ -705,17 +710,23 @@ bool FMtoUProtocol::ParseInit(
 bool FMtoUProtocol::ParseFrame(
     const TArray<uint8>& Payload,
     FMtoUFrameMessage& OutMessage,
-    FString& OutError)
+    FString& OutError,
+    FString* OutErrorCode)
 {
     OutMessage = FMtoUFrameMessage();
     OutError.Reset();
+    if (OutErrorCode)
+    {
+        *OutErrorCode = TEXT("INVALID_MESSAGE");
+    }
     TSharedPtr<FJsonObject> Object;
     if (!ParseObject(Payload, Object, OutError))
     {
         return false;
     }
     if (!ParseFrameBody(
-            Object, TEXT("frame"), INDEX_NONE, INDEX_NONE, OutMessage, OutError))
+            Object, TEXT("frame"), INDEX_NONE, INDEX_NONE, OutMessage, OutError,
+            nullptr, OutErrorCode))
     {
         return false;
     }
@@ -766,7 +777,8 @@ bool FMtoUProtocol::ParseFrame(
         // the frame's, so the body parser sees one.
         Row->SetStringField(TEXT("type"), TEXT("frame"));
         FMtoUFrameMessage Values;
-        if (!ParseFrameBody(Row, TEXT("frame"), INDEX_NONE, INDEX_NONE, Values, OutError))
+        if (!ParseFrameBody(Row, TEXT("frame"), INDEX_NONE, INDEX_NONE, Values, OutError,
+                nullptr, OutErrorCode))
         {
             OutError = FString::Printf(TEXT("Frame object '%s': %s"), *Parsed.ObjectId, *OutError);
             return false;

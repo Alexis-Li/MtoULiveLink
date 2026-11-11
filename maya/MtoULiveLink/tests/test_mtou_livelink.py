@@ -4375,6 +4375,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller._set_connected = mock.Mock()
         fake_cmds = type("FakeCmds", (), {
             "currentUnit": staticmethod(lambda **kwargs: "film"),
+            "about": staticmethod(lambda **kwargs: "2024"),
         })
         with patch_global("cmds", fake_cmds), \
              patch_global("om", object()), \
@@ -4684,6 +4685,7 @@ class WorkflowTests(unittest.TestCase):
         controller._show_error = mock.Mock()
         fake_cmds = type("FakeCmds", (), {
             "currentUnit": staticmethod(lambda **kwargs: "film"),
+            "about": mock.Mock(return_value="2024.2"),
         })
         with patch_global("cmds", fake_cmds), \
                 patch_global("om", object()), \
@@ -4695,6 +4697,9 @@ class WorkflowTests(unittest.TestCase):
             controller.connect()
 
         self.assertEqual(2, len(started))
+        self.assertEqual([mock.call(version=True)] * 2, fake_cmds.about.call_args_list)
+        self.assertEqual("2024.2", started[0]["maya_version"])
+        self.assertEqual("2024.2", started[1]["maya_version"])
         self.assertEqual(mtou_config.WORKFLOW_ANIMATION, started[0]["workflow"])
         self.assertTrue(started[0]["blendshapes_enabled"])
         self.assertEqual(mtou_config.WORKFLOW_MODEL, started[1]["workflow"])
@@ -4746,8 +4751,23 @@ class WorkflowTests(unittest.TestCase):
                 space_revision=2, scene_units=("m", 100.0),
                 maya_version="2025")
             session.stop()
+            session_init = captured["init"]
+            session_hello = captured["hello"]
 
-        init_message = captured["init"]
+            controller = mtou_controller.Controller()
+            controller._scene = scene
+            controller._set_connected = mock.Mock()
+            fake_cmds = mock.Mock()
+            fake_cmds.currentUnit.return_value = "film"
+            fake_cmds.about.return_value = "2024.2"
+            with patch_global("cmds", fake_cmds):
+                controller.connect()
+                self.assertIsNotNone(controller._session)
+                controller._session.stop()
+            fake_cmds.about.assert_called_once_with(version=True)
+            self.assertEqual("2024.2", captured["hello"]["maya_version"])
+
+        init_message = session_init
         self.assertEqual(mtou_config.PROTOCOL_VERSION, init_message["version"])
         self.assertEqual(mtou_config.WORKFLOW_MODEL, init_message["workflow"])
         self.assertFalse(init_message["blendshapes_enabled"])
@@ -4766,7 +4786,7 @@ class WorkflowTests(unittest.TestCase):
 
         # The greeting precedes the object description so a peer with a
         # different protocol version refuses before it reads an object.
-        hello_message = captured["hello"]
+        hello_message = session_hello
         self.assertEqual(mtou_config.PROTOCOL_VERSION, hello_message["version"])
         self.assertEqual("maya", hello_message["host"])
         self.assertEqual("2025", hello_message["maya_version"])

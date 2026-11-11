@@ -1599,9 +1599,10 @@ uint32 FMtoULiveLinkSource::Run()
 
                     FMtoUFrameMessage Frame;
                     bool bStructuralError = true;
-                    if (!FMtoUProtocol::ParseFrame(Payload, Frame, Error))
+                    FString FrameErrorCode;
+                    if (!FMtoUProtocol::ParseFrame(Payload, Frame, Error, &FrameErrorCode))
                     {
-                        SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), Error);
+                        SendErrorAndDisconnect(FrameErrorCode, Error);
                         break;
                     }
                     if (!FMtoUProtocol::ValidateFrame(

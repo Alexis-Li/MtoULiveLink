@@ -31,6 +31,8 @@ repository's issues.
 
 ### Fixed
 
+- A realtime frame from another protocol version now reports the plugin protocol
+  mismatch before disconnecting, and Maya identifies its running version. (#39)
 - **结束预览** during Cached Playback no longer freezes Unreal: the cache keeps the
   connection until **实时**, which then clears it and resumes the live pose. **进入联动**
   stays unavailable until Unreal confirms that clear. (#9)
