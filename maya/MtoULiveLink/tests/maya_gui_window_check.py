@@ -23,8 +23,9 @@ through Qt, so Maya runs its own close and click handling.
 3. ``objects_close_cycles``: the 对象配对 window is opened from the panel twice
    (one window) and closed from its title bar 20 times.
 4. ``objects_owned_paths``: three rounds of the 对象配对 window's own close
-   button, closing the panel (which closes it), a new scene and opening a
-   scene with it open; then Maya quits with it open.
+   button, closing the panel (which closes it), switching workflow (which
+   keeps it), a new scene and opening a scene with it open; then Maya quits
+   with it open.
 
 Maya quits through ``cmds.quit`` or, with ``--quit title-bar``, by closing
 its main window as a person does. A scenario passes when every expectation
@@ -144,6 +145,11 @@ def _in_maya():
         cmds.evalDeferred(lambda: done.append(True), lowestPriority=True)
         yield wait(label + " settled", lambda: bool(done))
 
+    def click_workflow(attribute):
+        stage("workflow " + attribute)
+        widget(getattr(panel.CONTROLLER, attribute), "findControl").click()
+        yield wait("workflow switched", lambda: True)
+
     def objects_windows():
         return (cmds.lsUI(windows=True) or []).count(OBJECTS)
 
@@ -205,6 +211,11 @@ def _in_maya():
             expect(label + " panel close", objects_windows() == 0 and windows()[MAIN] == 0,
                    str(objects_windows()))
             yield from open_panel()
+            yield from open_objects()
+            yield from click_workflow("_model_workflow_button")
+            expect(label + " workflow keeps the objects window", objects_windows() == 1
+                   and panel.CONTROLLER._objects_window is not None, str(objects_windows()))
+            yield from click_workflow("_animation_workflow_button")
             yield from open_objects()
             stage("new scene")
             cmds.file(new=True, force=True)

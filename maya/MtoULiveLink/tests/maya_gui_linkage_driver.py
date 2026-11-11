@@ -43,15 +43,15 @@ selected), ``objects_window`` (``target`` ``open``/``close``),
 ``drop_secondary_once`` (the next linkage group leaves out the second object;
 this disposable process only), ``resources`` (the census in ``resources``:
 live OpenMaya callbacks counted at their registration, the tool's scriptJobs,
-Python threads, open sockets,
-``MtoU_*`` nodes and MtoU windows), ``close_panel`` (the panel window closes),
-``open_panel`` (``run()`` again, then set the role and connect),
-``new_scene``, ``reopen_scene`` (the fixture scene again, then connect),
-``lock_link_camera`` (``target`` ``unlock`` unlocks and deletes it), ``quit``. Each runs the handler
-of the panel control it names. The result file always carries the latest
-linkage status, the object set and the panel's workflow, mode, cache state,
-status line and ``controls`` (whether 进入联动, 返回实时, 结束预览, 实时预览, 缓存播放
-and 捕获并上传 are enabled); ``ack`` names the last finished command.
+Python threads, open sockets, ``MtoU_*`` nodes and MtoU windows),
+``close_panel`` (the panel window closes), ``open_panel`` (``run()`` again,
+then set the role and connect), ``new_scene``, ``reopen_scene`` (the fixture
+scene again, then connect), ``lock_link_camera`` (``target`` ``unlock``
+unlocks and deletes it), ``quit``. Each runs the handler of the panel control
+it names. The result file always carries the latest linkage status, the
+object set and the panel's workflow, mode, cache state, status line and
+``controls`` (whether 进入联动, 返回实时, 结束预览, 实时预览, 缓存播放 and
+捕获并上传 are enabled); ``ack`` names the last finished command.
 
 ``prefs`` describes the preferences this Maya started with, read before Maya
 can save them again: the ``pluginPrefs.mel`` in this Maya's own preference

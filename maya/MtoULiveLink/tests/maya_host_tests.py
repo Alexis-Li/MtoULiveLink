@@ -22,9 +22,6 @@ from mtou_livelink import (  # noqa: E402
     cache as mtou_cache,
 )
 from mtou_livelink import (
-    camera as mtou_camera,
-)
-from mtou_livelink import (
     config as mtou_config,
 )
 from mtou_livelink import (

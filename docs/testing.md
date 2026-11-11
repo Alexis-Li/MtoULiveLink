@@ -217,8 +217,9 @@ Pass `--old-entry` the 0.9.0 `MtoULiveLink.py`, available with
 
 `maya/MtoULiveLink/tests/maya_gui_window_check.py` closes the panel and
 the 对象配对 window from their title bars (`WM_CLOSE`) and their own buttons,
-repeats close and reopen, makes a new scene and opens a scene, and quits Maya
-in each state. Throughout, an open panel must hold one window, its scriptJob
+repeats close and reopen, switches workflow, makes a new scene and opens a
+scene, and quits Maya in each state. Throughout, an open panel must hold one
+window, its scriptJob
 and its two scene-replacement callbacks. A scenario passes only when Maya
 exits with code 0, in time, without a crash log and without a Python traceback
 in its Script Editor history.
