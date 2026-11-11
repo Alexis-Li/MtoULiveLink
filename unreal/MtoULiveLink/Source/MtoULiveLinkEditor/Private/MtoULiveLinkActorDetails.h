@@ -45,12 +45,6 @@ public:
     /** Every linkage read-back the group leaves out, for 高级设置与诊断. */
     static FText FormatLinkageDiagnostics(const struct FMtoULinkageView& View);
 
-    /** The 场景参考 result line in the user's terms. */
-    static FText FormatSceneReferenceResult(const struct FMtoUSceneRefExportResult& Result);
-
-    /** The handoff identity, counts and scope the result line leaves out. */
-    static FText FormatSceneReferenceDiagnostics(const struct FMtoUSceneRefExportResult& Result);
-
     /**
      * Acceptance renders open every MtoU group, so the check sees rows that
      * start collapsed. Panels built while this is set start expanded.

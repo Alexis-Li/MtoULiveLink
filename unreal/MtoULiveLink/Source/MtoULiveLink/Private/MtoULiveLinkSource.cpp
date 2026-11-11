@@ -1275,7 +1275,7 @@ uint32 FMtoULiveLinkSource::Run()
                     {
                         // The greeting opens a v10 connection. A mismatched
                         // version is refused here, before any target is
-                        // discovered, a writer is muted or a handoff is read.
+                        // discovered or a writer is muted.
                         FString FirstType;
                         FString FirstTypeError;
                         if (FMtoUProtocol::PeekType(Payload, FirstType, FirstTypeError)
@@ -1396,9 +1396,7 @@ uint32 FMtoULiveLinkSource::Run()
 
                     if (MessageType == TEXT("mode")
                         || MessageType == TEXT("leave_linkage")
-                        || MessageType == TEXT("remove_object")
-                        || MessageType == TEXT("reference_result")
-                        || MessageType == TEXT("reference_removed"))
+                        || MessageType == TEXT("remove_object"))
                     {
                         // Linkage control work happens on the game thread
                         // because it mutates the takeover and the published
@@ -1426,23 +1424,11 @@ uint32 FMtoULiveLinkSource::Run()
                             bValid = FMtoUProtocol::ParseLeaveLinkage(
                                 Payload, Control.LeaveLinkage, LinkageError, &LinkageErrorCode);
                         }
-                        else if (MessageType == TEXT("remove_object"))
+                        else
                         {
                             Control.Kind = FMtoUPendingLinkageControl::EKind::RemoveObject;
                             bValid = FMtoUProtocol::ParseRemoveObject(
                                 Payload, Control.RemoveObject, LinkageError, &LinkageErrorCode);
-                        }
-                        else if (MessageType == TEXT("reference_result"))
-                        {
-                            Control.Kind = FMtoUPendingLinkageControl::EKind::ReferenceResult;
-                            bValid = FMtoUProtocol::ParseReferenceResult(
-                                Payload, Control.ReferenceResult, LinkageError, &LinkageErrorCode);
-                        }
-                        else
-                        {
-                            Control.Kind = FMtoUPendingLinkageControl::EKind::ReferenceRemoved;
-                            bValid = FMtoUProtocol::ParseReferenceRemoved(
-                                Payload, Control.ReferenceRemoved, LinkageError, &LinkageErrorCode);
                         }
                         if (!bValid)
                         {
@@ -1450,8 +1436,8 @@ uint32 FMtoULiveLinkSource::Run()
                             // per-message rejection: the session answers with
                             // its stable code and keeps the connection, so an
                             // operator can correct the action without losing
-                            // the streaming session (protocol/README.md, mode and
-                            // reference message tables).
+                            // the streaming session (protocol/README.md, message
+                            // tables).
                             SendLinkageError(LinkageErrorCode, LinkageError);
                             continue;
                         }
@@ -2166,12 +2152,6 @@ void FMtoULiveLinkSource::HandleLinkageControlOnGameThread(const FMtoUPendingLin
     case FMtoUPendingLinkageControl::EKind::RemoveObject:
         SessionId = Control.RemoveObject.SessionId;
         break;
-    case FMtoUPendingLinkageControl::EKind::ReferenceResult:
-        SessionId = Control.ReferenceResult.SessionId;
-        break;
-    case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
-        SessionId = Control.ReferenceRemoved.SessionId;
-        break;
     }
     if (SessionId == INDEX_NONE || SessionId < 1
         || !IsSessionActiveOnGameThread(static_cast<uint64>(SessionId)))
@@ -2192,12 +2172,6 @@ void FMtoULiveLinkSource::HandleLinkageControlOnGameThread(const FMtoUPendingLin
         break;
     case FMtoUPendingLinkageControl::EKind::RemoveObject:
         LinkageSession.NoteRemoveObject(Control.RemoveObject);
-        break;
-    case FMtoUPendingLinkageControl::EKind::ReferenceResult:
-        LinkageSession.NoteReferenceResult(Control.ReferenceResult);
-        break;
-    case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
-        LinkageSession.NoteReferenceRemoved(Control.ReferenceRemoved);
         break;
     }
 }

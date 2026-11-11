@@ -1018,9 +1018,6 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
         PinLimit64(TEXT("max_linkage_group_bytes"), FMtoUProtocol::MaxLinkageGroupBytes);
         PinLimit32(TEXT("max_control_queue"), FMtoUProtocol::MaxControlQueue);
         PinLimit32(TEXT("max_pending_camera_targets"), FMtoUProtocol::MaxPendingCameraTargets);
-        PinLimit64(TEXT("max_reference_bytes"), FMtoUProtocol::MaxReferenceBytes);
-        PinLimit32(TEXT("max_reference_objects"), FMtoUProtocol::MaxReferenceObjects);
-        PinLimit32(TEXT("max_reference_triangles"), FMtoUProtocol::MaxReferenceTriangles);
     }
     else
     {
@@ -1142,109 +1139,6 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             ++VersionRefusalCases;
         }
 
-        if (Operation == TEXT("reference_result"))
-        {
-            // The local import, swap or removal outcome. A result naming a
-            // transfer this session never offered describes work that never
-            // started and is refused instead of recorded.
-            const TSharedPtr<FJsonObject> Source = Case->GetObjectField(TEXT("payload"));
-            const TSharedPtr<FJsonObject> Counts = Source->GetObjectField(TEXT("counts"));
-            FMtoUReferenceResultMessage Result;
-            Result.SessionId = static_cast<int32>(Source->GetNumberField(TEXT("session_id")));
-            Result.TransferId = Source->GetStringField(TEXT("transfer_id"));
-            Result.Detail = Source->HasField(TEXT("detail"))
-                ? Source->GetStringField(TEXT("detail"))
-                : FString();
-            Result.bAccepted = Source->HasField(TEXT("accepted"))
-                && Source->GetBoolField(TEXT("accepted"));
-            if (Counts.IsValid())
-            {
-                Result.ObjectCount =
-                    static_cast<int64>(Counts->GetNumberField(TEXT("objects")));
-                Result.TriangleCount =
-                    static_cast<int64>(Counts->GetNumberField(TEXT("triangles")));
-                Result.ByteCount = static_cast<int64>(Counts->GetNumberField(TEXT("bytes")));
-            }
-            FMtoULinkageSession ResultSession;
-            ResultSession.SendReply = [](TArray<uint8>&&, bool) {};
-            ResultSession.BeginSession(Result.SessionId);
-            ResultSession.NegotiateIdentity(TEXT("character"), 1, 1);
-            ResultSession.NoteReferenceResult(Result);
-            const FString RecordedCode = ResultSession.GetView().ErrorCode;
-            const FString RecordedDetail = ResultSession.GetView().Error;
-            const bool bRecorded = RecordedCode.IsEmpty()
-                || RecordedCode == TEXT("REFERENCE_STALE");
-            TestEqual(*FString::Printf(TEXT("%s acceptance"), *Id), bRecorded, bExpectedAccepted);
-            if (!bRecorded)
-            {
-                TestEqual(*FString::Printf(TEXT("%s stable error code"), *Id),
-                    RecordedCode, Expected->GetStringField(TEXT("error_code")));
-                if (Keywords)
-                {
-                    // The reason lives in the diagnostic text; the code alone
-                    // cannot name the transfer or the budget.
-                    TestTrue(*FString::Printf(TEXT("%s diagnostic keywords"), *Id),
-                        ContainsKeywords(RecordedDetail, *Keywords));
-                }
-            }
-            continue;
-        }
-
-        if (Operation == TEXT("reference_offer"))
-        {
-            // The offer the panel may hand to the user. A malformed one is
-            // refused before Maya is told about it, so the importer never
-            // stages a handoff that cannot be verified. The cases name the
-            // session identity they run against.
-            const TSharedPtr<FJsonObject> Source = Case->GetObjectField(TEXT("payload"));
-            const TSharedPtr<FJsonObject> Linkage = Case->GetObjectField(TEXT("linkage"));
-            FMtoULinkageSession OfferSession;
-            OfferSession.SendReply = [](TArray<uint8>&&, bool) {};
-            OfferSession.BeginSession(Linkage.IsValid()
-                ? static_cast<int32>(Linkage->GetNumberField(TEXT("session_id")))
-                : 4242);
-            if (Linkage.IsValid())
-            {
-                OfferSession.NegotiateIdentity(
-                    TEXT("character"),
-                    static_cast<int32>(Linkage->GetNumberField(TEXT("set_revision"))),
-                    static_cast<int32>(Linkage->GetNumberField(TEXT("space_revision"))));
-            }
-            const TSharedPtr<FJsonObject> Counts = Source->GetObjectField(TEXT("counts"));
-            FString OfferError;
-            const bool bOffered = OfferSession.OfferReferenceHandoff(
-                Source->GetStringField(TEXT("transfer_id")),
-                Source->GetStringField(TEXT("directory")),
-                Source->HasField(TEXT("manifest_digest"))
-                    ? Source->GetStringField(TEXT("manifest_digest"))
-                    : FString(),
-                Source->GetObjectField(TEXT("scope")),
-                Counts.IsValid() ? static_cast<int64>(Counts->GetNumberField(TEXT("bytes"))) : 0,
-                Counts.IsValid()
-                    ? static_cast<int32>(Counts->GetNumberField(TEXT("objects")))
-                    : 0,
-                Counts.IsValid()
-                    ? static_cast<int32>(Counts->GetNumberField(TEXT("triangles")))
-                    : 0,
-                OfferError);
-            TestEqual(*FString::Printf(TEXT("%s acceptance"), *Id), bOffered, bExpectedAccepted);
-            if (!bOffered)
-            {
-                if (Expected->HasField(TEXT("error_code")))
-                {
-                    TestEqual(*FString::Printf(TEXT("%s stable error code"), *Id),
-                        OfferSession.GetView().ErrorCode,
-                        Expected->GetStringField(TEXT("error_code")));
-                }
-                if (Keywords)
-                {
-                    TestTrue(*FString::Printf(TEXT("%s diagnostic keywords"), *Id),
-                        ContainsKeywords(OfferError, *Keywords));
-                }
-            }
-            continue;
-        }
-
         if (Operation == TEXT("resource_limit"))
         {
             // A frozen budget is exceeded. The corpus names the budget, the
@@ -1277,21 +1171,6 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             {
                 TestEqual(*FString::Printf(TEXT("%s pins the control queue"), *Id),
                     static_cast<int64>(FMtoUProtocol::MaxControlQueue), Limit);
-            }
-            else if (BudgetName == TEXT("max_reference_objects"))
-            {
-                TestEqual(*FString::Printf(TEXT("%s pins the reference object budget"), *Id),
-                    static_cast<int64>(FMtoUProtocol::MaxReferenceObjects), Limit);
-            }
-            else if (BudgetName == TEXT("max_reference_triangles"))
-            {
-                TestEqual(*FString::Printf(TEXT("%s pins the reference triangle budget"), *Id),
-                    static_cast<int64>(FMtoUProtocol::MaxReferenceTriangles), Limit);
-            }
-            else if (BudgetName == TEXT("max_reference_bytes"))
-            {
-                TestEqual(*FString::Printf(TEXT("%s pins the reference byte budget"), *Id),
-                    FMtoUProtocol::MaxReferenceBytes, Limit);
             }
             else
             {
@@ -1743,9 +1622,7 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
         }
 
         if (Operation == TEXT("mode")
-            || Operation == TEXT("leave_linkage")
-            || Operation == TEXT("reference_result")
-            || Operation == TEXT("reference_removed"))
+            || Operation == TEXT("leave_linkage"))
         {
             TArray<uint8> Bytes;
             {
@@ -1761,26 +1638,16 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             bool bAccepted = false;
             FMtoUModeMessage Mode;
             FMtoULeaveLinkageMessage LeaveLinkage;
-            FMtoUReferenceResultMessage ReferenceResult;
-            FMtoUReferenceRemovedMessage ReferenceRemoved;
             if (Operation == TEXT("mode"))
             {
                 bAccepted = FMtoUProtocol::ParseMode(Bytes, Mode, Error, &ErrorCode);
             }
-            else if (Operation == TEXT("leave_linkage"))
+            else
             {
                 bAccepted = FMtoUProtocol::ParseLeaveLinkage(Bytes, LeaveLinkage, Error, &ErrorCode);
             }
-            else if (Operation == TEXT("reference_result"))
-            {
-                bAccepted = FMtoUProtocol::ParseReferenceResult(Bytes, ReferenceResult, Error, &ErrorCode);
-            }
-            else
-            {
-                bAccepted = FMtoUProtocol::ParseReferenceRemoved(Bytes, ReferenceRemoved, Error, &ErrorCode);
-            }
             TestEqual(*FString::Printf(TEXT("%s acceptance"), *Id), bAccepted, bExpectedAccepted);
-            // Every case of the mode and reference families is a per-message
+            // Every case of the mode and leave families is a per-message
             // rejection: the session answers with its stable code and keeps
             // the connection (protocol/README.md), so a refusal here never
             // carries the close-after flag.
@@ -1921,7 +1788,6 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                 PacketBytes = FMtoUProtocol::EncodeHelloAck(
                     static_cast<int32>(Source->GetNumberField(TEXT("session_id"))),
                     Capability(TEXT("linkage")),
-                    Capability(TEXT("reference")),
                     Capability(TEXT("cache")),
                     Capability(TEXT("model")),
                     Targets,
@@ -2025,24 +1891,6 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                     Source->GetNumberField(TEXT("lag_seconds")),
                     Components,
                     Source->HasField(TEXT("reason")) ? Source->GetStringField(TEXT("reason")) : FString());
-            }
-            else if (Operation == TEXT("reference_offer"))
-            {
-                const TSharedPtr<FJsonObject> Counts = Source->GetObjectField(TEXT("counts"));
-                PacketBytes = FMtoUProtocol::EncodeReferenceOffer(
-                    static_cast<int32>(Source->GetNumberField(TEXT("session_id"))),
-                    Source->GetStringField(TEXT("transfer_id")),
-                    Source->GetStringField(TEXT("directory")),
-                    Source->GetStringField(TEXT("manifest_digest")),
-                    Source->GetObjectField(TEXT("scope")),
-                    static_cast<int32>(Source->GetNumberField(TEXT("space_revision"))),
-                    Counts.IsValid() ? static_cast<int64>(Counts->GetNumberField(TEXT("bytes"))) : 0,
-                    Counts.IsValid()
-                        ? static_cast<int32>(Counts->GetNumberField(TEXT("objects")))
-                        : 0,
-                    Counts.IsValid()
-                        ? static_cast<int32>(Counts->GetNumberField(TEXT("triangles")))
-                        : 0);
             }
             else if (Operation == TEXT("cache_ready"))
             {
@@ -2238,12 +2086,6 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                     RequiredFields = {TEXT("session_id"), TEXT("mode_revision"), TEXT("eval_id"),
                         TEXT("sample_serial"), TEXT("applied"), TEXT("applied_display_frame"),
                         TEXT("lag_seconds"), TEXT("components"), TEXT("reason")};
-                }
-                else if (Operation == TEXT("reference_offer"))
-                {
-                    RequiredFields = {TEXT("session_id"), TEXT("transfer_id"), TEXT("directory"),
-                        TEXT("manifest_digest"), TEXT("scope"), TEXT("space_revision"),
-                        TEXT("counts")};
                 }
                 else
                 {
@@ -12658,7 +12500,7 @@ TArray<uint8> LinkageHelloPacket()
     return Packet(
         TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD ",\"host\":\"maya\",\"maya_version\":\"2024\","
              "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1.0,\"fps\":24.0},"
-             "\"capabilities\":{\"linkage\":true,\"reference\":true,\"cache\":true,\"model\":true}}"));
+             "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
 }
 
 /**
@@ -13135,7 +12977,7 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
             TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD ",\"host\":\"maya\","
                  "\"maya_version\":\"2024\",\"plugin_version\":\"1.1.0\","
                  "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1.0,\"fps\":24.0},"
-                 "\"capabilities\":{\"linkage\":true,\"reference\":true,\"cache\":true,\"model\":true}}"));
+                 "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
         TestTrue(TEXT("the v10 greeting is sent"),
             SendBytes(*Client, Hello.GetData(), Hello.Num()));
         TArray<uint8> Payload;
@@ -13849,7 +13691,7 @@ bool FMtoULinkageSessionTest::RunTest(const FString& Parameters)
             ModeState->GetStringField(TEXT("control")), FString(TEXT("unreal")));
         TestEqual(TEXT("the mode statement revision"),
             static_cast<int32>(ModeState->GetNumberField(TEXT("mode_revision"))), 1);
-        // Maya checks its scene reference against the takeover's anchor.
+        // The linkage statement names the takeover's static anchor A.
         const TSharedPtr<FJsonObject>* Anchor = nullptr;
         TestTrue(TEXT("the linkage statement names the anchor"),
             ModeState->TryGetObjectField(TEXT("anchor"), Anchor));
@@ -14664,13 +14506,13 @@ bool FMtoUErrorKindEncodingTest::RunTest(const FString& Parameters)
     // The types Maya may send; a retired one is not among them.
     for (const TCHAR* Defined : {TEXT("hello"), TEXT("init"), TEXT("frame"), TEXT("cache_enter"),
             TEXT("cache_begin"), TEXT("cache_frame"), TEXT("cache_end"), TEXT("cache_clear"),
-            TEXT("mode"), TEXT("group"), TEXT("leave_linkage"), TEXT("remove_object"),
-            TEXT("reference_result"), TEXT("reference_removed")})
+            TEXT("mode"), TEXT("group"), TEXT("leave_linkage"), TEXT("remove_object")})
     {
         TestTrue(*FString::Printf(TEXT("%s is a defined type"), Defined),
             FMtoUProtocol::IsDefinedMessageType(Defined));
     }
     for (const TCHAR* Undefined : {TEXT("cache_play"), TEXT("cache_stop"), TEXT("reference_query"),
+            TEXT("reference_offer"), TEXT("reference_result"), TEXT("reference_removed"),
             TEXT("cache_other"), TEXT("cache_"), TEXT("error"), TEXT("mode_state"), TEXT("")})
     {
         TestFalse(*FString::Printf(TEXT("'%s' is not a defined type"), Undefined),
@@ -15565,6 +15407,10 @@ bool FMtoUUndefinedTypeSocketTest::RunTest(const FString& Parameters)
         {TEXT("cache_stop"), TEXT("{\"type\":\"cache_stop\"}")},
         {TEXT("reference_query"), TEXT("{\"type\":\"reference_query\",\"session_id\":1,"
              "\"transfer_id\":\"transfer-1\",\"scope\":{\"level\":\"/Game/Maps/Level\"}}")},
+        {TEXT("reference_result"), TEXT("{\"type\":\"reference_result\",\"session_id\":1,"
+             "\"transfer_id\":\"transfer-1\",\"accepted\":true,\"detail\":\"imported\"}")},
+        {TEXT("reference_removed"), TEXT("{\"type\":\"reference_removed\",\"session_id\":1,"
+             "\"detail\":\"removed\"}")},
         {TEXT("warp"), TEXT("{\"type\":\"warp\"}")},
     };
 

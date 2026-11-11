@@ -80,7 +80,6 @@ struct FMtoUHelloMessage
     double UnitScaleCm = 0.0;
     double Fps = 0.0;
     bool bLinkage = false;
-    bool bReference = false;
     bool bCache = false;
     bool bModel = false;
 };
@@ -140,29 +139,6 @@ struct FMtoUHelloTarget
     FString Kind;
     FString BindingPath;
     FString Generation;
-};
-
-/** Outcome of one local handoff import, swap or removal. */
-struct FMtoUReferenceResultMessage
-{
-    int32 SessionId = 0;
-    FString TransferId;
-    bool bAccepted = false;
-    FString Detail;
-    // The stable code the Maya importer refused the handoff with, when it sent
-    // one; empty for an accepted import.
-    FString Code;
-    int64 ObjectCount = 0;
-    int64 TriangleCount = 0;
-    int64 ByteCount = 0;
-    FString Container;
-};
-
-/** The user removed the tool-owned reference container. */
-struct FMtoUReferenceRemovedMessage
-{
-    int32 SessionId = 0;
-    FString Detail;
 };
 
 /** One `applied.components` row: actual completion evidence of one object. */
@@ -262,11 +238,6 @@ public:
     // At most one linkage target is in flight and one replaceable target
     // waits; an advancing target never cancels the issued one.
     static constexpr int32 MaxPendingCameraTargets = 2;
-    // Scene-reference handoff budgets; the Maya importer enforces them before
-    // staging, Unreal reports the offered counts so both sides agree.
-    static constexpr int64 MaxReferenceBytes = 256ll * 1024ll * 1024ll;
-    static constexpr int32 MaxReferenceObjects = 20000;
-    static constexpr int32 MaxReferenceTriangles = 20000000;
     // After the last desired target an applied group must be observed within
     // this window before the view reports a non-converged linkage.
     static constexpr double LinkageConvergenceSeconds = 2.0;
@@ -293,9 +264,9 @@ public:
         FString& OutError,
         FString* OutErrorCode = nullptr);
     // The connection greeting. A differing version is refused with
-    // PROTOCOL_VERSION_MISMATCH before any target, writer or handoff is
-    // touched, because the greeting is the first message of a connection. The
-    // check comes first: the optional `plugin_version` is validated only for
+    // PROTOCOL_VERSION_MISMATCH before any target or writer is touched,
+    // because the greeting is the first message of a connection. The check
+    // comes first: the optional `plugin_version` is validated only for
     // a greeting of this version, and read (when it is a string) only to name
     // the release in the log of a refused one.
     static bool ParseHello(
@@ -327,16 +298,6 @@ public:
     static bool ParseRemoveObject(
         const TArray<uint8>& Payload,
         FMtoURemoveObjectMessage& OutMessage,
-        FString& OutError,
-        FString* OutErrorCode = nullptr);
-    static bool ParseReferenceResult(
-        const TArray<uint8>& Payload,
-        FMtoUReferenceResultMessage& OutMessage,
-        FString& OutError,
-        FString* OutErrorCode = nullptr);
-    static bool ParseReferenceRemoved(
-        const TArray<uint8>& Payload,
-        FMtoUReferenceRemovedMessage& OutMessage,
         FString& OutError,
         FString* OutErrorCode = nullptr);
     static bool ParseFrame(const TArray<uint8>& Payload, FMtoUFrameMessage& OutMessage, FString& OutError);
@@ -392,11 +353,10 @@ public:
         int32 SpaceRevision = INDEX_NONE);
     // Answer to the greeting: the session identity, the declared capabilities,
     // the explicitly selected target (empty until the user pairs) and the
-    // common space the group and reference work must match.
+    // common space the pose groups must match.
     static TArray<uint8> EncodeHelloAck(
         int32 SessionId,
         bool bLinkage,
-        bool bReference,
         bool bCache,
         bool bModel,
         const TArray<FMtoUHelloTarget>& Targets,
@@ -421,8 +381,8 @@ public:
         const FString& Detail,
         const TSharedPtr<FJsonObject>& Anchor = nullptr);
     /**
-     * A rigid placement in the shape of the handoff manifest's `world.anchor`:
-     * `location_cm[3]` and `rotation_deg{roll, pitch, yaw}`.
+     * A rigid placement in the wire shape of an anchor: `location_cm[3]` and
+     * `rotation_deg{roll, pitch, yaw}`.
      */
     static TSharedRef<FJsonObject> MakeAnchorObject(const FTransform& Placement);
     /** The current linkage target the editor evaluated from its sequence. */
@@ -443,17 +403,6 @@ public:
         double LagSeconds,
         const TArray<FMtoUAppliedComponent>& Components,
         const FString& Reason);
-    /** A finished local handoff the user may import. */
-    static TArray<uint8> EncodeReferenceOffer(
-        int32 SessionId,
-        const FString& TransferId,
-        const FString& Directory,
-        const FString& ManifestDigest,
-        const TSharedPtr<FJsonObject>& Scope,
-        int32 SpaceRevision,
-        int64 ByteCount,
-        int32 ObjectCount,
-        int32 TriangleCount);
     static TArray<uint8> EncodeCacheReady(int32 UploadId, int32 NegotiatedRevision, int32 FrameCount);
     static TArray<uint8> EncodeCachePlaying(int32 UploadId, int32 PlayId, bool bLoopEnabled);
     static TArray<uint8> EncodeCacheProgress(int32 PlayId, int32 AppliedFrames);

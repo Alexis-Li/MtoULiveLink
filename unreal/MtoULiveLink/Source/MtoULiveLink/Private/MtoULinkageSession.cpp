@@ -281,7 +281,6 @@ void FMtoULinkageSession::BeginSession(int32 InSessionId)
     FrameSerial = 0;
     LastPumpSeconds = 0.0;
     Staged.Reset();
-    OfferedTransferIds.Reset();
     LastAppliedEvalId.Reset();
     LastAppliedSampleSerial = 0;
     bLastApplied = false;
@@ -337,7 +336,6 @@ void FMtoULinkageSession::EndSession()
     PendingRemovalObjectId.Reset();
     PendingRemovalSetRevision = 0;
     SessionEndRequestedFor = 0;
-    OfferedTransferIds.Reset();
     if (Residual.IsEmpty())
     {
         Detail = TEXT("Disconnected; the linkage takeover was restored.");
@@ -395,7 +393,6 @@ void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello)
     const TSharedRef<FJsonObject> Anchor = MakeShared<FJsonObject>();
     SendControl(FMtoUProtocol::EncodeHelloAck(
         SessionId,
-        true,
         true,
         true,
         true,
@@ -1112,136 +1109,6 @@ bool FMtoULinkageSession::RequestLeave(
     return true;
 }
 
-bool FMtoULinkageSession::OfferReferenceHandoff(
-    const FString& TransferId,
-    const FString& Directory,
-    const FString& ManifestDigest,
-    const TSharedPtr<FJsonObject>& Scope,
-    int64 ByteCount,
-    int32 ObjectCount,
-    int32 TriangleCount,
-    FString& OutError)
-{
-    OutError.Reset();
-    if (SessionId == 0)
-    {
-        OutError = TEXT("A reference handoff requires an active streaming session.");
-        return false;
-    }
-    if (TransferId.IsEmpty() || Directory.IsEmpty() || !Scope.IsValid())
-    {
-        OutError = TEXT("A reference handoff requires a transfer id, a directory and a scope.");
-        Error = OutError;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return false;
-    }
-    if (ManifestDigest.IsEmpty())
-    {
-        // The digest is what lets Maya verify the directory content, so an
-        // empty one cannot describe a handoff.
-        OutError = TEXT("A reference handoff requires a non-empty manifest_digest.");
-        Error = OutError;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return false;
-    }
-    if (ByteCount < 1)
-    {
-        OutError = TEXT(
-            "A reference handoff requires a positive byte count: the offer's "
-            "'bytes' field must be a positive integer.");
-        Error = OutError;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return false;
-    }
-    if (ObjectCount < 0 || TriangleCount < 0)
-    {
-        OutError = TEXT("A reference handoff cannot name a negative object or triangle count.");
-        Error = OutError;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return false;
-    }
-    if (ByteCount > FMtoUProtocol::MaxReferenceBytes
-        || ObjectCount > FMtoUProtocol::MaxReferenceObjects
-        || TriangleCount > FMtoUProtocol::MaxReferenceTriangles)
-    {
-        OutError = FString::Printf(
-            TEXT("The handoff exceeds a frozen reference budget (%lld bytes, %d objects, %d triangles)."),
-            ByteCount,
-            ObjectCount,
-            TriangleCount);
-        Error = OutError;
-        ErrorCode = TEXT("REFERENCE_OVER_BUDGET");
-        PublishView();
-        return false;
-    }
-
-    SendControl(FMtoUProtocol::EncodeReferenceOffer(
-        SessionId, TransferId, Directory, ManifestDigest, Scope, SpaceRevision,
-        ByteCount, ObjectCount, TriangleCount));
-    OfferedTransferIds.Add(TransferId);
-    Detail = FString::Printf(TEXT("Offered reference handoff %s."), *TransferId);
-    PublishView();
-    return true;
-}
-
-void FMtoULinkageSession::NoteReferenceResult(const FMtoUReferenceResultMessage& Message)
-{
-    if (Message.SessionId != SessionId)
-    {
-        return;
-    }
-    if (Message.TransferId.IsEmpty())
-    {
-        Error = TEXT("A reference result must name its transfer_id.");
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return;
-    }
-    if (!OfferedTransferIds.Contains(Message.TransferId))
-    {
-        // A result for a transfer this session never offered names work that
-        // never started, so it cannot report an outcome.
-        Detail = FString::Printf(
-            TEXT("Reference result names transfer_id '%s', which this session "
-                 "never offered."),
-            *Message.TransferId);
-        Error = Detail;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return;
-    }
-    Detail = FString::Printf(
-        TEXT("Reference %s %s: %s (%lld objects, %lld triangles, %lld bytes)."),
-        *Message.TransferId,
-        Message.bAccepted ? TEXT("accepted") : TEXT("refused"),
-        *Message.Detail,
-        Message.ObjectCount,
-        Message.TriangleCount,
-        Message.ByteCount);
-    if (!Message.bAccepted)
-    {
-        Error = Message.Detail;
-        // The importer names why it refused the handoff; a fixed code would
-        // report every refusal as a stale space revision.
-        ErrorCode = Message.Code.IsEmpty() ? TEXT("REFERENCE_STALE") : Message.Code;
-    }
-    PublishView();
-}
-
-void FMtoULinkageSession::NoteReferenceRemoved(const FMtoUReferenceRemovedMessage& Message)
-{
-    if (Message.SessionId != SessionId)
-    {
-        return;
-    }
-    Detail = FString::Printf(TEXT("Reference container removed: %s"), *Message.Detail);
-    PublishView();
-}
-
 void FMtoULinkageSession::PumpCameraTargets(double NowSeconds, bool bAskEditorNow)
 {
     if (!Hooks.EvaluateCameraTime)
@@ -1816,22 +1683,3 @@ bool MtoURequestLinkageLeave(
     return false;
 }
 
-bool MtoUOfferReferenceHandoff(
-    const FString& TransferId,
-    const FString& Directory,
-    const FString& ManifestDigest,
-    const TSharedPtr<FJsonObject>& Scope,
-    int64 ByteCount,
-    int32 ObjectCount,
-    int32 TriangleCount,
-    FString& OutError)
-{
-    if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
-    {
-        return Source->GetLinkageSession().OfferReferenceHandoff(
-            TransferId, Directory, ManifestDigest, Scope, ByteCount, ObjectCount,
-            TriangleCount, OutError);
-    }
-    OutError = TEXT("The MtoU_LiveLink listener is unavailable.");
-    return false;
-}

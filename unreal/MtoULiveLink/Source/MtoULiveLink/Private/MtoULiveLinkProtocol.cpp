@@ -804,8 +804,8 @@ bool FMtoUProtocol::ParseHello(
     }
 
     // The greeting is answered before anything else is discovered, so a peer
-    // with a different protocol version never borrows a camera, mutes a
-    // writer or reads a handoff directory.
+    // with a different protocol version never borrows a camera or mutes a
+    // writer.
     if (!GetIdentityInt(Object, TEXT("version"), OutMessage.Version, OutError))
     {
         OutError = TEXT("Field 'version' must be an integer JSON number.");
@@ -890,7 +890,6 @@ bool FMtoUProtocol::ParseHello(
         return true;
     };
     if (!ReadCapability(TEXT("linkage"), OutMessage.bLinkage)
-        || !ReadCapability(TEXT("reference"), OutMessage.bReference)
         || !ReadCapability(TEXT("cache"), OutMessage.bCache)
         || !ReadCapability(TEXT("model"), OutMessage.bModel))
     {
@@ -1300,137 +1299,6 @@ bool FMtoUProtocol::ParseRemoveObject(
     return true;
 }
 
-bool FMtoUProtocol::ParseReferenceResult(
-    const TArray<uint8>& Payload,
-    FMtoUReferenceResultMessage& OutMessage,
-    FString& OutError,
-    FString* OutErrorCode)
-{
-    OutMessage = FMtoUReferenceResultMessage();
-    OutError.Reset();
-    if (OutErrorCode)
-    {
-        *OutErrorCode = TEXT("INVALID_MESSAGE");
-    }
-    TSharedPtr<FJsonObject> Object;
-    if (!ParseObject(Payload, Object, OutError))
-    {
-        return false;
-    }
-    FString Type;
-    if (!GetStringField(Object, TEXT("type"), Type, OutError)
-        || Type != TEXT("reference_result"))
-    {
-        OutError = TEXT("Message type must be 'reference_result'.");
-        return false;
-    }
-    if (!GetIdentityInt(Object, TEXT("session_id"), OutMessage.SessionId, OutError)
-        || !GetStringField(Object, TEXT("transfer_id"), OutMessage.TransferId, OutError)
-        || !GetStringField(Object, TEXT("detail"), OutMessage.Detail, OutError))
-    {
-        return false;
-    }
-    if (Object->HasField(TEXT("code"))
-        && !GetStringField(Object, TEXT("code"), OutMessage.Code, OutError))
-    {
-        return false;
-    }
-    if (OutMessage.SessionId < 1 || OutMessage.TransferId.IsEmpty())
-    {
-        OutError = TEXT("Fields 'session_id' must be positive and 'transfer_id' non-empty.");
-        return false;
-    }
-    TSharedPtr<FJsonValue> AcceptedValue;
-    if (!GetTypedField(Object, TEXT("accepted"), EJson::Boolean, AcceptedValue, OutError)
-        || !AcceptedValue->TryGetBool(OutMessage.bAccepted))
-    {
-        OutError = TEXT("Field 'accepted' must be a JSON boolean.");
-        return false;
-    }
-    TSharedPtr<FJsonObject> Counts;
-    if (Object->HasField(TEXT("counts"))
-        && (!GetOptionalObject(Object, TEXT("counts"), Counts, OutError) || !Counts.IsValid()))
-    {
-        OutError = TEXT("Field 'counts' must be an object.");
-        return false;
-    }
-    if (Counts.IsValid())
-    {
-        const auto ReadCount = [&](const TCHAR* Name, int64& OutValue) -> bool
-        {
-            if (!Counts->HasField(Name))
-            {
-                return true;
-            }
-            TSharedPtr<FJsonValue> Value;
-            int64 Parsed = 0;
-            if (!GetTypedField(Counts, Name, EJson::Number, Value, OutError)
-                || !GetExactInt64(Value, Parsed)
-                || Parsed < 0)
-            {
-                OutError = FString::Printf(
-                    TEXT("Field 'counts.%s' must be a non-negative integer."), Name);
-                return false;
-            }
-            OutValue = Parsed;
-            return true;
-        };
-        if (!ReadCount(TEXT("objects"), OutMessage.ObjectCount)
-            || !ReadCount(TEXT("triangles"), OutMessage.TriangleCount)
-            || !ReadCount(TEXT("bytes"), OutMessage.ByteCount))
-        {
-            return false;
-        }
-    }
-    if (Object->HasField(TEXT("container"))
-        && !GetStringField(Object, TEXT("container"), OutMessage.Container, OutError))
-    {
-        return false;
-    }
-    return true;
-}
-
-bool FMtoUProtocol::ParseReferenceRemoved(
-    const TArray<uint8>& Payload,
-    FMtoUReferenceRemovedMessage& OutMessage,
-    FString& OutError,
-    FString* OutErrorCode)
-{
-    OutMessage = FMtoUReferenceRemovedMessage();
-    OutError.Reset();
-    if (OutErrorCode)
-    {
-        *OutErrorCode = TEXT("INVALID_MESSAGE");
-    }
-    TSharedPtr<FJsonObject> Object;
-    if (!ParseObject(Payload, Object, OutError))
-    {
-        return false;
-    }
-    FString Type;
-    if (!GetStringField(Object, TEXT("type"), Type, OutError)
-        || Type != TEXT("reference_removed"))
-    {
-        OutError = TEXT("Message type must be 'reference_removed'.");
-        return false;
-    }
-    if (!GetIdentityInt(Object, TEXT("session_id"), OutMessage.SessionId, OutError))
-    {
-        return false;
-    }
-    if (OutMessage.SessionId < 1)
-    {
-        OutError = TEXT("Field 'session_id' must be a positive integer.");
-        return false;
-    }
-    if (Object->HasField(TEXT("detail"))
-        && !GetStringField(Object, TEXT("detail"), OutMessage.Detail, OutError))
-    {
-        return false;
-    }
-    return true;
-}
-
 bool FMtoUProtocol::PeekType(
     const TArray<uint8>& Payload,
     FString& OutType,
@@ -1502,8 +1370,7 @@ bool FMtoUProtocol::IsDefinedMessageType(const FString& Type)
         TEXT("hello"), TEXT("init"), TEXT("frame"),
         TEXT("cache_enter"), TEXT("cache_begin"), TEXT("cache_frame"),
         TEXT("cache_end"), TEXT("cache_clear"),
-        TEXT("mode"), TEXT("group"), TEXT("leave_linkage"), TEXT("remove_object"),
-        TEXT("reference_result"), TEXT("reference_removed")};
+        TEXT("mode"), TEXT("group"), TEXT("leave_linkage"), TEXT("remove_object")};
     for (const TCHAR* Name : Defined)
     {
         if (Type == Name)
@@ -1994,7 +1861,6 @@ TArray<uint8> FMtoUProtocol::EncodeReady(
 TArray<uint8> FMtoUProtocol::EncodeHelloAck(
     int32 SessionId,
     bool bLinkage,
-    bool bReference,
     bool bCache,
     bool bModel,
     const TArray<FMtoUHelloTarget>& Targets,
@@ -2008,7 +1874,6 @@ TArray<uint8> FMtoUProtocol::EncodeHelloAck(
 
     const TSharedRef<FJsonObject> Capabilities = MakeShared<FJsonObject>();
     Capabilities->SetBoolField(TEXT("linkage"), bLinkage);
-    Capabilities->SetBoolField(TEXT("reference"), bReference);
     Capabilities->SetBoolField(TEXT("cache"), bCache);
     Capabilities->SetBoolField(TEXT("model"), bModel);
     Object->SetObjectField(TEXT("capabilities"), Capabilities);
@@ -2180,36 +2045,6 @@ TArray<uint8> FMtoUProtocol::EncodeApplied(
     Object->SetArrayField(TEXT("components"), ComponentValues);
     // A failed application must name its reason; an applied one reports none.
     Object->SetStringField(TEXT("reason"), Reason);
-    return EncodeObject(Object);
-}
-
-TArray<uint8> FMtoUProtocol::EncodeReferenceOffer(
-    int32 SessionId,
-    const FString& TransferId,
-    const FString& Directory,
-    const FString& ManifestDigest,
-    const TSharedPtr<FJsonObject>& Scope,
-    int32 SpaceRevision,
-    int64 ByteCount,
-    int32 ObjectCount,
-    int32 TriangleCount)
-{
-    const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-    Object->SetStringField(TEXT("type"), TEXT("reference_offer"));
-    Object->SetNumberField(TEXT("session_id"), SessionId);
-    Object->SetStringField(TEXT("transfer_id"), TransferId);
-    Object->SetStringField(TEXT("directory"), Directory);
-    Object->SetStringField(TEXT("manifest_digest"), ManifestDigest);
-    Object->SetObjectField(TEXT("scope"), Scope.IsValid()
-        ? Scope.ToSharedRef()
-        : MakeShared<FJsonObject>());
-    Object->SetNumberField(TEXT("space_revision"), SpaceRevision);
-
-    const TSharedRef<FJsonObject> Counts = MakeShared<FJsonObject>();
-    Counts->SetNumberField(TEXT("objects"), ObjectCount);
-    Counts->SetNumberField(TEXT("triangles"), TriangleCount);
-    Counts->SetNumberField(TEXT("bytes"), ByteCount);
-    Object->SetObjectField(TEXT("counts"), Counts);
     return EncodeObject(Object);
 }
 

@@ -108,8 +108,8 @@ struct FMtoUOutgoing
     // socket, the worker no longer expects that object's frame rows.
     FString RemovedObjectId;
     bool bCloseAfter = false;
-    // Control messages (greeting, mode, camera/time, applied evidence,
-    // reference offers and errors) count against the frozen per-direction
+    // Control messages (greeting, mode, camera/time, applied evidence and
+    // errors) count against the frozen per-direction
     // control queue; streamed cache outcomes do not.
     bool bControl = false;
 };
@@ -131,9 +131,7 @@ struct FMtoUPendingLinkageControl
     {
         Mode,
         LeaveLinkage,
-        RemoveObject,
-        ReferenceResult,
-        ReferenceRemoved
+        RemoveObject
     };
 
     uint64 IntakeOrder = 0;
@@ -141,8 +139,6 @@ struct FMtoUPendingLinkageControl
     FMtoUModeMessage Mode;
     FMtoULeaveLinkageMessage LeaveLinkage;
     FMtoURemoveObjectMessage RemoveObject;
-    FMtoUReferenceResultMessage ReferenceResult;
-    FMtoUReferenceRemovedMessage ReferenceRemoved;
 };
 
 struct FMtoUPendingPoseGroup

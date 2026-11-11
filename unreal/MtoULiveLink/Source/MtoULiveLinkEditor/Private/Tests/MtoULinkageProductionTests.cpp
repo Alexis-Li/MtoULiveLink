@@ -5,7 +5,6 @@
 #include "MtoULinkage.h"
 #include "MtoULiveLinkSource.h"
 #include "MtoULinkageSession.h"
-#include "MtoUSceneRefExport.h"
 #include "MtoUGuiAcceptance.h"
 #include "MtoULinkageEditor.h"
 #include "MtoUCachePlayback.h"
@@ -25,8 +24,6 @@
 #include "Editor.h"
 #include "FileHelpers.h"
 #include "Engine/SkeletalMesh.h"
-#include "Engine/StaticMesh.h"
-#include "Engine/StaticMeshActor.h"
 #include "Engine/World.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
@@ -603,10 +600,6 @@ private:
         for (int32 Index = 0; Index < Scenarios.Num(); ++Index)
         {
             AddScenario(Scenarios[Index]->AsString(), Index);
-        }
-        if (HasSecondary() && Fixture->HasTypedField<EJson::Object>(TEXT("reference_probe")))
-        {
-            AddReferenceAlignment();
         }
         if (Fixture->HasTypedField<EJson::Object>(TEXT("lifecycle")))
         {
@@ -3222,121 +3215,6 @@ private:
     }
 
     /**
-     * Scene reference in the common space of a two-object set. In the new map
-     * the last exit left behind, both Binding Actors stand at the anchor next
-     * to one probe cube; the reference is exported through the product path and
-     * imported by Maya's own action, and the cube's world centre in Maya must be
-     * the inverse anchor of its Unreal world position, the same space both
-     * objects' poses arrive in. The fixture's `reference_probe` gives the cube's
-     * `offset` and `rotation` relative to the anchor.
-     */
-    void AddReferenceAlignment()
-    {
-        Add(TEXT("[reference] dialog stage"), 30.0, [this]() { return SendOnce(TEXT("stage"), FString(), TEXT("reference")); });
-        Add(TEXT("[reference] place the set and a probe in a new map"), 60.0, [this]()
-        {
-            UWorld* World = GEditor->GetEditorWorldContext().World();
-            if (!World)
-            {
-                return false;
-            }
-            const TSharedPtr<FJsonObject> Probe = Fixture->GetObjectField(TEXT("reference_probe"));
-            const FVector Euler = ReadVector(Probe, TEXT("rotation"));
-            const FTransform Local(FRotator(Euler.Y, Euler.Z, Euler.X), ReadVector(Probe, TEXT("offset")));
-            ProbeTransform = Local * AnchorTransform;
-            FActorSpawnParameters Params;
-            Params.ObjectFlags |= RF_Transient;
-            for (const bool bSecondary : {false, true})
-            {
-                AMtoULiveLinkActor* Spawned = World->SpawnActor<AMtoULiveLinkActor>(
-                    AnchorTransform.GetLocation(), AnchorTransform.Rotator(), Params);
-                Spawned->SetBinding(bSecondary ? SecondaryBinding.Get() : Binding.Get());
-                (bSecondary ? SecondaryActor : Actor) = Spawned;
-            }
-            AStaticMeshActor* Cube = World->SpawnActor<AStaticMeshActor>(
-                ProbeTransform.GetLocation(), ProbeTransform.Rotator(), Params);
-            Cube->GetStaticMeshComponent()->SetStaticMesh(
-                LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube")));
-            Cube->SetActorLabel(TEXT("MtoURefProbe"));
-            WorldPtr = World;
-            Log(TEXT("[reference] probe at ") + ProbeTransform.ToHumanReadableString());
-            return PairTargets();
-        });
-        Add(TEXT("[reference] the set connects in the new map"), 600.0, [this]() { return ReconnectSet(TEXT("[reference]")); });
-        Add(TEXT("[reference] export through the product path"), 300.0, [this]()
-        {
-            FMtoUSceneRefExportResult Result;
-            const bool bExported = FMtoUSceneRefExport::Run(*WorldPtr, TArray<FString>(), Result);
-            Log(FString::Printf(TEXT("[reference] export %s: %s"), bExported ? TEXT("offered") : TEXT("refused"),
-                *Result.Error));
-            Test->TestTrue(TEXT("the scene reference is exported and offered"), bExported);
-            return true;
-        });
-        Add(TEXT("[reference] Maya imports the offered reference"), 300.0, [this]()
-        {
-            const TSharedPtr<FJsonObject>* Reference = nullptr;
-            bool bOffered = false;
-            if (!MayaResult->TryGetObjectField(TEXT("reference"), Reference)
-                || !(*Reference)->TryGetBoolField(TEXT("offered"), bOffered) || !bOffered)
-            {
-                return false;
-            }
-            if (RefusalPhase == 0)
-            {
-                // One click of 导入/更新参考.
-                if (SendOnce(TEXT("import_reference")))
-                {
-                    RefusalPhase = 1;
-                }
-                return false;
-            }
-            const TSharedPtr<FJsonObject> Report = (*Reference)->GetObjectField(TEXT("report"));
-            FString Action;
-            Report->TryGetStringField(TEXT("action"), Action);
-            if (Action != TEXT("import"))
-            {
-                return false;
-            }
-            bool bAccepted = false;
-            Report->GetObjectField(TEXT("report"))->TryGetBoolField(TEXT("accepted"), bAccepted);
-            FString Text;
-            FJsonSerializer::Serialize(Report.ToSharedRef(), TJsonWriterFactory<>::Create(&Text));
-            Log(TEXT("[reference] import report: ") + Text.Left(600));
-            Test->TestTrue(TEXT("Maya accepts and imports the reference"), bAccepted);
-            RefusalPhase = 0;
-            return true;
-        });
-        Add(TEXT("[reference] the probe lines up through the inverse anchor"), 60.0, [this]()
-        {
-            if (!SendOnce(TEXT("reference_snapshot"), FString(), TEXT("MtoURefProbe")))
-            {
-                return false;
-            }
-            const TSharedPtr<FJsonObject>* Nodes = nullptr;
-            if (!MayaResult->TryGetObjectField(TEXT("reference_nodes"), Nodes) || (*Nodes)->Values.IsEmpty())
-            {
-                Test->AddError(TEXT("Maya's reference container has no probe node"));
-                return true;
-            }
-            // Maya (x, y, z) is Unreal (x, z, y); the container stands at the inverse anchor.
-            const FVector Local = AnchorTransform.InverseTransformPosition(ProbeTransform.GetLocation());
-            const FVector Expected(Local.X, Local.Z, Local.Y);
-            double MaxDelta = 0.0;
-            for (const TPair<FString, TSharedPtr<FJsonValue>>& Node : (*Nodes)->Values)
-            {
-                const TArray<TSharedPtr<FJsonValue>>& C = Node.Value->AsArray();
-                const FVector Shown(C[0]->AsNumber(), C[1]->AsNumber(), C[2]->AsNumber());
-                MaxDelta = FMath::Max(MaxDelta, FVector::Distance(Shown, Expected));
-                Log(FString::Printf(TEXT("[reference] %s: Maya centre %s, expected %s (%.4f cm)"), *Node.Key,
-                    *Shown.ToString(), *Expected.ToString(), FVector::Distance(Shown, Expected)));
-            }
-            Test->TestTrue(TEXT("the reference probe stands where the set's common space puts it"),
-                MaxDelta < Fixture->GetNumberField(TEXT("world_tolerance_cm")));
-            return true;
-        });
-    }
-
-    /**
      * Synthetic composition changes of a connected set: each replaces one
      * object's full body or parts, which must end the whole set; Maya then
      * connects again with the changed object, and the original composition
@@ -4670,7 +4548,6 @@ private:
                  {TEXT("composition_swaps"), TEXT("BLENDSHAPE_MISMATCH")},
                  {TEXT("arms"), TEXT("STREAM_INTERRUPTED")},
                  {TEXT("arms"), TEXT("BLENDSHAPE_MISMATCH")},
-                 {TEXT("reference"), TEXT("BLENDSHAPE_MISMATCH")},
                  {TEXT("set_injections"), TEXT("INVALID_MESSAGE")},
                  {TEXT("remove_secondary"), TEXT("BLENDSHAPE_MISMATCH")},
                  {TEXT("ue_remove_secondary"), TEXT("BLENDSHAPE_MISMATCH")},
@@ -4731,7 +4608,6 @@ private:
     double TimeControlWaitStarted = 0.0;
     bool bTimeControlReported = false;
     bool bMayaStarted = false;
-    FTransform ProbeTransform;
     // The composition a swap replaced, put back afterwards.
     TObjectPtr<USkeletalMesh> SavedMesh;
     TStrongObjectPtr<USkeletalMesh> ArmsMesh, FullBodyMesh;
