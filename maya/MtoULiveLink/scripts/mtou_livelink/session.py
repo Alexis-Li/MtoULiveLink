@@ -3,7 +3,6 @@
 # Licensed under the GPL with additional terms; see NOTICE.
 """Real-time streaming session, sender worker and negotiation events."""
 
-import contextlib
 import errno
 import json
 import queue
@@ -73,7 +72,6 @@ class LatestFrame(object):
 STATEMENTS = "statements"
 REPLY_ROUTES = {
     "mode_state": STATEMENTS,
-    "reference_offer": STATEMENTS,
     "object_removed": STATEMENTS,
     "camera_time": LINKAGE_MODE,
     "applied": LINKAGE_MODE,
@@ -634,9 +632,9 @@ class StreamingSession(object):
         self._is_playing = self._read_playback_state()
         self._on_event = on_event
         # Unreal's connection-level statements, on the sender thread: mode
-        # statements, reference offers, object removals and errors that
-        # belong to no cache operation. Returns False for an error that is
-        # routine work, not a reason the connection could end for.
+        # statements, object removals and errors that belong to no cache
+        # operation. Returns False for an error that is routine work, not a
+        # reason the connection could end for.
         self._on_statement = on_statement
         self._workflow = workflow
         self._blendshapes_enabled = bool(blendshapes_enabled)
@@ -658,7 +656,6 @@ class StreamingSession(object):
         self._cleanup_pending = False
         self._cleaned = False
         self._cleanup_error = None
-        self._samples_held = 0
         # Who drives time on this connection; Cached Playback and linkage
         # take leases from it, which pause live sampling while they hold one.
         self._time_control = TimeControl(
@@ -687,19 +684,6 @@ class StreamingSession(object):
     @property
     def _sampling_paused(self):
         return self._time_control.state != REALTIME_MODE
-
-    @contextlib.contextmanager
-    def holding_samples(self):
-        """Skip live samples for the duration; the connection is still watched.
-
-        A scene-reference import runs long Maya commands that can let this
-        session's timer fire while the scene is only half built.
-        """
-        self._samples_held += 1
-        try:
-            yield
-        finally:
-            self._samples_held -= 1
 
     @property
     def removal_pending(self):
@@ -1136,8 +1120,6 @@ class StreamingSession(object):
             self._emit(StreamingSessionEvent("ready", warning=warning))
         if self._removal_pending is not None:
             # The old set is closed; the new one starts with Unreal's answer.
-            return
-        if self._samples_held:
             return
         now = time.time()
         sample_interval = 1.0 / self._effective_rate()

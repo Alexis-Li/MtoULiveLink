@@ -167,8 +167,6 @@ def main():
                     })
                 elif reply_type == "mode_state":
                     link.note_mode_state(reply)
-                elif reply_type == "reference_offer":
-                    link.note_reference_offer(reply)
                 elif reply_type == "error":
                     status["errors"].append(
                         "{0}: {1}".format(reply.get("code"), reply.get("message")))

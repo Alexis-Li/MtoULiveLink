@@ -17,22 +17,12 @@ the panel is opened from the extracted copy. Windows close with the
 ``WM_CLOSE`` message their title-bar button sends, and buttons are clicked
 through Qt, so Maya runs its own close and click handling.
 
-1. ``exit_both_open``: the panel and the scene-reference window are open
-   when Maya quits.
-2. ``exit_after_reference_close``: the reference window was closed first.
-3. ``exit_after_all_closed``: both windows were closed first.
-4. ``close_cycles``: the reference window is opened from the panel twice
-   (one window) and closed from its title bar 20 times; Maya quits with the
-   panel open.
-5. ``owned_paths``: three rounds of the reference window's own close button,
-   then closing the panel (which closes the reference window), switching
-   workflow, a new scene and opening a scene, each with the reference window
-   open; then Maya quits with both open.
-6. ``exit_objects_open``: the panel and the 对象配对 window are open when Maya
+1. ``exit_after_all_closed``: the panel was closed before Maya quits.
+2. ``exit_objects_open``: the panel and the 对象配对 window are open when Maya
    quits.
-7. ``objects_close_cycles``: the 对象配对 window is opened from the panel twice
+3. ``objects_close_cycles``: the 对象配对 window is opened from the panel twice
    (one window) and closed from its title bar 20 times.
-8. ``objects_owned_paths``: three rounds of the 对象配对 window's own close
+4. ``objects_owned_paths``: three rounds of the 对象配对 window's own close
    button, closing the panel (which closes it), a new scene and opening a
    scene with it open; then Maya quits with it open.
 
@@ -55,10 +45,8 @@ import time
 from pathlib import Path
 
 MAIN = "MtoULiveLinkWindow"
-REFERENCE = "MtoULiveLinkReferenceWindow"
 OBJECTS = "MtoULiveLinkObjectsWindow"
-STEPS = ("exit_both_open", "exit_after_reference_close", "exit_after_all_closed",
-         "close_cycles", "owned_paths", "exit_objects_open", "objects_close_cycles",
+STEPS = ("exit_after_all_closed", "exit_objects_open", "objects_close_cycles",
          "objects_owned_paths")
 CLOSE_CYCLES = 20
 OWNED_ROUNDS = 3
@@ -105,7 +93,7 @@ def _in_maya():
 
     def windows():
         names = cmds.lsUI(windows=True) or []
-        return {name: names.count(name) for name in (MAIN, REFERENCE)}
+        return {name: names.count(name) for name in (MAIN,)}
 
     def panel_jobs():
         """Script jobs that call the panel; Maya keeps adding its own."""
@@ -116,7 +104,6 @@ def _in_maya():
         if not result.get("all_jobs_sample"):
             result["all_jobs_sample"] = cmds.scriptJob(listJobs=True) or []
         entry = {"label": label, "windows": windows(), "script_jobs": len(panel_jobs()),
-                 "reference_held": bool(controller and controller._reference_window),
                  "scene_replace_callbacks":
                      len(controller._scene_replace_callbacks) if controller else 0}
         result["snapshots"].append(entry)
@@ -138,15 +125,6 @@ def _in_maya():
         MtoULiveLink.run()
         yield wait("panel open", lambda: cmds.window(MAIN, exists=True))
 
-    def open_reference():
-        stage("open reference window")
-        button = widget(panel.CONTROLLER._reference_window_button, "findControl")
-        button.click()
-        yield wait("reference window open", lambda: cmds.window(REFERENCE, exists=True))
-        button.click()  # a second click reuses the window
-        yield wait("reference reuse", lambda: True)
-        expect("one reference window", windows()[REFERENCE] == 1, str(windows()))
-
     def close_natively(name):
         import ctypes
         stage("title-bar close " + name)
@@ -160,11 +138,6 @@ def _in_maya():
         done = []
         cmds.evalDeferred(lambda: done.append(True), lowestPriority=True)
         yield wait(label + " settled", lambda: bool(done))
-
-    def click_workflow(attribute):
-        stage("workflow " + attribute)
-        widget(getattr(panel.CONTROLLER, attribute), "findControl").click()
-        yield wait("workflow switched", lambda: True)
 
     def objects_windows():
         return (cmds.lsUI(windows=True) or []).count(OBJECTS)
@@ -182,76 +155,15 @@ def _in_maya():
         controller = panel.CONTROLLER
         expect(label + " panel open", cmds.window(MAIN, exists=True))
         expect(label + " panel button", bool(
-            widget(controller._reference_window_button, "findControl")))
+            widget(controller._objects_window_button, "findControl")))
 
     # ---------------------------------------------------------- scenarios
-    def exit_both_open():
-        yield from open_panel()
-        yield from open_reference()
-
-    def exit_after_reference_close():
-        yield from open_panel()
-        yield from open_reference()
-        yield from close_natively(REFERENCE)
-        check_panel_usable("after close")
-
     def exit_after_all_closed():
-        yield from exit_after_reference_close()
+        yield from open_panel()
+        check_panel_usable("before close")
         yield from close_natively(MAIN)
-        expect("no tool window", windows() == {MAIN: 0, REFERENCE: 0}, str(windows()))
+        expect("no tool window", windows() == {MAIN: 0}, str(windows()))
         expect("panel script jobs released", snapshot("all closed")["script_jobs"] == 0)
-
-    def close_cycles():
-        yield from open_panel()
-        for cycle in range(CLOSE_CYCLES):
-            yield from open_reference()
-            yield from close_natively(REFERENCE)
-            check_panel_usable("cycle {0}".format(cycle + 1))
-            entry = snapshot("cycle {0}".format(cycle + 1))
-            expect("cycle {0} state".format(cycle + 1),
-                   entry["windows"] == {MAIN: 1, REFERENCE: 0}
-                   and not entry["reference_held"] and entry["script_jobs"] == 3,
-                   str(entry))
-
-    def owned_paths():
-        scene = evidence / (step + "-scene.ma")
-        cmds.file(rename=str(scene))
-        cmds.file(save=True, type="mayaAscii", force=True)
-        yield from open_panel()
-        for round_index in range(OWNED_ROUNDS):
-            label = "round {0}".format(round_index + 1)
-            yield from open_reference()
-            stage("close button")
-            widget(panel.CONTROLLER._reference_window._close_button, "findControl").click()
-            yield wait("reference closed by its button",
-                       lambda: not cmds.window(REFERENCE, exists=True))
-            yield from open_reference()
-            yield from close_natively(MAIN)  # the panel closes its child window
-            expect(label + " panel close", windows() == {MAIN: 0, REFERENCE: 0},
-                   str(windows()))
-            yield from open_panel()
-            yield from open_reference()
-            yield from click_workflow("_model_workflow_button")
-            expect(label + " workflow closes the reference", not cmds.window(
-                REFERENCE, exists=True))
-            yield from click_workflow("_animation_workflow_button")
-            yield from open_reference()
-            stage("new scene")
-            cmds.file(new=True, force=True)
-            yield from until_idle("new scene")
-            expect(label + " new scene closes the reference", not cmds.window(
-                REFERENCE, exists=True))
-            yield from open_reference()
-            stage("open scene")
-            cmds.file(str(scene), open=True, force=True)
-            yield from until_idle("open scene")
-            expect(label + " open scene closes the reference", not cmds.window(
-                REFERENCE, exists=True))
-            entry = snapshot(label)
-            expect(label + " state", entry["windows"] == {MAIN: 1, REFERENCE: 0}
-                   and entry["script_jobs"] == 3 and entry["scene_replace_callbacks"] == 2,
-                   str(entry))
-        yield from open_reference()
 
     def exit_objects_open():
         yield from open_panel()
@@ -296,15 +208,12 @@ def _in_maya():
             yield from until_idle("open scene")
             expect(label + " open scene keeps one objects window", objects_windows() <= 1)
             entry = snapshot(label)
-            expect(label + " state", entry["windows"][MAIN] == 1 and entry["script_jobs"] == 3,
-                   str(entry))
+            expect(label + " state", entry["windows"][MAIN] == 1 and entry["script_jobs"] == 3
+                   and entry["scene_replace_callbacks"] == 2, str(entry))
         yield from open_objects()
 
     # ------------------------------------------------------------- runner
-    scenario = {"exit_both_open": exit_both_open,
-                "exit_after_reference_close": exit_after_reference_close,
-                "exit_after_all_closed": exit_after_all_closed,
-                "close_cycles": close_cycles, "owned_paths": owned_paths,
+    scenario = {"exit_after_all_closed": exit_after_all_closed,
                 "exit_objects_open": exit_objects_open,
                 "objects_close_cycles": objects_close_cycles,
                 "objects_owned_paths": objects_owned_paths}[step]()
@@ -350,14 +259,14 @@ def _in_maya():
         controller = panel.CONTROLLER
         report = {"windows": windows(), "all_windows": cmds.lsUI(windows=True) or []}
         try:
-            button = widget(controller._reference_window_button, "findControl")
-            report["button"] = {"name": controller._reference_window_button,
+            button = widget(controller._objects_window_button, "findControl")
+            report["button"] = {"name": controller._objects_window_button,
                                 "found": button is not None,
                                 "enabled": bool(button and button.isEnabled()),
                                 "visible": bool(button and button.isVisible())}
-            report["held"] = repr(controller._reference_window)
-            controller.open_reference_window()
-            report["direct_open_exists"] = cmds.window(REFERENCE, exists=True)
+            report["held"] = repr(controller._objects_window)
+            controller.open_objects_window()
+            report["direct_open_exists"] = cmds.window(OBJECTS, exists=True)
         except Exception:
             report["direct_open_error"] = traceback.format_exc()[-1500:]
         result["diagnosis"] = report

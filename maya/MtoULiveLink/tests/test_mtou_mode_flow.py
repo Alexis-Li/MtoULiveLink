@@ -53,10 +53,6 @@ class FakeScene(object):
 class FakeHost(object):
     """The Maya linkage host adapter, without Maya."""
 
-    def stale_reference(self, anchor):
-        del anchor
-        return None
-
     def capture_state(self):
         return {"time": 1.0}
 
@@ -424,13 +420,6 @@ def mode_state(revision, mode="linkage"):
     return message
 
 
-REFERENCE_OFFER = {
-    "type": "reference_offer", "session_id": SESSION_ID, "transfer_id": "tx-1",
-    "directory": "handoff/tx-1", "manifest_digest": "ab12",
-    "scope": {"level": "L_Main"}, "space_revision": 1,
-    "counts": {"objects": 1, "triangles": 2, "bytes": 3}}
-
-
 class UnrealDuringCachedTests(ConnectionHarness):
     """Unreal's statements reach the panel while Cached Playback holds time."""
 
@@ -454,15 +443,6 @@ class UnrealDuringCachedTests(ConnectionHarness):
         self.assertEqual(mtou_config.CACHED_MODE, self.session.time_control.state)
         self.assertEqual(view.state, self.controller._cached_playback.view.state)
         self.assertNotIn("cache_clear", self.sent_after(mark))
-
-    def test_a_reference_offer_reaches_the_reference_window(self):
-        self.enter_cached()
-
-        self.socket.push(REFERENCE_OFFER)
-        self.wait_until(lambda: self.controller.reference_offer() is not None,
-                        "the reference offer")
-
-        self.assertEqual("tx-1", self.controller.reference_offer()["transfer_id"])
 
 
 class DuringUploadTests(ConnectionHarness):
@@ -601,8 +581,8 @@ class UnrealErrorTests(ConnectionHarness):
 
     def test_a_close_after_other_messages_is_not_blamed_on_the_error(self):
         self.assert_reported_once_and_kept()
-        self.socket.push(REFERENCE_OFFER)
-        self.wait_until(lambda: self.controller.reference_offer() is not None,
+        self.socket.push(mode_state(50, mode="realtime"))
+        self.wait_until(lambda: self.controller._linkage_revision >= 50,
                         "the message after the error")
         self.assert_a_later_close_has_its_own_reason()
 
@@ -615,8 +595,8 @@ class UnrealErrorTests(ConnectionHarness):
     def test_a_cache_error_without_an_identity_is_ignored(self):
         self.socket.push({"type": "error", "code": "CACHE_METADATA_INVALID",
                           "message": "stale clear", "details": "clear_id 1"})
-        self.socket.push(REFERENCE_OFFER)
-        self.wait_until(lambda: self.controller.reference_offer() is not None,
+        self.socket.push(mode_state(50, mode="realtime"))
+        self.wait_until(lambda: self.controller._linkage_revision >= 50,
                         "the message after the error")
         self.assertEqual([], self.errors)
         self.assertTrue(self.session.is_ready)

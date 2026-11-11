@@ -816,87 +816,6 @@ class StreamingSessionTests(unittest.TestCase):
         self.assertEqual(2, scene.sample.call_count)
         self.assertEqual(2, len(FakeWorker.instance.submitted))
 
-    def test_held_sampling_skips_ticks_until_released(self):
-        # A scene-reference import holds live sampling: Maya may run the
-        # timer inside the import, while the scene is only half built.
-        events = []
-        timer_callbacks = []
-
-        class FakeWorker(object):
-            instance = None
-
-            def __init__(self, init_message, hello_message=None, on_reply=None):
-                del init_message
-                self.hello_message = hello_message
-                self.submitted = []
-                self.__class__.instance = self
-
-            def start(self):
-                pass
-
-            def status(self):
-                return ("ready", "Connected", {
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "has_warning": False,
-                }, None)
-
-            def submit(self, frame):
-                self.submitted.append(frame)
-
-            def begin_ordered(self):
-                pass
-
-            def submit_ordered(self, frame):
-                self.submitted.append(frame)
-
-            def ordered_pending(self):
-                return 0
-
-            def end_ordered(self, discard_pending=True):
-                pass
-
-
-            def stop(self):
-                pass
-
-            def join(self, timeout):
-                del timeout
-
-        fake_om = type("FakeOpenMaya", (), {
-            "MSceneMessage": type("FakeSceneMessage", (), {
-                "kBeforeNew": 1, "kBeforeOpen": 2, "kMayaExiting": 3,
-                "addCallback": staticmethod(lambda message, callback: 10 + message),
-            }),
-            "MEventMessage": type("FakeEventMessage", (), {
-                "addEventCallback": staticmethod(lambda event, callback: 30),
-            }),
-            "MTimerMessage": type("FakeTimerMessage", (), {
-                "addTimerCallback": staticmethod(
-                    lambda interval, callback: timer_callbacks.append(callback) or 20),
-            }),
-            "MMessage": type("FakeMessage", (), {
-                "removeCallback": staticmethod(lambda callback_id: None),
-            }),
-        })
-        scene = mock.Mock()
-        scene.snapshot.return_value = character_snapshot(
-            7, "|root", "Clothes01", [("root", -1)], ["Smile"])
-        scene.sample.return_value = mtou_scene.CharacterFrame(7, [[1, 2, 3]], [0.25])
-
-        with patch_global("om", fake_om), \
-             patch_global("SenderWorker", FakeWorker), \
-             mock.patch.object(time, "time", side_effect=[100.0, 100.05]):
-            session = mtou_session.StreamingSession.start(scene, 24.0, events.append)
-            with session.holding_samples():
-                timer_callbacks[0](0.0, 0.0, None)
-                held_samples = scene.sample.call_count
-            timer_callbacks[0](0.0, 0.0, None)
-            session.stop()
-
-        self.assertEqual(0, held_samples)
-        self.assertEqual(1, scene.sample.call_count)
-        self.assertEqual(1, len(FakeWorker.instance.submitted))
-
     def test_time_changed_event_streams_without_idle_timer_and_caps_burst(self):
         time_callbacks = []
         timer_callbacks = []
@@ -1870,17 +1789,13 @@ class SenderLifecycleTests(unittest.TestCase):
         self.assertEqual(errors, received)
 
     def test_statements_right_after_ready_reach_the_handler_in_order(self):
-        # Unreal may start linkage, offer a reference and confirm a removal the
-        # moment the set is ready; the handler exists before the sender starts.
+        # Unreal may start linkage and confirm a removal the moment the set is
+        # ready; the handler exists before the sender starts.
         anchor = {"location_cm": [0.0, 0.0, 0.0],
                   "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
         statements = [
             {"type": "mode_state", "session_id": 1, "mode_revision": 1,
              "mode": "linkage", "control": "unreal", "detail": "", "anchor": anchor},
-            {"type": "reference_offer", "session_id": 1, "transfer_id": "tx-1",
-             "directory": "handoff/tx-1", "manifest_digest": "ab12",
-             "scope": {"level": "L_Main"}, "space_revision": 1,
-             "counts": {"objects": 1, "triangles": 2, "bytes": 3}},
             {"type": "object_removed", "session_id": 1, "object_id": "secondary",
              "set_revision": 2, "restored": True, "detail": ""},
         ]
@@ -4973,19 +4888,10 @@ class ProtocolTests(unittest.TestCase):
             CORPUS["limits"]["max_cache_frame_count"],
             mtou_config.MAX_CACHE_FRAME_COUNT)
 
-    def test_maya_linkage_and_reference_limits_match_the_shared_corpus(self):
+    def test_maya_linkage_limits_match_the_shared_corpus(self):
         self.assertEqual(
             CORPUS["limits"]["max_control_queue"],
             mtou_config.MAX_CONTROL_QUEUE)
-        self.assertEqual(
-            CORPUS["limits"]["max_reference_bytes"],
-            mtou_config.MAX_REFERENCE_BYTES)
-        self.assertEqual(
-            CORPUS["limits"]["max_reference_objects"],
-            mtou_config.MAX_REFERENCE_OBJECTS)
-        self.assertEqual(
-            CORPUS["limits"]["max_reference_triangles"],
-            mtou_config.MAX_REFERENCE_TRIANGLES)
         # The scheduler budget is not a corpus limit; one target in flight plus
         # one replaceable target is the frozen scheduling contract.
         self.assertEqual(2, mtou_config.MAX_PENDING_LINKAGE_TARGETS)
@@ -5144,14 +5050,11 @@ class ProtocolTests(unittest.TestCase):
         if operation == "leave_linkage":
             self._assert_leave_linkage_case(case)
             return
-        if operation in ("camera_time", "applied", "reference_offer"):
+        if operation in ("camera_time", "applied"):
             self._assert_linkage_message_case(case)
             return
         if operation == "group":
             self._assert_group_case(case)
-            return
-        if operation in ("reference_result", "reference_removed"):
-            self._assert_reference_message_case(case)
             return
         if operation == "resource_limit":
             self._assert_resource_limit_case(case)
@@ -5315,7 +5218,6 @@ class ProtocolTests(unittest.TestCase):
         answer = {
             "camera_time": lambda session: session.offer_target(payload),
             "applied": lambda session: session.note_applied(payload),
-            "reference_offer": lambda session: session.note_reference_offer(payload),
         }[case["operation"]]
         session, _ = self._linkage_session(case["linkage"])
         if expected["accepted"]:
@@ -5352,27 +5254,6 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
             build()
 
-    def _assert_reference_message_case(self, case):
-        payload = case["payload"]
-        expected = case["expected"]
-        if case["operation"] == "reference_result":
-            def build():
-                return mtou_protocol.make_reference_result_message(
-                    payload["session_id"], payload["transfer_id"],
-                    payload["accepted"], payload["detail"], payload["counts"],
-                    payload.get("container"))
-        else:
-            def build():
-                return mtou_protocol.make_reference_removed_message(
-                    payload["session_id"], payload["detail"])
-        if expected["accepted"]:
-            actual = build()
-            self.assertEqual(payload, actual)
-            self.assertTrue(mtou_protocol.encode_message(actual))
-            return
-        with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
-            build()
-
     def _assert_resource_limit_case(self, case):
         """An oversized case names its budget and its measured size, so the
         frozen budget stays comparable without a multi-megabyte payload."""
@@ -5380,9 +5261,6 @@ class ProtocolTests(unittest.TestCase):
         budget = {
             "max_linkage_group_bytes": mtou_config.MAX_LINKAGE_GROUP_BYTES,
             "max_control_queue": mtou_config.MAX_CONTROL_QUEUE,
-            "max_reference_bytes": mtou_config.MAX_REFERENCE_BYTES,
-            "max_reference_objects": mtou_config.MAX_REFERENCE_OBJECTS,
-            "max_reference_triangles": mtou_config.MAX_REFERENCE_TRIANGLES,
         }[payload["budget"]]
         self.assertEqual(budget, payload["limit"])
         self.assertGreater(payload["measured"], budget)

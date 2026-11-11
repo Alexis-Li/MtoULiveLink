@@ -23,7 +23,7 @@ dialogs are answered with their first button and recorded.
    kept and a restart is requested because the old release is loaded.
 3. ``upgrade``: after the restart the saved button opens the new release from
    the module; ``run()`` and ``main()`` reuse one panel, closing and reopening
-   the panel and the scene-reference window leaves one window each.
+   the panel and the 对象配对 window leaves one window each.
 4. ``reinstall``: dropping the same ``install.mel`` again changes nothing
    that matters: no conflict, no restart, one ``.mod``, one button.
 5. ``same_session``: with the tool open, dropping the same package needs no
@@ -61,7 +61,7 @@ from pathlib import Path
 
 SHELF = "MtoU"
 SHELF_COMMAND = "import MtoULiveLink\nMtoULiveLink.run()"
-WINDOWS = ("MtoULiveLinkWindow", "MtoULiveLinkReferenceWindow")
+WINDOWS = ("MtoULiveLinkWindow", "MtoULiveLinkObjectsWindow")
 STEPS = ("install_old", "drag_install", "upgrade", "reinstall", "same_session",
          "broken_package", "partial_package", "missing_module", "missing_package", "rollback",
          "clean_install", "clean_restart")
@@ -196,8 +196,8 @@ def _in_maya():
         controller = first.run()
         result["run_again_same_controller"] = controller is first.run()
         result["main_same_controller"] = first.main() is controller
-        controller.open_reference_window()
-        controller.open_reference_window()
+        controller.open_objects_window()
+        controller.open_objects_window()
         result["detail_windows_open"] = windows()
         grab("detail-windows")
         for window in WINDOWS:
@@ -207,7 +207,7 @@ def _in_maya():
         press_saved()
         reopened = sys.modules["MtoULiveLink"].run()
         result["reopened_new_controller"] = reopened is not controller
-        reopened.open_reference_window()
+        reopened.open_objects_window()
         result["reopened"] = windows()
         result["window_count"] = {
             window: sum(1 for name in cmds.lsUI(windows=True) or [] if name == window)
