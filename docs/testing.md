@@ -150,6 +150,9 @@ needs an oracle. `oracle_frames` must contain distinct poses inside the Maya
 animation. `motion_frames` defines the consecutive frames used for the cadence
 measurement. One primary mesh with moving streamed bones is sufficient. Add
 `parts` only when those displays are needed and their assets are available.
+Every listed part is enabled by this tool. Connected samples and stable-pose
+checks require the primary and each listed part to be visible and registered,
+with the fixture's mesh identities and counts, including repeated part meshes.
 `thresholds` requires explicit numeric limits and a `rationale` explaining their
 AC04 and same-run reference basis before measurement. The template leaves the
 numbers unset. `connected_min_hz` must exceed both the engine's 3 Hz throttle
@@ -204,7 +207,9 @@ Maya logs for startup or shutdown failures.
 
 The default scenario disconnects and reconnects around a malformed protocol
 frame, participating Actor deletion, world replacement, real Maya peer exit
-and source removal through an empty Live Link preset. The second scenario
+and source removal through an empty Live Link preset. World replacement uses
+an unsaved blank map and verifies its new identity before acknowledging world
+cleanup. The second scenario
 exits the Editor while connected. Its final internal cleanup is covered by the
 default owner tests, since a terminated process cannot answer a snapshot.
 The Maya driver validates every dialog against the stage's expected codes.

@@ -7,6 +7,7 @@ script. Only task-owned processes and transient actors are changed.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import ctypes
 from ctypes import wintypes
 import hashlib
@@ -133,7 +134,6 @@ def editor_main():
     out = Path(config["evidence"])
     fixture = read_json(config["fixture"])
     actors = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-    levels = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
     settings = unreal.get_default_object(unreal.load_class(None, "/Script/UnrealEd.EditorPerformanceSettings"))
     state = {"ack": 0, "pid": os.getpid(), "engine": unreal.SystemLibrary.get_engine_version(),
              "errors": [], "stage": "startup", "samples": [], "last_frame": -1}
@@ -156,9 +156,18 @@ def editor_main():
         result = {}
         if not actor or not unreal.SystemLibrary.is_valid(actor):
             return result
+        observed = snapshot("display-status")
+        display_states = {row["component"]: row for entry in observed.get("actors", [])
+                          if entry["actor"] == actor.get_path_name() for row in entry["displays"]}
         for component in actor.get_components_by_class(unreal.SkeletalMeshComponent):
             mesh = component.get_skeletal_mesh_asset()
-            if not mesh or not component.is_visible():
+            if not mesh:
+                continue
+            status = display_states.get(component.get_name(), {})
+            row = {"mesh": mesh.get_path_name(), "visible": status.get("visible"),
+                   "registered": status.get("registered"), "bones": {}}
+            result[component.get_name()] = row
+            if row["visible"] is not True or row["registered"] is not True:
                 continue
             names = fixture["display_bones"].get(mesh.get_path_name().split(".")[0], [])
             bones = {}
@@ -170,7 +179,7 @@ def editor_main():
                 bones[bone] = [p.x, p.y, p.z, q.x, q.y, q.z, q.w]
             if not bones:
                 raise RuntimeError("No oracle bones configured for visible display " + mesh.get_path_name())
-            result[component.get_name()] = {"mesh": mesh.get_path_name(), "bones": bones}
+            row["bones"] = bones
         return result
 
     def snapshot(name):
@@ -213,7 +222,15 @@ def editor_main():
                     actors.destroy_actor(actor)
                     actor = None
                 elif action == "close_world":
-                    levels.new_level("/Temp/BackgroundAcceptance", is_partitioned_world=False)
+                    editor = unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem)
+                    previous_world = editor.get_editor_world()
+                    replacement = unreal.EditorLoadingAndSavingUtils.new_blank_map(False)
+                    if not replacement or not unreal.SystemLibrary.is_valid(replacement):
+                        raise RuntimeError("World replacement failed because new_blank_map(False) returned no valid World. "
+                                           "actor reference retained. Inspect the editor log before retrying in the disposable host.")
+                    if replacement == previous_world or editor.get_editor_world() != replacement:
+                        raise RuntimeError("World replacement failed because new_blank_map(False) did not install a different editor World. "
+                                           "actor reference retained. Inspect the editor log before retrying in the disposable host.")
                     actor = None
                 elif action == "remove_source":
                     # An empty preset's public Apply operation removes the
@@ -276,13 +293,33 @@ class Mailbox:
         return wait_for(acknowledged, action + " acknowledgement")
 
 
-def summarize(data, expected_pid):
+def required_display_meshes(fixture):
+    # Every configured part is enabled by editor_main. Count repeated meshes.
+    return Counter(mesh.split(".")[0] for mesh in
+                   [fixture["primary_mesh"]] + [part["mesh"] for part in fixture.get("parts", [])])
+
+
+def check_displays(shown, required_meshes):
+    observed = Counter(row["mesh"].split(".")[0] for row in shown.values())
+    if observed != required_meshes:
+        raise RuntimeError("Display mesh counts differ from fixture composition. Required %r, observed %r" %
+                           (dict(required_meshes), dict(observed)))
+    for name, row in shown.items():
+        if row.get("visible") is not True or row.get("registered") is not True:
+            raise RuntimeError("Display %s (%s) must be visible and registered. Observed visible=%r, registered=%r" %
+                               (name, row["mesh"], row.get("visible"), row.get("registered")))
+
+
+def summarize(data, expected_pid, required_meshes=None):
     samples = data["samples"]
     if len(samples) < 2:
         raise RuntimeError("Insufficient frame samples")
     duration = samples[-1]["seconds"] - samples[0]["seconds"]
     if duration <= 0:
         raise RuntimeError("Frame sample duration must be positive")
+    if required_meshes is not None:
+        for sample in samples:
+            check_displays(sample["poses"], required_meshes)
     changes = {name: 0 for name in samples[0]["poses"]}
     previous = samples[0]["poses"]
     for sample in samples[1:]:
@@ -332,8 +369,7 @@ def validate_fixture(fixture):
         raise RuntimeError("motion_frames requires an increasing integer range containing distinct producer poses")
     if len(set(fixture["oracle_frames"])) < 2:
         raise RuntimeError("oracle_frames requires at least two distinct stable poses")
-    meshes = [fixture["primary_mesh"]] + [part["mesh"] for part in fixture.get("parts", [])]
-    for mesh in meshes:
+    for mesh in required_display_meshes(fixture):
         if not fixture["display_bones"].get(mesh):
             raise RuntimeError("display_bones requires moving oracle bones for " + mesh)
     limits = fixture["thresholds"]
@@ -379,6 +415,7 @@ def check_connected_cadence(value, reference, baseline, limits):
 def run(args):
     fixture = read_json(args.fixture)
     validate_fixture(fixture)
+    required_meshes = required_display_meshes(fixture)
     out = Path(args.evidence).resolve()
     out.mkdir(parents=True, exist_ok=False)
     config = {"fixture": str(Path(args.fixture).resolve()), "evidence": str(out)}
@@ -487,7 +524,7 @@ def run(args):
                     time.sleep(0.02)
             editor_box.send("end")
             data = read_json(out / (name + ".json"))
-            value = summarize(data, foreground)
+            value = summarize(data, foreground, required_meshes if connected else None)
             value["editor_restored"] = not bool(win32().IsIconic(window))
             value["producer_hz"] = ((len(acknowledgements) - 1) / (acknowledgements[-1]["seconds"] - acknowledgements[0]["seconds"])
                                     if len(acknowledgements) > 1 else 0)
@@ -515,13 +552,15 @@ def run(args):
                     if foreground_pid() != maya.pid:
                         raise RuntimeError("Stable pose oracle requires this run's Maya in the foreground")
                     shown = editor_box.send("pose")["pose"]
+                    check_displays(shown, required_meshes)
                     if set(shown) != set(connected["display_change_hz"]):
                         raise RuntimeError("Stable pose oracle display set is incomplete")
                     errors = []
                     for display, row in shown.items():
                         for bone, transform in row["bones"].items():
                             source = expected[bone]["world"]
-                            distance = math.dist(transform[:3], [source[0], source[2], source[1]])
+                            distance = math.sqrt(sum((actual - target) ** 2 for actual, target in
+                                                     zip(transform[:3], [source[0], source[2], source[1]])))
                             errors.append(distance)
                     observations.append({"poses": shown, "max_world_error_cm": max(errors) if errors else None})
                     return bool(errors) and max(errors) <= fixture["world_tolerance_cm"]

@@ -1,7 +1,10 @@
 """Regressions for ordinary-host observations and the shared Maya driver commands."""
 
 import ast
+from collections import Counter
+from contextlib import contextmanager
 import importlib.util
+import itertools
 import json
 from pathlib import Path
 import sys
@@ -28,7 +31,220 @@ def snapshot(connected=False, background=True):
             "viewports": [{"realtime": connected, "base_realtime": False}]}
 
 
+def closure_value(function, name):
+    return dict(zip(function.__code__.co_freevars, function.__closure__))[name].cell_contents
+
+
+@contextmanager
+def editor_driver():
+    api = mock.Mock()
+    actors = mock.Mock()
+    editor = mock.Mock()
+    levels = mock.Mock()
+    api.get_editor_subsystem.side_effect = {
+        api.EditorActorSubsystem: actors, api.UnrealEditorSubsystem: editor,
+        api.LevelEditorSubsystem: levels}.__getitem__
+    frame = itertools.count()
+    api.SystemLibrary.get_frame_count.side_effect = lambda: next(frame)
+    api.SystemLibrary.get_engine_version.return_value = "5.7.4"
+    api.SystemLibrary.is_valid.side_effect = bool
+    actor = actors.spawn_actor_from_object.return_value
+    actor.get_path_name.return_value = "/Temp/Untitled.Actor"
+    actor.get_components_by_class.return_value = []
+    world = [mock.Mock(name="initial_world")]
+    editor.get_editor_world.side_effect = lambda: world[0]
+
+    def new_blank_map(save_existing_map):
+        world[0] = mock.Mock(name="replacement_world")
+        return world[0]
+
+    api.EditorLoadingAndSavingUtils.new_blank_map.side_effect = new_blank_map
+    fixture = {"primary_mesh": "/Game/Body", "display_bones": {"/Game/Body": ["pelvis"]}}
+    command, published, displays = {}, {}, []
+
+    def read(path):
+        if str(path) == "run.json":
+            return {"fixture": "fixture.json", "evidence": "evidence"}
+        if str(path) == "fixture.json":
+            return fixture
+        if Path(path).name == "editor-command.json":
+            return command
+        return {"actors": [{"actor": actor.get_path_name(), "displays": displays}]}
+
+    def write(path, value):
+        if Path(path).name == "editor-state.json":
+            published.clear()
+            published.update(json.loads(json.dumps(value)))
+
+    with mock.patch.dict(sys.modules, {"unreal": api}), mock.patch.dict(
+            acceptance.os.environ, {"MTOU_BACKGROUND_RUN": "run.json"}), mock.patch.object(
+            acceptance, "read_json", side_effect=read), mock.patch.object(
+            acceptance, "write_json", side_effect=write):
+        acceptance.editor_main()
+        tick = api.register_slate_post_tick_callback.call_args[0][0]
+        sequence = itertools.count(1)
+
+        def send(action):
+            command.update(id=next(sequence), action=action)
+            tick(0.01)
+            return published
+
+        yield types.SimpleNamespace(api=api, actors=actors, editor=editor, levels=levels,
+                                    actor=actor, world=world, fixture=fixture, displays=displays,
+                                    tick=tick, send=send)
+
+
+def run_pose_oracle(fixture, shown):
+    run = next(node for node in ast.parse(TOOL.read_text(encoding="utf-8")).body
+               if isinstance(node, ast.FunctionDef) and node.name == "run")
+    oracle = next(node for node in ast.walk(run) if isinstance(node, ast.FunctionDef) and node.name == "oracle")
+    namespace = dict(vars(acceptance), fixture=fixture, out=Path("unused"),
+                     required_meshes=Counter([fixture["primary_mesh"]] + [part["mesh"] for part in fixture.get("parts", [])]),
+                     connected={"display_change_hz": dict.fromkeys(shown, 20)},
+                     maya=types.SimpleNamespace(pid=42), foreground_pid=lambda: 42,
+                     summary={"oracles": []}, write_json=mock.Mock(),
+                     maya_box=mock.Mock(), editor_box=mock.Mock())
+    namespace["maya_box"].send.return_value = {"snapshot": {"joints": {"pelvis": {"world": [1, 3, 2]}}}}
+    namespace["editor_box"].send.return_value = {"pose": shown}
+    exec(compile(ast.Module(body=[oracle], type_ignores=[]), str(TOOL), "exec"), namespace)
+    namespace["oracle"]("background_connected")
+    return namespace["summary"]["oracles"]
+
+
+def display_pose(mesh, visible=True, registered=True):
+    return {"mesh": mesh, "visible": visible, "registered": registered,
+            "bones": {"pelvis": [1, 2, 3, 0, 0, 0, 1]}}
+
+
+def motion_measurement(shown):
+    data = {"before": {}, "after": {}, "samples": []}
+    for index in range(3):
+        poses = json.loads(json.dumps(shown))
+        for row in poses.values():
+            row["bones"]["pelvis"][0] += index
+        data["samples"].append({"seconds": index * 0.05, "frame": index * 3,
+                                "foreground_pid": 42, "preference": True, "poses": poses})
+    return data
+
+
 class BackgroundAcceptanceTests(unittest.TestCase):
+    def test_close_world_replaces_unsaved_map_repeatedly_in_one_host(self):
+        with editor_driver() as driver:
+            for unused in range(2):
+                driver.send("place")
+                previous = driver.world[0]
+                state = driver.send("close_world")
+                self.assertFalse(state["errors"])
+                self.assertIsNot(previous, driver.world[0])
+                self.assertIsNone(closure_value(driver.tick, "actor"))
+            self.assertEqual([mock.call(False), mock.call(False)],
+                             driver.api.EditorLoadingAndSavingUtils.new_blank_map.call_args_list)
+            driver.levels.new_level.assert_not_called()
+
+    def test_close_world_failure_keeps_actor_and_does_not_acknowledge_success(self):
+        # NewBlankMap returns World or None. Unlike NewLevel it has no bool result.
+        for failure in ("none", "unchanged", "different_current_world"):
+            with self.subTest(failure=failure), editor_driver() as driver:
+                driver.send("place")
+                operation = driver.api.EditorLoadingAndSavingUtils.new_blank_map
+                operation.side_effect = None
+                operation.return_value = {"none": None, "unchanged": driver.world[0],
+                                          "different_current_world": mock.Mock(name="unadopted_world")}[failure]
+                # The former saved-map operation could fail without replacing the world.
+                driver.levels.new_level.return_value = False
+                state = driver.send("close_world")
+                self.assertEqual(1, state["ack"])
+                self.assertRegex("\n".join(state["errors"]), "World replacement failed.*editor log")
+                self.assertIs(driver.actor, closure_value(driver.tick, "actor"))
+
+    def test_stable_pose_oracle_rejects_configured_part_missing_from_every_observation(self):
+        fixture = {"primary_mesh": "/Game/Body", "parts": [{"name": "Coat", "mesh": "/Game/Coat"}],
+                   "oracle_frames": [10], "world_tolerance_cm": 0.1}
+        shown = {"Primary": {"mesh": "/Game/Body.Body", "visible": True, "registered": True,
+                             "bones": {"pelvis": [1, 2, 3, 0, 0, 0, 1]}}}
+        with self.assertRaisesRegex(RuntimeError, "Display mesh counts.*Coat"):
+            run_pose_oracle(fixture, shown)
+
+    def test_connected_measurement_rejects_missing_part_even_when_all_observations_agree(self):
+        fixture = {"primary_mesh": "/Game/Body", "parts": [{"name": "Coat", "mesh": "/Game/Coat"}]}
+        data = motion_measurement({"Primary": display_pose("/Game/Body.Body")})
+        # Both old cadence inputs could agree on just Primary and pass.
+        old_summary = acceptance.summarize(data, 42)
+        old_summary["producer_hz"] = 20
+        limits = {"connected_min_hz": 20, "reference_ratio_min": 0.9,
+                  "producer_min_hz": 5, "pose_ratio_min": 0.9}
+        acceptance.check_connected_cadence(old_summary, old_summary, {"frame_hz": 3}, limits)
+        with self.assertRaisesRegex(RuntimeError, "Display mesh counts.*Coat"):
+            acceptance.summarize(data, 42, acceptance.required_display_meshes(fixture))
+
+    def test_connected_measurement_and_oracle_require_visibility_and_registration(self):
+        fixture = {"primary_mesh": "/Game/Body", "oracle_frames": [10], "world_tolerance_cm": 0.1}
+        required = acceptance.required_display_meshes(fixture)
+        for field in ("visible", "registered"):
+            with self.subTest(field=field):
+                shown = {"Primary": display_pose("/Game/Body.Body")}
+                data = motion_measurement(shown)
+                data["samples"][1]["poses"]["Primary"][field] = False
+                with self.assertRaisesRegex(RuntimeError, "must be visible and registered"):
+                    acceptance.summarize(data, 42, required)
+                shown["Primary"][field] = False
+                with self.assertRaisesRegex(RuntimeError, "must be visible and registered"):
+                    run_pose_oracle(fixture, shown)
+
+    def test_fixture_mesh_identities_and_duplicate_part_counts_apply_to_both_oracles(self):
+        fixture = {"primary_mesh": "/Game/Body", "parts": [
+            {"name": "Left", "mesh": "/Game/Coat"}, {"name": "Right", "mesh": "/Game/Coat"}],
+            "oracle_frames": [10], "world_tolerance_cm": 0.1}
+        required = acceptance.required_display_meshes(fixture)
+        self.assertEqual(Counter({"/Game/Body": 1, "/Game/Coat": 2}), required)
+        for coat_meshes in (("/Game/Coat.Coat",), ("/Game/Coat.Coat", "/Game/Other.Other")):
+            with self.subTest(coat_meshes=coat_meshes):
+                shown = {"Primary": display_pose("/Game/Body.Body")}
+                shown.update({"Part%s" % index: display_pose(mesh) for index, mesh in enumerate(coat_meshes)})
+                with self.assertRaisesRegex(RuntimeError, "Display mesh counts"):
+                    acceptance.summarize(motion_measurement(shown), 42, required)
+                with self.assertRaisesRegex(RuntimeError, "Display mesh counts"):
+                    run_pose_oracle(fixture, shown)
+
+    def test_single_primary_and_complete_repeated_mesh_composition_pass_both_oracles(self):
+        for part_count in (0, 2):
+            with self.subTest(part_count=part_count):
+                fixture = {"primary_mesh": "/Game/Body", "parts": [
+                    {"name": "Part%s" % index, "mesh": "/Game/Coat"} for index in range(part_count)],
+                    "oracle_frames": [10], "world_tolerance_cm": 0.1}
+                shown = {"Primary": display_pose("/Game/Body.Body")}
+                shown.update({"Part%s" % index: display_pose("/Game/Coat.Coat") for index in range(part_count)})
+                value = acceptance.summarize(motion_measurement(shown), 42, acceptance.required_display_meshes(fixture))
+                self.assertEqual(set(shown), set(value["display_change_hz"]))
+                self.assertEqual(0, run_pose_oracle(fixture, shown)[0]["observations"][0]["max_world_error_cm"])
+
+    def test_poses_preserves_mesh_and_bad_display_status_before_reading_bones(self):
+        with editor_driver() as driver:
+            components = []
+            for name, visible, registered in (("Primary", True, True), ("Invisible", False, True),
+                                               ("Unregistered", True, False)):
+                component = mock.Mock()
+                component.get_name.return_value = name
+                component.get_skeletal_mesh_asset.return_value.get_path_name.return_value = "/Game/Body.Body"
+                component.get_bone_index.return_value = 0
+                component.get_bone_transform.return_value = types.SimpleNamespace(
+                    translation=types.SimpleNamespace(x=1, y=2, z=3),
+                    rotation=types.SimpleNamespace(x=0, y=0, z=0, w=1))
+                components.append(component)
+                driver.displays.append({"component": name, "visible": visible, "registered": registered})
+            driver.actor.get_components_by_class.return_value = components
+            state = driver.send("place")
+            self.assertFalse(state["errors"])
+            shown = state["displays"]
+            self.assertEqual({"Primary", "Invisible", "Unregistered"}, set(shown))
+            self.assertFalse(shown["Invisible"]["visible"])
+            self.assertFalse(shown["Unregistered"]["registered"])
+            for component in components[1:]:
+                component.get_bone_transform.assert_not_called()
+            self.assertEqual("/Game/Body.Body", shown["Unregistered"]["mesh"])
+            self.assertTrue(shown["Primary"]["registered"])
+            self.assertIn("pelvis", shown["Primary"]["bones"])
+
     def test_localized_main_window_ignores_untitled_helper_and_smaller_windows(self):
         windows = [(101, "", 4000000), (102, "BackgroundHost - 虚幻编辑器", 2000000),
                    (103, "Output", 80000)]
