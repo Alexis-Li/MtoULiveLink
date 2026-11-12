@@ -218,7 +218,6 @@ FMtoUCacheTransition FMtoUCacheSession::HandleCommand(const FMtoUCacheCommand& C
         case FMtoUCacheCommand::EKind::Enter:
             bAccepted = HandleEnter(Command, Result.ErrorCode, Result.Details);
             Result.Kind = EKind::Entered;
-            Result.RealtimeOverride = false;
             break;
         case FMtoUCacheCommand::EKind::Begin:
             Result.UploadId = Command.Begin.UploadId;
@@ -249,7 +248,6 @@ FMtoUCacheTransition FMtoUCacheSession::HandleCommand(const FMtoUCacheCommand& C
             Result.Kind = EKind::Playing;
             if (bAccepted)
             {
-                Result.RealtimeOverride = true;
                 Result.bLoopEnabled = bLoopEnabled;
             }
             break;
@@ -261,7 +259,6 @@ FMtoUCacheTransition FMtoUCacheSession::HandleCommand(const FMtoUCacheCommand& C
             }
             Result.Kind = EKind::Stopped;
             Result.PlayId = ActivePlayId;
-            Result.RealtimeOverride = false;
             bAccepted = true;
             break;
         case FMtoUCacheCommand::EKind::Pause:
@@ -314,7 +311,6 @@ FMtoUCacheTransition FMtoUCacheSession::HandleCommand(const FMtoUCacheCommand& C
             Result.PlayId = ActivePlayId;
             ResetToIdle();
             Result.Kind = EKind::Cleared;
-            Result.RealtimeOverride = true;
             bAccepted = true;
             break;
     }
@@ -332,7 +328,6 @@ FMtoUCacheTransition FMtoUCacheSession::HandleCommand(const FMtoUCacheCommand& C
         // refresh. Rejections that retain ownership preserve its demand.
         if (AcceptsLiveFrames())
         {
-            Result.RealtimeOverride = true;
         }
     }
     return Result;
@@ -710,7 +705,6 @@ FMtoUCacheTransition FMtoUCacheSession::HandleLoopChange(bool bEnabled)
         ErrorDetails = Result.ErrorCode + TEXT(": ") + Result.Details;
         if (AcceptsLiveFrames())
         {
-            Result.RealtimeOverride = true;
         }
         return Result;
     }
@@ -862,7 +856,6 @@ FMtoUCacheTransition FMtoUCacheSession::Tick()
             Result.Kind = EKind::PerformanceFailed;
             Result.ErrorCode = TEXT("CACHED_PLAYBACK_PERFORMANCE");
             Result.Details = ErrorDetails;
-            Result.RealtimeOverride = false;
             break;
         case EStep::None:
         case EStep::Applied:

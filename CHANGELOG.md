@@ -31,6 +31,9 @@ repository's issues.
 
 ### Fixed
 
+- Unreal keeps updating while connected with Maya in front, and restores normal
+  background behavior after disconnect without changing your editor preferences. (#44)
+
 - A realtime frame from another protocol version now reports the plugin protocol
   mismatch before disconnecting, and Maya identifies its running version. (#39)
 - **结束预览** during Cached Playback no longer freezes Unreal: the cache keeps the

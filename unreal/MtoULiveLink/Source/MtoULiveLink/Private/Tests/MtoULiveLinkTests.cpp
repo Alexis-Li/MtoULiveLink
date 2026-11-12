@@ -3052,28 +3052,17 @@ bool FMtoUCacheTransitionTest::RunTest(const FString& Parameters)
         return true;
     });
     Session.BeginSession({1, 0, 7});
-    const auto CheckDemand = [this](const TCHAR* Label,
-                                    const FMtoUCacheTransition& Result, bool bExpected)
-    {
-        TestTrue(Label, Result.RealtimeOverride.IsSet());
-        if (Result.RealtimeOverride.IsSet())
-        {
-            TestEqual(Label, Result.RealtimeOverride.GetValue(), bExpected);
-        }
-    };
     const auto Upload = [this, &Session](int32 Revision, int32 UploadId)
     {
         const auto Receiving = Session.HandleCommand(MakeCacheBeginCommand(Revision, 1, 30.0, UploadId));
         TestTrue(TEXT("begin accepted"), Receiving.bAccepted);
         TestEqual(TEXT("begin reports expected frames"), Receiving.FrameCount, 1);
-        TestFalse(TEXT("begin preserves refresh demand"), Receiving.RealtimeOverride.IsSet());
         TestTrue(TEXT("frame accepted"), Session.HandleCommand(MakeCachedFrameCommand(0, 42.0f, 64)).bAccepted);
         const auto Ready = Session.HandleCommand(MakeSimpleCacheCommand(ECommand::End));
         TestEqual(TEXT("complete upload outcome"), Ready.Kind, EKind::Ready);
         TestEqual(TEXT("ready upload identity"), Ready.UploadId, UploadId);
         TestEqual(TEXT("ready authoritative revision"), Ready.Revision, Revision);
         TestEqual(TEXT("ready buffered frames"), Ready.FrameCount, 1);
-        TestFalse(TEXT("ready preserves refresh demand"), Ready.RealtimeOverride.IsSet());
     };
     const auto Play = [&Session](int32 PlayId)
     {
@@ -3083,42 +3072,39 @@ bool FMtoUCacheTransitionTest::RunTest(const FString& Parameters)
     };
 
     TestTrue(TEXT("new session accepts live frames"), Session.AcceptsLiveFrames());
-    CheckDemand(TEXT("entry releases realtime"), Session.HandleCommand(MakeSimpleCacheCommand(ECommand::Enter)), false);
+    TestTrue(TEXT("cache transition is accepted"), Session.HandleCommand(MakeSimpleCacheCommand(ECommand::Enter)).bAccepted);
     TestFalse(TEXT("cached ownership excludes live frames"), Session.AcceptsLiveFrames());
     Upload(7, 1);
-    CheckDemand(TEXT("play enables realtime"), Play(1), true);
+    TestTrue(TEXT("cache transition is accepted"), Play(1).bAccepted);
     const auto Completed = Session.Tick();
     TestEqual(TEXT("final accepted pose emits completion"), Completed.Kind, EKind::Completed);
     TestEqual(TEXT("completion belongs to current play"), Completed.PlayId, 1);
     TestEqual(TEXT("completion reports actual accepted frames"), Completed.FrameCount, 1);
     TestEqual(TEXT("tick applies at most one pose"), Completed.AppliedFramesThisTick, 1);
     TestEqual(TEXT("injected clock determines elapsed time"), Completed.ElapsedSeconds, 0.0);
-    TestFalse(TEXT("completion preserves realtime for natural final-pose evaluation"), Completed.RealtimeOverride.IsSet());
     TestEqual(TEXT("completion is emitted only once"), Session.Tick().Kind, EKind::None);
     TestEqual(TEXT("terminal tick does not republish"), Publications, 1);
 
     const auto Stopped = Session.HandleCommand(MakeSimpleCacheCommand(ECommand::Stop));
-    CheckDemand(TEXT("stop releases realtime"), Stopped, false);
+    TestTrue(TEXT("cache transition is accepted"), Stopped.bAccepted);
     TestEqual(TEXT("stop echoes held play identity"), Stopped.PlayId, 1);
     const auto StalePlay = Play(1);
     TestFalse(TEXT("stale play is rejected"), StalePlay.bAccepted);
     TestEqual(TEXT("rejected play echoes requested ID"), StalePlay.PlayId, 1);
     TestEqual(TEXT("rejected play retains upload identity"), StalePlay.UploadId, 1);
-    TestFalse(TEXT("ownership-retaining rejection preserves refresh demand"), StalePlay.RealtimeOverride.IsSet());
-    CheckDemand(TEXT("retry enables realtime"), Play(2), true);
+    TestTrue(TEXT("cache transition is accepted"), Play(2).bAccepted);
     Clock += 1.0;
     const auto Failed = Session.Tick();
     TestEqual(TEXT("missed frame produces performance outcome"), Failed.Kind, EKind::PerformanceFailed);
     TestEqual(TEXT("performance outcome play identity"), Failed.PlayId, 2);
     TestEqual(TEXT("performance outcome upload identity"), Failed.UploadId, 1);
     TestEqual(TEXT("performance outcome stable code"), Failed.ErrorCode, FString(TEXT("CACHED_PLAYBACK_PERFORMANCE")));
-    CheckDemand(TEXT("performance failure releases realtime"), Failed, false);
     TestEqual(TEXT("performance failure is emitted only once"), Session.Tick().Kind, EKind::None);
 
     auto Clear = MakeSimpleCacheCommand(ECommand::Clear);
     Clear.ClearId = 1;
     const auto Cleared = Session.HandleCommand(Clear);
-    CheckDemand(TEXT("clear restores realtime"), Cleared, true);
+    TestTrue(TEXT("cache transition is accepted"), Cleared.bAccepted);
     TestEqual(TEXT("clear echoes its own request identity"), Cleared.ClearId, 1);
     TestEqual(TEXT("clear captures released upload"), Cleared.UploadId, 1);
     TestEqual(TEXT("clear captures released play"), Cleared.PlayId, 2);
@@ -3127,22 +3113,22 @@ bool FMtoUCacheTransitionTest::RunTest(const FString& Parameters)
         Session.HandleCommand(MakeCacheBeginCommand(7, 1, 30.0, 1)).bAccepted);
     const auto RejectedBegin = Session.HandleCommand(MakeCacheBeginCommand(8, 1, 30.0, 2));
     TestEqual(TEXT("rejected begin carries incoming identity after reset"), RejectedBegin.UploadId, 2);
-    CheckDemand(TEXT("revision failure restores realtime"), RejectedBegin, true);
+    TestFalse(TEXT("invalid cache command is rejected"), RejectedBegin.bAccepted);
     Session.HandleCommand(MakeCacheBeginCommand(7, 1, 30.0, 3));
     const auto RejectedFrame = Session.HandleCommand(MakeCachedFrameCommand(-1, 42.0f, 64));
     TestEqual(TEXT("rejected frame retains pre-reset upload identity"), RejectedFrame.UploadId, 3);
-    CheckDemand(TEXT("frame failure restores realtime"), RejectedFrame, true);
+    TestFalse(TEXT("invalid cache command is rejected"), RejectedFrame.bAccepted);
     Session.HandleCommand(MakeCacheBeginCommand(7, 1, 30.0, 4));
     const auto RejectedEnd = Session.HandleCommand(MakeSimpleCacheCommand(ECommand::End));
     TestEqual(TEXT("incomplete end retains pre-reset upload identity"), RejectedEnd.UploadId, 4);
-    CheckDemand(TEXT("incomplete end restores realtime"), RejectedEnd, true);
+    TestFalse(TEXT("invalid cache command is rejected"), RejectedEnd.bAccepted);
     auto Reject = MakeSimpleCacheCommand(ECommand::Reject);
     Reject.UploadId = 5;
     Reject.ErrorCode = TEXT("CACHE_PAYLOAD_TOO_LARGE");
     Reject.ErrorDetails = TEXT("worker pre-allocation rejection");
     const auto RejectedIntake = Session.HandleCommand(Reject);
     TestEqual(TEXT("intake rejection uses worker-owned identity"), RejectedIntake.UploadId, 5);
-    CheckDemand(TEXT("intake rejection restores realtime"), RejectedIntake, true);
+    TestFalse(TEXT("invalid cache command is rejected"), RejectedIntake.bAccepted);
 
     // Replacing a still-owned cache is atomic; it changes all validation
     // inputs and resets operation IDs while preserving injected dependencies.
@@ -4625,6 +4611,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
             *MultipleActorClient, Payload, [&]() { Source->Update(); }));
     TestTrue(TEXT("multiple actors use the stable error code"),
         FromUtf8(Payload).Contains(TEXT("MULTIPLE_BINDING_ACTORS")));
+    TestFalse(TEXT("failed negotiation requests no background updates"), Source->GetTimeControlView().bConnected);
     DestroySocket(*SocketSubsystem, MultipleActorClient);
     if (ExtraActor)
     {
@@ -4678,20 +4665,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
         FromUtf8(Payload).Contains(TEXT("\"workflow\":\"animation\""))
         && FromUtf8(Payload).Contains(TEXT("\"target_morph_count\":0"))
         && FromUtf8(Payload).Contains(TEXT("\"accepted_morph_count\":0")));
-#if WITH_EDITOR
-    if (GEditor)
-    {
-        const FText OverrideName = FText::FromString(TEXT("MtoU Live Link"));
-        for (const FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-        {
-            if (ViewportClient)
-            {
-                TestTrue(TEXT("connected stream forces editor viewport realtime"),
-                    ViewportClient->HasRealtimeOverride(OverrideName));
-            }
-        }
-    }
-#endif
+    TestTrue(TEXT("complete negotiation requests background updates"), Source->GetTimeControlView().bConnected);
 
     FSocket* Second = ConnectLoopback(*SocketSubsystem, Port);
     TestNotNull(TEXT("second TCP client reaches listener"), Second);
@@ -4839,6 +4813,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
         SendLine(TEXT("{\"type\":\"cache_enter\"}")));
     FPlatformProcess::Sleep(0.02f);
     Source->Update();
+    TestTrue(TEXT("cache entry retains updates"), Source->GetTimeControlView().bConnected);
     TestTrue(TEXT("cache_begin is sent"),
         SendLine(TEXT("{\"type\":\"cache_begin\",\"upload_id\":1,\"revision\":9,\"fps\":30,\"start_frame\":2001,\"end_frame\":2002,\"frame_count\":2,\"payload_size\":512}")));
     TestTrue(TEXT("cached frame 0 is sent"),
@@ -4852,6 +4827,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
         FromUtf8(Payload).Contains(TEXT("\"type\":\"error\""))
         && FromUtf8(Payload).Contains(TEXT("CACHE_FRAME_INDEX_INVALID")));
 
+    TestTrue(TEXT("recoverable cache error retains updates"), Source->GetTimeControlView().bConnected);
     // A declared payload_size below the actual uploaded bytes is rejected
     // atomically while keeping the same streaming session usable.
     TestTrue(TEXT("underdeclared cache_begin is sent"),
@@ -4890,6 +4866,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("no pose is applied before play"), View.CurrentSourceFrame, INDEX_NONE);
     }
 
+    TestTrue(TEXT("ready cache retains updates"), Source->GetTimeControlView().bConnected);
     // A recoverably rejected begin switches intake to its own poisoned
     // identity. Frames/end already pipelined behind it are discarded without
     // touching the ready upload or producing an error flood.
@@ -4994,6 +4971,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
         && CompletionPayload.Contains(TEXT("elapsed_seconds")));
     TestEqual(TEXT("actor shows the final applied source frame"),
         Source->GetActorCachePlaybackView(*Actor).CurrentSourceFrame, 2002);
+    TestTrue(TEXT("completed cache retains updates"), Source->GetTimeControlView().bConnected);
     TestTrue(TEXT("Unreal can replay the retained cache"),
         Source->StartActorCachedPlayback(*Actor));
     Payload.Reset();
@@ -5013,6 +4991,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("stopped cache remains playable"),
         Source->GetActorCachePlaybackView(*Actor).CanPlay());
 
+    TestTrue(TEXT("stopped cache retains updates"), Source->GetTimeControlView().bConnected);
     // The valid upload after the rejected identity is admitted normally.
     TestTrue(TEXT("new upload after poisoned identity is sent"),
         SendLine(TEXT("{\"type\":\"cache_begin\",\"upload_id\":5,\"revision\":9,\"fps\":30,\"start_frame\":3001,\"end_frame\":3001,\"frame_count\":1,\"payload_size\":256}"))
@@ -5145,20 +5124,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
             SubjectKey, ULiveLinkAnimationRole::StaticClass(), StaleFrame);
     });
     TestTrue(TEXT("disconnect clears the last streamed pose"), bDisconnectedFrameCleared);
-#if WITH_EDITOR
-    if (GEditor)
-    {
-        const FText OverrideName = FText::FromString(TEXT("MtoU Live Link"));
-        for (const FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-        {
-            if (ViewportClient)
-            {
-                TestFalse(TEXT("disconnect restores editor viewport realtime setting"),
-                    ViewportClient->HasRealtimeOverride(OverrideName));
-            }
-        }
-    }
-#endif
+    TestFalse(TEXT("disconnect releases background updates"), Source->GetTimeControlView().bConnected);
 
     DestroySocket(*SocketSubsystem, Primary);
     Source->StopListener();
@@ -5238,19 +5204,18 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
         return false;
     }
 
-    // Save the user's base Realtime preference before negotiation owns any
-    // override; with no override present the effective value is the base.
+    // Save the configured Realtime preference independently of temporary updates.
     TArray<TPair<FLevelEditorViewportClient*, bool>> SavedBaseRealtime;
 #if WITH_EDITOR
-    const FText OverrideName = FText::FromString(TEXT("MtoU Live Link"));
     if (GEditor)
     {
         for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
         {
             if (ViewportClient)
             {
-                SavedBaseRealtime.Add(TPair<FLevelEditorViewportClient*, bool>(
-                    ViewportClient, ViewportClient->IsRealtime()));
+                bool bBase = false;
+                ViewportClient->SaveRealtimeStateToConfig(bBase);
+                SavedBaseRealtime.Add(TPair<FLevelEditorViewportClient*, bool>(ViewportClient, bBase));
             }
         }
     }
@@ -5319,9 +5284,10 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
 #endif
     };
     // Strict host checks: an empty viewport set must never count as proof.
-    // Every override assertion below first requires at least one real Level
-    // viewport; a viewport-less run fails instead of silently passing.
-    auto HasOverride = [&]() -> bool
+    // Preference assertions require at least one real level viewport.
+    auto HasDemand = [&]() { return Source->GetTimeControlView().bConnected; };
+    auto HasNoDemand = [&]() { return !Source->GetTimeControlView().bConnected; };
+    auto BaseRealtimeMatches = [&](bool bExpectedBase) -> bool
     {
 #if WITH_EDITOR
         if (!GEditor || CountLevelViewports() == 0)
@@ -5330,46 +5296,12 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
         }
         for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
         {
-            if (!ViewportClient || !ViewportClient->HasRealtimeOverride(OverrideName)
-                || !ViewportClient->IsRealtime())
+            bool bBase = false;
+            if (ViewportClient)
             {
-                return false;
+                ViewportClient->SaveRealtimeStateToConfig(bBase);
             }
-        }
-#else
-        return false;
-#endif
-        return true;
-    };
-    auto HasNoOverride = [&]() -> bool
-    {
-#if WITH_EDITOR
-        if (!GEditor || CountLevelViewports() == 0)
-        {
-            return false;
-        }
-        for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-        {
-            if (ViewportClient && ViewportClient->HasRealtimeOverride(OverrideName))
-            {
-                return false;
-            }
-        }
-#else
-        return false;
-#endif
-        return true;
-    };
-    auto EffectiveMatchesBase = [&](bool bExpectedBase) -> bool
-    {
-#if WITH_EDITOR
-        if (!GEditor || CountLevelViewports() == 0)
-        {
-            return false;
-        }
-        for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-        {
-            if (ViewportClient && ViewportClient->IsRealtime() != bExpectedBase)
+            if (ViewportClient && bBase != bExpectedBase)
             {
                 return false;
             }
@@ -5479,8 +5411,8 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
         *Primary, Payload, [&]() { Source->Update(); }));
     TestTrue(TEXT("ready response is received"),
         FromUtf8(Payload).Contains(TEXT("\"type\":\"ready\"")));
-    TestTrue(TEXT("connected stream forces editor viewport realtime"), HasOverride());
-    TestTrue(TEXT("at least one real level viewport backs the override check"),
+    TestTrue(TEXT("connected stream requests background updates"), HasDemand());
+    TestTrue(TEXT("at least one real level viewport backs the preference check"),
         CountLevelViewports() > 0);
     USkeletalMeshComponent* DisplayComponent =
         Actor ? Actor->GetSkeletalMeshComponent() : nullptr;
@@ -5496,8 +5428,8 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Live Link animation evaluation is enabled"),
         DisplayInstance && DisplayInstance->GetEnableLiveLinkEvaluation());
 
-    // Disable the underlying viewport Realtime so only the plugin override
-    // can keep the preview refreshing; the base preference is restored below.
+    // Disable the configured viewport Realtime and verify the connection
+    // demand survives without changing that setting.
 #if WITH_EDITOR
     if (GEditor)
     {
@@ -5510,7 +5442,7 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
         }
     }
 #endif
-    TestTrue(TEXT("plugin override keeps viewport realtime while base is off"), HasOverride());
+    TestTrue(TEXT("connection keeps background updates while base is off"), HasDemand());
     SendLiveAndExpect(Primary, FVector(41.0, 42.0, 43.0), TEXT("initial live frame is sent"));
 
     // Normal leave and capture cancellation share one path: enter cached
@@ -5518,24 +5450,24 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("cache entry is sent"), SendText(Primary, TEXT("{\"type\":\"cache_enter\"}")));
     FPlatformProcess::Sleep(0.02f);
     Source->Update();
-    TestTrue(TEXT("cached entry releases viewport realtime"), HasNoOverride());
-    TestTrue(TEXT("cached entry exposes the disabled base realtime"), EffectiveMatchesBase(false));
+    TestTrue(TEXT("cached entry retains background updates"), HasDemand());
+    TestTrue(TEXT("cached entry preserves configured realtime off"), BaseRealtimeMatches(false));
     TestTrue(TEXT("cache clear is sent"), SendText(Primary, TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}")));
     TestTrue(TEXT("clear is acknowledged"),
         ReceiveText(Primary).Contains(TEXT("\"type\":\"cache_cleared\"")));
-    TestTrue(TEXT("leaving cached ownership restores live preview realtime"), HasOverride());
+    TestTrue(TEXT("leaving cached ownership retains background updates"), HasDemand());
     SendLiveAndExpect(Primary, FVector(51.0, 52.0, 53.0), TEXT("live frame after clear is sent"));
 
-    // Repeated switches stay idempotent and leave no override residue.
+    // Repeated switches keep the same connection demand.
     TestTrue(TEXT("second cache entry is sent"), SendText(Primary, TEXT("{\"type\":\"cache_enter\"}")));
     FPlatformProcess::Sleep(0.02f);
     Source->Update();
-    TestTrue(TEXT("second entry releases viewport realtime again"), HasNoOverride());
-    TestTrue(TEXT("second entry exposes the disabled base realtime again"), EffectiveMatchesBase(false));
+    TestTrue(TEXT("second entry retains background updates"), HasDemand());
+    TestTrue(TEXT("second entry preserves configured realtime off"), BaseRealtimeMatches(false));
     TestTrue(TEXT("second cache clear is sent"), SendText(Primary, TEXT("{\"type\":\"cache_clear\",\"clear_id\":2}")));
     TestTrue(TEXT("second clear is acknowledged"),
         ReceiveText(Primary).Contains(TEXT("\"type\":\"cache_cleared\"")));
-    TestTrue(TEXT("repeated clear restores live preview realtime again"), HasOverride());
+    TestTrue(TEXT("repeated clear retains background updates again"), HasDemand());
     SendLiveAndExpect(Primary, FVector(61.0, 62.0, 63.0), TEXT("live frame after second clear is sent"));
 
     // Recapture can clear cached ownership, re-enter, then fail before
@@ -5549,12 +5481,12 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("recapture re-enters cached mode"), SendText(Primary, TEXT("{\"type\":\"cache_enter\"}")));
     FPlatformProcess::Sleep(0.02f);
     Source->Update();
-    TestTrue(TEXT("cache creation failure starts from cached ownership"), HasNoOverride());
+    TestTrue(TEXT("cache creation failure starts from cached ownership"), HasDemand());
     TestTrue(TEXT("cache creation failure sends final clear"),
         SendText(Primary, TEXT("{\"type\":\"cache_clear\",\"clear_id\":4}")));
     TestTrue(TEXT("cache creation failure clear is acknowledged"),
         ReceiveText(Primary).Contains(TEXT("\"type\":\"cache_cleared\"")));
-    TestTrue(TEXT("cache creation failure restores live preview realtime"), HasOverride());
+    TestTrue(TEXT("cache creation failure retains background updates"), HasDemand());
     SendLiveAndExpect(Primary, FVector(66.0, 67.0, 68.0),
         TEXT("live frame after cache creation failure is sent"));
 
@@ -5564,33 +5496,33 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("failure-path cache entry is sent"), SendText(Primary, TEXT("{\"type\":\"cache_enter\"}")));
     FPlatformProcess::Sleep(0.02f);
     Source->Update();
-    TestTrue(TEXT("failure-path entry releases viewport realtime"), HasNoOverride());
-    TestTrue(TEXT("failure-path entry exposes the disabled base realtime"), EffectiveMatchesBase(false));
+    TestTrue(TEXT("failure-path entry retains background updates"), HasDemand());
+    TestTrue(TEXT("failure-path entry preserves configured realtime off"), BaseRealtimeMatches(false));
     TestTrue(TEXT("mismatched-revision upload is sent"),
         SendText(Primary, TEXT("{\"type\":\"cache_begin\",\"upload_id\":7,\"revision\":8,\"fps\":30,\"start_frame\":2001,\"end_frame\":2001,\"frame_count\":1,\"payload_size\":256}")));
     TestTrue(TEXT("mismatched revision reports a recoverable error"),
         ReceiveText(Primary).Contains(TEXT("CACHE_REVISION_MISMATCH")));
-    TestTrue(TEXT("recoverable failure restores live preview realtime"), HasOverride());
+    TestTrue(TEXT("recoverable failure retains background updates"), HasDemand());
     TestTrue(TEXT("recovery clear is sent"), SendText(Primary, TEXT("{\"type\":\"cache_clear\",\"clear_id\":5}")));
     TestTrue(TEXT("recovery clear is acknowledged"),
         ReceiveText(Primary).Contains(TEXT("\"type\":\"cache_cleared\"")));
-    TestTrue(TEXT("recovery clear keeps live preview realtime"), HasOverride());
+    TestTrue(TEXT("recovery clear keeps background updates"), HasDemand());
     SendLiveAndExpect(Primary, FVector(71.0, 72.0, 73.0), TEXT("live frame after recovery is sent"));
 
-    // Disconnect under base-off removes only the plugin override and preserves
+    // Disconnect under base-off releases demand and preserves
     // the disabled base. The worker reports Listening immediately, but the
     // game-thread disconnect cleanup runs on Update, so pump it first.
     DestroySocket(*SocketSubsystem, Primary);
     TestTrue(TEXT("disconnected session returns source to listening"),
         WaitForStatus(Source, TEXT("Listening on")));
-    TestTrue(TEXT("disconnect cleanup removes the plugin viewport override"), PollUntil([&]()
+    TestTrue(TEXT("disconnect cleanup removes the background update demand"), PollUntil([&]()
         {
             Source->Update();
             LiveLinkClient.ForceTick();
-            return HasNoOverride();
+            return HasNoDemand();
         }));
-    TestTrue(TEXT("disconnect removes the plugin viewport override"), HasNoOverride());
-    TestTrue(TEXT("disconnect preserves the disabled base realtime"), EffectiveMatchesBase(false));
+    TestTrue(TEXT("disconnect removes the background update demand"), HasNoDemand());
+    TestTrue(TEXT("disconnect preserves the disabled base realtime"), BaseRealtimeMatches(false));
     // Initially-on phase on a fresh negotiation of the same listener: raise the
     // base first so this connection starts with Realtime on, then prove the
     // same enter/clear cycle keeps the preview refreshing and the display bone
@@ -5619,7 +5551,6 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
                 if (Saved.Key)
                 {
                     Saved.Key->SetRealtime(Saved.Value);
-                    Saved.Key->RemoveRealtimeOverride(OverrideName, false);
                 }
             }
         }
@@ -5639,23 +5570,23 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
     Payload.Reset();
     TestTrue(TEXT("reconnected negotiation reaches ready"), ReceivePacket(
         *Reconnect, Payload, [&]() { Source->Update(); }));
-    TestTrue(TEXT("reconnected stream forces editor viewport realtime"), HasOverride());
+    TestTrue(TEXT("reconnected stream requests background updates"), HasDemand());
     SendLiveAndExpect(Reconnect, FVector(81.0, 82.0, 83.0), TEXT("initial live frame on base-on is sent"));
     TestTrue(TEXT("base-on cache entry is sent"), SendText(Reconnect, TEXT("{\"type\":\"cache_enter\"}")));
     FPlatformProcess::Sleep(0.02f);
     Source->Update();
-    TestTrue(TEXT("base-on entry releases the plugin viewport override"), HasNoOverride());
-    TestTrue(TEXT("base-on entry keeps the enabled base realtime"), EffectiveMatchesBase(true));
+    TestTrue(TEXT("base-on entry retains background updates"), HasDemand());
+    TestTrue(TEXT("base-on entry keeps the enabled base realtime"), BaseRealtimeMatches(true));
     TestTrue(TEXT("base-on cache clear is sent"), SendText(Reconnect, TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}")));
     TestTrue(TEXT("base-on clear is acknowledged"),
         ReceiveText(Reconnect).Contains(TEXT("\"type\":\"cache_cleared\"")));
-    TestTrue(TEXT("base-on clear restores live preview realtime"), HasOverride());
+    TestTrue(TEXT("base-on clear retains background updates"), HasDemand());
     SendLiveAndExpect(Reconnect, FVector(91.0, 92.0, 93.0), TEXT("live frame after base-on clear is sent"));
-    // Active shutdown while still connected removes the override without
+    // Active shutdown while still connected releases demand without
     // touching the enabled base preference.
     Source->StopListener();
-    TestTrue(TEXT("active shutdown removes the plugin viewport override"), HasNoOverride());
-    TestTrue(TEXT("active shutdown preserves the enabled base realtime"), EffectiveMatchesBase(true));
+    TestTrue(TEXT("active shutdown removes the background update demand"), HasNoDemand());
+    TestTrue(TEXT("active shutdown preserves the enabled base realtime"), BaseRealtimeMatches(true));
     DestroySocket(*SocketSubsystem, Reconnect);
     LiveLinkClient.RemoveSource(Source);
 
@@ -5668,7 +5599,6 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
             if (Saved.Key)
             {
                 Saved.Key->SetRealtime(Saved.Value);
-                Saved.Key->RemoveRealtimeOverride(OverrideName, false);
             }
         }
     }
@@ -5684,7 +5614,7 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
     return true;
 }
 // Natural-refresh proof for Issue #38. The simple CacheClear test above keeps
-// the full override/preference matrix with manually pumped Live Link and
+// the connection/preference matrix with manually pumped Live Link and
 // component animation ticks. This latent test keeps the same cached
 // enter/clear and recoverable-error preconditions but proves the actual
 // editor refresh: the binding actor lives in the real viewport-driven editor
@@ -5693,12 +5623,14 @@ bool FMtoUCacheClearRestoresLivePreviewTest::RunTest(const FString& Parameters)
 // Source->Update, LiveLinkClient.ForceTick, TickAnimation, or
 // RefreshBoneTransforms; between the socket send and the bone read only the
 // editor main loop (LiveLinkClient::Tick -> Source::Update plus the natural
-// component tick behind the restored realtime override) may advance the
+// component tick behind the editor owner's realtime frame request) may advance the
 // pose. Control-plane steps (negotiation, cache_enter/clear, error acks)
 // still pump Source->Update for determinism; the display proof itself does
 // not.
 struct FMtoUNaturalRefreshState
 {
+    TSharedPtr<FMtoULiveLinkSource> PreviousSource;
+    bool bActiveSourceSet = false;
     ISocketSubsystem* SocketSubsystem = nullptr;
     FSocket* Client = nullptr;
     TSharedPtr<FMtoULiveLinkSource> Source;
@@ -5739,7 +5671,6 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
     }
     FMtoUCacheClearNaturalRefreshTest* Self = this;
     TSharedRef<FMtoUNaturalRefreshState> State = MakeShared<FMtoUNaturalRefreshState>();
-    const FText OverrideName = FText::FromString(TEXT("MtoU Live Link"));
 
     auto CountEditorViewports = []() -> int32
     {
@@ -5756,43 +5687,13 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         }
         return Count;
     };
-    auto HasOverride = [OverrideName, CountEditorViewports]() -> bool
-    {
-        if (!GEditor || CountEditorViewports() == 0)
-        {
-            return false;
-        }
-        for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-        {
-            if (!ViewportClient || !ViewportClient->HasRealtimeOverride(OverrideName)
-                || !ViewportClient->IsRealtime())
-            {
-                return false;
-            }
-        }
-        return true;
-    };
-    auto HasNoOverride = [OverrideName, CountEditorViewports]() -> bool
-    {
-        if (!GEditor || CountEditorViewports() == 0)
-        {
-            return false;
-        }
-        for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-        {
-            if (ViewportClient && ViewportClient->HasRealtimeOverride(OverrideName))
-            {
-                return false;
-            }
-        }
-        return true;
-    };
+    auto HasDemand = [State]() { return State->Source.IsValid() && State->Source->GetTimeControlView().bConnected; };
 
     // Setup: negotiate in the real editor world with base Realtime off, then
-    // prove cached enter releases the override and clear restores it. This
+    // prove cached entry and clear retain connection demand. This
     // control plane pumps Source->Update for determinism; no displayed-bone
     // conclusion is drawn here.
-    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, OverrideName, HasOverride, HasNoOverride, CountEditorViewports]()
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, HasDemand, CountEditorViewports]()
     {
         ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
         Self->TestNotNull(TEXT("platform socket subsystem is available"), SocketSubsystem);
@@ -5823,7 +5724,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             return true;
         }
         State->EditorWorld = EditorWorld;
-        Self->TestTrue(TEXT("at least one real level viewport backs the override check"),
+        Self->TestTrue(TEXT("at least one real level viewport backs the preference check"),
             CountEditorViewports() > 0);
         if (CountEditorViewports() == 0)
         {
@@ -5848,8 +5749,9 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         {
             if (ViewportClient)
             {
-                State->SavedBase.Add(TPair<FLevelEditorViewportClient*, bool>(
-                    ViewportClient, ViewportClient->IsRealtime()));
+                bool bBase = false;
+                ViewportClient->SaveRealtimeStateToConfig(bBase);
+                State->SavedBase.Add(TPair<FLevelEditorViewportClient*, bool>(ViewportClient, bBase));
             }
         }
         CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
@@ -5876,6 +5778,8 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
 
         TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
         State->Source = Source;
+        State->PreviousSource = MtoUSetActiveSource(Source);
+        State->bActiveSourceSet = true;
         const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
         State->SourceGuid = SourceGuid;
         Self->TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
@@ -5919,7 +5823,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             ReceivePacket(*Client, Payload, [&]() { Source->Update(); }));
         Self->TestTrue(TEXT("ready response is received"),
             FromUtf8(Payload).Contains(TEXT("\"type\":\"ready\"")));
-        Self->TestTrue(TEXT("connected stream forces editor viewport realtime"), HasOverride());
+        Self->TestTrue(TEXT("connected stream requests background updates"), HasDemand());
         Self->TestTrue(TEXT("editor skeletal mesh component tick is enabled"),
             DisplayComponent && DisplayComponent->IsComponentTickEnabled());
         Self->TestTrue(TEXT("editor skeletal mesh component is registered"),
@@ -5938,14 +5842,14 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
                 ViewportClient->SetRealtime(false);
             }
         }
-        Self->TestTrue(TEXT("plugin override keeps viewport realtime while base is off"), HasOverride());
+        Self->TestTrue(TEXT("connection keeps background updates while base is off"), HasDemand());
 
         const TArray<uint8> EnterBytes = Packet(TEXT("{\"type\":\"cache_enter\"}"));
         Self->TestTrue(TEXT("cache entry is sent"),
             SendBytes(*Client, EnterBytes.GetData(), EnterBytes.Num()));
         FPlatformProcess::Sleep(0.02f);
         Source->Update();
-        Self->TestTrue(TEXT("cached entry releases viewport realtime"), HasNoOverride());
+        Self->TestTrue(TEXT("cached entry retains background updates"), HasDemand());
         const TArray<uint8> ClearBytes = Packet(TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}"));
         Self->TestTrue(TEXT("cache clear is sent"),
             SendBytes(*Client, ClearBytes.GetData(), ClearBytes.Num()));
@@ -5953,7 +5857,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         Self->TestTrue(TEXT("clear is acknowledged"),
             ReceivePacket(*Client, ClearPayload, [&]() { Source->Update(); })
             && FromUtf8(ClearPayload).Contains(TEXT("\"type\":\"cache_cleared\"")));
-        Self->TestTrue(TEXT("leaving cached ownership restores live preview realtime"), HasOverride());
+        Self->TestTrue(TEXT("leaving cached ownership retains background updates"), HasDemand());
         return true;
     }));
 
@@ -6053,9 +5957,9 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         }, 5.0f));
 
     // Recoverable-error precondition (control plane, pumped): a revision
-    // mismatch drops to Idle and must restore the same live override before
+    // mismatch drops to Idle and retains background update demand before
     // the next natural observation.
-    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, HasOverride, HasNoOverride]()
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, HasDemand]()
     {
         if (State->bSetupFailed || !State->Client || !State->Source.IsValid())
         {
@@ -6068,7 +5972,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             SendBytes(Client, EnterBytes.GetData(), EnterBytes.Num()));
         FPlatformProcess::Sleep(0.02f);
         Source.Update();
-        Self->TestTrue(TEXT("failure-path entry releases viewport realtime"), HasNoOverride());
+        Self->TestTrue(TEXT("failure-path entry retains background updates"), HasDemand());
         const TArray<uint8> BadBegin = Packet(
             TEXT("{\"type\":\"cache_begin\",\"upload_id\":7,\"revision\":8,\"fps\":30,\"start_frame\":2001,\"end_frame\":2001,\"frame_count\":1,\"payload_size\":256}"));
         Self->TestTrue(TEXT("mismatched-revision upload is sent"),
@@ -6077,7 +5981,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         Self->TestTrue(TEXT("mismatched revision reports a recoverable error"),
             ReceivePacket(Client, ErrorPayload, [&]() { Source.Update(); })
             && FromUtf8(ErrorPayload).Contains(TEXT("CACHE_REVISION_MISMATCH")));
-        Self->TestTrue(TEXT("recoverable failure restores live preview realtime"), HasOverride());
+        Self->TestTrue(TEXT("recoverable failure retains background updates"), HasDemand());
         const TArray<uint8> ClearBytes = Packet(TEXT("{\"type\":\"cache_clear\",\"clear_id\":2}"));
         Self->TestTrue(TEXT("recovery clear is sent"),
             SendBytes(Client, ClearBytes.GetData(), ClearBytes.Num()));
@@ -6085,7 +5989,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         Self->TestTrue(TEXT("recovery clear is acknowledged"),
             ReceivePacket(Client, ClearPayload, [&]() { Source.Update(); })
             && FromUtf8(ClearPayload).Contains(TEXT("\"type\":\"cache_cleared\"")));
-        Self->TestTrue(TEXT("recovery clear keeps live preview realtime"), HasOverride());
+        Self->TestTrue(TEXT("recovery clear keeps background updates"), HasDemand());
         return true;
     }));
 
@@ -6136,10 +6040,10 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             return true;
         }, 5.0f));
 
-    // Cleanup always runs: active shutdown removes only the plugin override,
+    // Cleanup always runs: active shutdown releases connection demand,
     // the original base preference is restored, and the editor-world actor
     // is destroyed so later tests never see a second binding actor.
-    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, OverrideName]()
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State]()
     {
         if (State->Source.IsValid())
         {
@@ -6151,6 +6055,14 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             IModularFeatures::Get().GetModularFeature<ILiveLinkClient>(
                 ILiveLinkClient::ModularFeatureName).RemoveSource(State->Source);
         }
+        if (State->bActiveSourceSet)
+        {
+            MtoUSetActiveSource(State->PreviousSource);
+            State->PreviousSource.Reset();
+            State->bActiveSourceSet = false;
+        }
+        Self->TestTrue(TEXT("shutdown releases background update demand"),
+            !State->Source.IsValid() || !State->Source->GetTimeControlView().bConnected);
         State->Source.Reset();
         if (GEditor)
         {
@@ -6159,7 +6071,6 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
                 if (Saved.Key)
                 {
                     Saved.Key->SetRealtime(Saved.Value);
-                    Saved.Key->RemoveRealtimeOverride(OverrideName, false);
                 }
             }
         }
@@ -6174,19 +6085,6 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             State->Client = nullptr;
             DestroySocket(*State->SocketSubsystem, Client);
         }
-        bool bNoOverride = true;
-        if (GEditor)
-        {
-            for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-            {
-                if (ViewportClient && ViewportClient->HasRealtimeOverride(OverrideName))
-                {
-                    bNoOverride = false;
-                    break;
-                }
-            }
-        }
-        Self->TestTrue(TEXT("cleanup leaves no plugin viewport override"), bNoOverride);
         return true;
     }));
     return true;
@@ -8587,7 +8485,8 @@ bool FMtoUSessionTerminationBoundaryTest::RunTest(const FString& Parameters)
     const bool bReturnedToListening = PollUntil([&]()
     {
         Source->Update();
-        return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+        return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            && !Source->GetTimeControlView().bConnected;
     });
     TestTrue(TEXT("source returns to listening after the boundary termination"), bReturnedToListening);
     TestTrue(TEXT("terminated actor shows the true disconnected state"),
@@ -13116,7 +13015,8 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
             TestTrue(TEXT("the ended session is cleared before reconnecting"), PollUntil([&]()
             {
                 Pump();
-                return MtoUGetLinkageView().Identity.SessionId == 0;
+                return MtoUGetLinkageView().Identity.SessionId == 0
+                && !Source->GetTimeControlView().bConnected;
             }));
         }
         MtoUSetLinkageHooks(FMtoULinkageHooks());
@@ -16960,7 +16860,8 @@ struct FMtoUSessionEndFixture
         return PollUntil([this]()
         {
             Pump();
-            return MtoUGetLinkageView().Identity.SessionId == 0;
+            return MtoUGetLinkageView().Identity.SessionId == 0
+                && !Source->GetTimeControlView().bConnected;
         }, TimeoutSeconds);
     }
 
@@ -17109,6 +17010,7 @@ struct FMtoUSessionEndMaya
         }
         SessionId = static_cast<int32>(Ack->GetNumberField(TEXT("session_id")));
         Test.TestTrue(TEXT("the greeting names one session"), SessionId >= 1);
+        Test.TestFalse(TEXT("greeting alone requests no background updates"), Fixture.Source->GetTimeControlView().bConnected);
         return !bNegotiate || Negotiate(Test);
     }
 
@@ -17116,9 +17018,13 @@ struct FMtoUSessionEndMaya
     {
         const TArray<uint8> Init = Fixture.InitPacket(SetObjects);
         TArray<uint8> Payload;
-        return Test.TestTrue(TEXT("init is sent"), SendBytes(*Socket, Init.GetData(), Init.Num()))
+        const bool bReady = Test.TestTrue(TEXT("init is sent"), SendBytes(*Socket, Init.GetData(), Init.Num()))
             && Test.TestTrue(TEXT("negotiation reaches ready"),
                 Reader.Next(*Socket, TEXT("ready"), Payload, [this]() { Pump(); }, 5.0));
+        Test.TestEqual(TEXT("background updates require the complete negotiated set"),
+            Fixture.Source->GetTimeControlView().bConnected,
+            bReady && FString(SetObjects) == TEXT("[\"character\"]"));
+        return bReady;
     }
 
     /** Maya's confirmation of the transition Unreal started. */
@@ -17213,6 +17119,8 @@ bool FMtoUSessionEndDisconnectTest::RunTest(const FString& Parameters)
 
     // The worker disconnect is one of the ways a session ends.
     Maya.Drop();
+    TestTrue(TEXT("worker disconnect closes background demand before cleanup"),
+        PollUntil([&]() { return !F.Source->GetTimeControlView().bConnected; }));
     TestTrue(TEXT("the disconnect reaches the end contract"), F.WaitSessionOver());
     TestEqual(TEXT("the borrowed writers were handed back once"), F.Hooks.RestoreCalls, 1);
     const FMtoULinkageView Ended = MtoUGetLinkageView();
@@ -17393,6 +17301,7 @@ bool FMtoUSessionEndSourceRemovedTest::RunTest(const FString& Parameters)
     // asks it to shut down.
     const int32 QueuedBeforeShutdown = FMtoUControlBudgetTestAccess::OutgoingQueued(*F.Source);
     TestTrue(TEXT("the source accepts the shutdown"), F.Source->RequestSourceShutdown());
+    TestFalse(TEXT("source shutdown releases background updates"), F.Source->GetTimeControlView().bConnected);
     // Nothing updates a removed source any more, so the shutdown itself must
     // have run the end contract: no Update runs before the checks below.
     TestTrue(TEXT("the connection is closed"), Maya.PeerClosed(5.0, false));
@@ -17860,6 +17769,8 @@ bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
             return false;
         }
         MtoUNotifyEditorWorldCleanup(F.World, true, true);
+        TestFalse(TEXT("world cleanup synchronously releases background updates"),
+            F.Source->GetTimeControlView().bConnected);
         TestTrue(TEXT("unloading the participating actor's world ends the session"), Maya.PeerClosed());
         TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
     }
@@ -17942,6 +17853,8 @@ bool FMtoUSessionEndLateMessagesTest::RunTest(const FString& Parameters)
         MtoUSetDeferStreamingSessionEndCleanup(true);
         bDeferred = true;
         StartAndFailRefresh(*F.Actor);
+        TestFalse(TEXT("end gate immediately releases background updates before deferred cleanup"),
+            F.Source->GetTimeControlView().bConnected);
 
         // Maya, which has not seen the end yet, starts linkage and answers.
         const TArray<uint8> Mode = Packet(FString::Printf(
@@ -17986,6 +17899,8 @@ bool FMtoUSessionEndLateMessagesTest::RunTest(const FString& Parameters)
         MtoUSetDeferStreamingSessionEndCleanup(true);
         bDeferred = true;
         StartAndFailRefresh(*F.Actor);
+        TestFalse(TEXT("end gate immediately releases background updates before deferred cleanup"),
+            F.Source->GetTimeControlView().bConnected);
         const TArray<uint8> Init = F.InitPacket();
         TestTrue(TEXT("the late init is sent"), SendBytes(*Maya.Socket, Init.GetData(), Init.Num()));
         TArray<uint8> Payload;
@@ -18012,6 +17927,8 @@ bool FMtoUSessionEndLateMessagesTest::RunTest(const FString& Parameters)
         MtoUSetDeferStreamingSessionEndCleanup(true);
         bDeferred = true;
         StartAndFailRefresh(*F.Actor);
+        TestFalse(TEXT("end gate immediately releases background updates before deferred cleanup"),
+            F.Source->GetTimeControlView().bConnected);
         First.Drop();
         TestTrue(TEXT("the old connection ends on its own"), F.WaitSessionOver());
 
@@ -18041,6 +17958,7 @@ bool FMtoUSessionEndLateMessagesTest::RunTest(const FString& Parameters)
         TestEqual(TEXT("the late leave was counted"), F.Source->GetPendingLeaveCount(), 0);
         TestEqual(TEXT("the new session keeps its identity"),
             MtoUGetLinkageView().Identity.SessionId, Second.SessionId);
+        TestTrue(TEXT("late messages keep the new background update demand"), F.Source->GetTimeControlView().bConnected);
         TestTrue(TEXT("the new session still streams"),
             F.Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     }

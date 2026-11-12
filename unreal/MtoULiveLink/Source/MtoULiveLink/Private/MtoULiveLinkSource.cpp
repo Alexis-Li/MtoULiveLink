@@ -26,11 +26,6 @@
 #include "Sockets.h"
 #include "UObject/UObjectIterator.h"
 
-#if WITH_EDITOR
-#include "Editor.h"
-#include "LevelEditorViewport.h"
-#endif
-
 DEFINE_LOG_CATEGORY_STATIC(LogMtoULiveLinkSource, Log, All);
 
 namespace
@@ -73,34 +68,6 @@ namespace
 constexpr int32 ReceiveBufferSize = 64 * 1024;
 constexpr int32 IdleWaitMilliseconds = 5;
 constexpr int32 BindRetryMilliseconds = 100;
-
-#if WITH_EDITOR
-const FText RealtimeOverrideName = FText::FromString(TEXT("MtoU Live Link"));
-
-void SetEditorViewportRealtimeOverride(bool bEnable)
-{
-    if (!GEditor)
-    {
-        return;
-    }
-    for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-    {
-        if (!ViewportClient)
-        {
-            continue;
-        }
-        ViewportClient->RemoveRealtimeOverride(RealtimeOverrideName, false);
-        if (bEnable)
-        {
-            ViewportClient->AddRealtimeOverride(true, RealtimeOverrideName);
-        }
-    }
-}
-#else
-void SetEditorViewportRealtimeOverride(bool)
-{
-}
-#endif
 
 void CloseSocket(ISocketSubsystem& SocketSubsystem, FSocket*& Socket)
 {
@@ -310,8 +277,12 @@ bool FMtoULiveLinkSource::RequestLinkageEnter(int32 ModeRevision, FString& OutEr
 
 FMtoUTimeControlView FMtoULiveLinkSource::GetTimeControlView() const
 {
+    check(IsInGameThread());
     const FMtoULinkageView Linkage = LinkageSession.GetView();
     FMtoUTimeControlView View;
+    View.bConnected = bSourceValid.Load()
+        && IsSessionPublishableOnGameThread(GameThreadSession)
+        && !SessionObjects.IsEmpty() && SessionObjects.Num() == SetObjects.Num();
     View.bTransitioning = Linkage.bTransitioning;
     View.bTakeoverHeld = Linkage.bTakeoverHeld;
     View.ModeRevision = Linkage.Identity.ModeRevision;
@@ -665,7 +636,6 @@ void FMtoULiveLinkSource::StopListener()
         EndedSession = 0;
         CacheSession.EndSession();
         HoldLinkageDisplaysOnGameThread(false);
-        SetEditorViewportRealtimeOverride(false);
     }
 }
 
@@ -740,7 +710,6 @@ void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool
     TArray<TWeakObjectPtr<AMtoULiveLinkActor>> Released;
     if (bNegotiated)
     {
-        SetEditorViewportRealtimeOverride(false);
         HoldLinkageDisplaysOnGameThread(false);
         RestoreGeneration.Reset();
         PendingApplication.Reset();
@@ -2058,7 +2027,6 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
                 ? EMtoUConnectionState::Connected
                 : EMtoUConnectionState::ConnectedAsSecondObject);
     Actor->NoteSessionStreaming();
-    SetEditorViewportRealtimeOverride(true);
 
     Client->PushSubjectStaticData_AnyThread(
         Object.SubjectKey,
@@ -3392,11 +3360,6 @@ void FMtoULiveLinkSource::ApplyCacheTransitionOnGameThread(
     if (!IsSessionPublishableOnGameThread(SessionId))
     {
         return;
-    }
-    if (Transition.RealtimeOverride.IsSet())
-    {
-        SetEditorViewportRealtimeOverride(
-            Transition.RealtimeOverride.GetValue() && bSourceValid.Load());
     }
 
     // This adapter only formats status and encodes semantic outcomes. Cache

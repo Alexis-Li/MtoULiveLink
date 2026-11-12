@@ -703,7 +703,13 @@ FMtoULiveLinkActorDetails::FStatusView BuildStatusView(
         Connection, Target.GetLinkSessionState(), ConnectionSeverity);
 
     View.Preview = ReadinessText;
-    View.Connection = ConnectionText;
+    const bool bConnected = Connection == EMtoUConnectionState::Connected
+        || Connection == EMtoUConnectionState::ConnectedAsSecondObject
+        || Connection == EMtoUConnectionState::ConnectedPartialMorph
+        || Connection == EMtoUConnectionState::ConnectedBoneOnly;
+    View.Connection = bConnected
+        ? FText::Format(LOCTEXT("ConnectedBackgroundUpdates", "{0}\n连接期间 UE 在后台保持更新"), ConnectionText)
+        : ConnectionText;
     View.PreviewSeverity = ReadinessSeverity;
     View.ConnectionSeverity = ConnectionSeverity;
     View.State = FText::Format(LOCTEXT("StatusHeadline", "{0} · {1}"), ReadinessText, ConnectionText);

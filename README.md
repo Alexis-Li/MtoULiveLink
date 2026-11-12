@@ -139,6 +139,12 @@ on the Binding. All enabled parts pose and display under one connection:
    button carries its reason as a tooltip. Repeated warnings for the same
    session appear once; new errors still interrupt.
 
+While connected, Unreal keeps updating in the background, including when Maya
+is in front. The running status shows **连接期间 UE 在后台保持更新**. Disconnecting
+restores normal background throttling and viewport realtime behavior. Your
+**Use Less CPU when in Background** preference and viewport Realtime setting
+stay unchanged. A minimized editor does not draw its viewport.
+
 ## Animation preview
 
 Use **Animation** for real-time character preview. For a captured animation
@@ -272,6 +278,7 @@ what to restore by hand.
 
 | Problem | What to do |
 | --- | --- |
+| Does Unreal keep updating when Maya is in front? | During a connection, Unreal keeps background editor and viewport updates active. You can leave **Use Less CPU when in Background** enabled. Disconnecting restores your normal background behavior without changing that preference or viewport Realtime. A minimized editor does not draw its viewport. |
 | Maya reports an incomplete MtoU_LiveLink install | The message names the missing file. Extract the whole Maya component again, drag its `install.mel` into a Maya viewport, then restart Maya. |
 | The MtoU button still opens the earlier version after installation | The current Maya session had already loaded the earlier version; restart Maya. |
 | Maya reports 连接失败 · 插件协议版本不匹配 | The dialog lists the plugin and protocol version that the Maya component and Unreal each have loaded; an item the other side did not provide reads 未知（对端未提供）. Install both components again from one release, restart Maya and Unreal, then connect. If Maya only shows the earlier text "Maya 与 UE 插件版本不匹配", its Maya component is older: search Unreal's Output Log for "another protocol version", where one warning names both sides' plugin and protocol versions. |
