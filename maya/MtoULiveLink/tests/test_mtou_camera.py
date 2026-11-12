@@ -26,7 +26,7 @@ def close(test, first, second, places=9, message=""):
 
 
 def camera_payload(**overrides):
-    """One v11 ``camera_time`` camera payload, with both basis and rotation."""
+    """One ``camera_time`` camera payload, with both basis and rotation."""
     payload = {
         "name": "CineCameraActor",
         "location": {"x": 100.0, "y": 200.0, "z": 300.0},
@@ -53,7 +53,7 @@ def camera_payload(**overrides):
 
 
 def gate_payload(**overrides):
-    """One v11 ``camera_time`` resolution gate, with the restore mirror."""
+    """One ``camera_time`` resolution gate, with the restore mirror."""
     payload = {
         "output_resolution": {"x": 1920, "y": 1080},
         "aperture_resolution": {"x": 1920, "y": 1080},
@@ -68,7 +68,7 @@ def gate_payload(**overrides):
 class AxisConversionTest(unittest.TestCase):
 
     def test_known_vectors(self):
-        # The v11 common space: Maya (x, y, z) is Unreal (x, z, y), the same
+        # The common space: Maya (x, y, z) is Unreal (x, z, y), the same
         # mapping the character stream uses.
         self.assertEqual(mtou_camera.ue_to_maya_point(1, 0, 0), (1.0, 0.0, 0.0))
         self.assertEqual(mtou_camera.ue_to_maya_point(0, 1, 0), (0.0, 0.0, 1.0))
@@ -1333,6 +1333,37 @@ class LinkCameraStateTest(LinkCameraHostTestBase):
         self.assertEqual(1, len(residual))
         self.assertIn("defaultResolution.width", residual[0])
         self.assertNotIn(mtou_camera.LINK_CAMERA_NAME, self.cmds.nodes)
+
+    def test_restore_state_writes_each_changed_gate_plug_once_in_apply_order(self):
+        state = self.camera.capture_state()
+        self.camera.apply(camera_payload(), gate_payload(pixel_aspect_ratio=2.0))
+        self.cmds.writes[:] = []
+        self.assertEqual([], self.camera.restore_state(state))
+        self.assertEqual([960, 540, 1.0, 1.7777777777777777], self.cmds.gate)
+        self.assertEqual(
+            ["defaultResolution.width", "defaultResolution.height",
+             "defaultResolution.pixelAspect", "defaultResolution.deviceAspectRatio"],
+            [write[1] for write in self.cmds.writes
+             if write[0] == "setAttr" and write[1] in mtou_camera.RESOLUTION_PLUGS])
+
+    def test_restore_state_does_not_report_a_locked_gate_plug_that_was_never_changed(self):
+        state = self.camera.capture_state()
+        self.cmds.locked.add("defaultResolution.width")
+        self.cmds.locked.add("defaultResolution.deviceAspectRatio")
+        self.assertEqual([], self.camera.restore_state(state))
+        self.assertEqual([], self.cmds.writes)
+        self.assertEqual([960, 540, 1.0, 1.7777777777777777], self.cmds.gate)
+
+    def test_restore_state_reports_only_the_gate_plugs_it_cannot_put_back(self):
+        state = self.camera.capture_state()
+        self.camera.apply(camera_payload(), gate_payload())
+        # The locked height was changed by linkage; the locked width was not.
+        self.cmds.gate[0] = 960
+        self.cmds.locked.update(("defaultResolution.width", "defaultResolution.height"))
+        residual = self.camera.restore_state(state)
+        self.assertEqual(1, len(residual))
+        self.assertIn("defaultResolution.height", residual[0])
+        self.assertEqual([960, 1080, 1.0, 1.7777777777777777], self.cmds.gate)
 
     def test_restore_state_reports_a_panel_it_cannot_put_back(self):
         self.cmds.panels = ["modelPanel4"]

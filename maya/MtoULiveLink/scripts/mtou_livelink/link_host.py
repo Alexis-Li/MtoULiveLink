@@ -7,7 +7,9 @@
 Maya call it needs: capturing the state linkage must restore, applying one
 camera/time target, sampling the objects, and reporting what the host really
 did. Keeping the Maya calls here lets the state machine stay host-free and
-testable, and keeps one place responsible for the restore order.
+testable, and keeps one place responsible for the restore order. The camera
+adapter owns the resolution gate it writes (capture and restore); this adapter
+owns the time and playback state.
 """
 
 from .mayaapi import cmds, om
@@ -61,7 +63,6 @@ class MayaLinkageHost(object):
         state = {
             "time": self._current_time(),
             "playback": self._playback_state(),
-            "gate": self._resolution_gate(),
             "camera": self._camera_adapter().capture_state(),
             "scene": self._scene_identity(),
         }
@@ -93,10 +94,6 @@ class MayaLinkageHost(object):
                 residual.append("camera: {0}".format(entry))
         except Exception as exc:
             residual.append("camera: {0}".format(exc))
-        try:
-            self._restore_resolution_gate(state.get("gate"))
-        except Exception as exc:
-            residual.append("gate: {0}".format(exc))
         try:
             self._restore_playback_state(state.get("playback"))
         except Exception as exc:
@@ -142,11 +139,6 @@ class MayaLinkageHost(object):
                 "curves": list(frame.curves),
             })
         return rows
-
-    def stale_reference(self, anchor):
-        """Why the scene reference does not fit the linkage anchor, or None."""
-        from . import reference
-        return reference.stale_reference(anchor)
 
     def set_origin_frame(self, frame):
         self._origin = float(frame)
@@ -246,27 +238,3 @@ class MayaLinkageHost(object):
         if not state.get("playing", False):
             cmds.play(state=False)
         self._set_time(state.get("current"))
-
-    def _resolution_gate(self):
-        return {
-            "width": int(cmds.getAttr("defaultResolution.width")),
-            "height": int(cmds.getAttr("defaultResolution.height")),
-            "device_aspect_ratio": float(
-                cmds.getAttr("defaultResolution.deviceAspectRatio")),
-            "pixel_aspect_ratio": float(
-                cmds.getAttr("defaultResolution.pixelAspect")),
-        }
-
-    def _restore_resolution_gate(self, state):
-        if not state:
-            return
-        for name, value in (("width", state.get("width")),
-                            ("height", state.get("height"))):
-            if value is not None:
-                cmds.setAttr("defaultResolution." + name, int(value))
-        if state.get("device_aspect_ratio") is not None:
-            cmds.setAttr("defaultResolution.deviceAspectRatio",
-                         float(state["device_aspect_ratio"]))
-        if state.get("pixel_aspect_ratio") is not None:
-            cmds.setAttr("defaultResolution.pixelAspect",
-                         float(state["pixel_aspect_ratio"]))

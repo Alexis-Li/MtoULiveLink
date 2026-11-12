@@ -14,9 +14,6 @@ struct FMtoUHelloMessage;
 struct FMtoUModeMessage;
 struct FMtoULeaveLinkageMessage;
 struct FMtoUPoseGroupMessage;
-struct FMtoUReferenceResultMessage;
-struct FMtoUReferenceRemovedMessage;
-struct FMtoUReferenceQueryMessage;
 struct FMtoURemoveObjectMessage;
 struct FMtoUAppliedComponent;
 
@@ -115,10 +112,18 @@ public:
     /**
      * One TCP connection became the current session. The greeting is answered
      * before any object is negotiated, so this only establishes the identity
-     * the later messages must repeat.
+     * the later messages must repeat. Writers an earlier session still
+     * borrowed are handed back first, and what could not be handed back is
+     * reported to this session (RECOVERY_REFUSED), never dropped.
      */
     void BeginSession(int32 SessionId);
-    /** The connection ended; every borrowed resource is restored. */
+    /**
+     * The connection ended; every borrowed resource is restored and the
+     * session identity (id, set, revisions, mode and control) is cleared, so
+     * nothing that names the ended session is answered or entered any more.
+     * What could not be restored stays in the view as RECOVERY_REFUSED instead
+     * of a successful disconnect.
+     */
     void EndSession();
 
     /** The greeting arrived; the answer names the current pairing and space. */
@@ -129,12 +134,6 @@ public:
     void NoteLeaveLinkage(const FMtoULeaveLinkageMessage& Message, double NowSeconds);
     /** One complete pose sample answering one target. */
     void StagePoseGroup(const FMtoUPoseGroupMessage& Message, double NowSeconds);
-    /** The local handoff import, swap or removal finished. */
-    void NoteReferenceResult(const FMtoUReferenceResultMessage& Message);
-    /** The user removed the tool-owned reference container. */
-    void NoteReferenceRemoved(const FMtoUReferenceRemovedMessage& Message);
-    /** Maya asks for the handoff of a scope the user selected in Unreal. */
-    void NoteReferenceQuery(const FMtoUReferenceQueryMessage& Message);
 
     /** The negotiated identity of the streaming session: its primary object. */
     void NegotiateIdentity(const FString& ObjectId, int32 SetRevision, int32 SpaceRevision);
@@ -191,20 +190,23 @@ public:
     bool RequestLeave(const FString& Target, int32 ModeRevision,
         FString& OutError, FString& OutErrorCode);
 
-    /** Tell Maya that a finished reference handoff is available to import. */
-    bool OfferReferenceHandoff(const FString& TransferId, const FString& Directory,
-        const FString& ManifestDigest, const TSharedPtr<FJsonObject>& Scope,
-        int64 ByteCount, int32 ObjectCount, int32 TriangleCount, FString& OutError);
-
     /** Reply sink installed by the owning source; runs on the Game Thread. */
     TFunction<void(TArray<uint8>&&, bool bControl)> SendReply;
 
     /**
-     * True once a failed restore ended the session; the source consumes the
-     * request and closes the connection through the shared termination
-     * boundary. Consuming never loses a second request.
+     * Asked before an entry borrows any writer, whether the editor or Maya
+     * started it; false refuses the entry with the code and reason it names.
+     * The owning source installs it: Cached Playback that still holds the
+     * connection refuses linkage with CACHE_NOT_CLEARED.
      */
-    bool ConsumeSessionEndRequest();
+    TFunction<bool(FString& OutCode, FString& OutError)> EntryGuard;
+
+    /**
+     * The session a failed restore asked to end, or 0 when none did; the
+     * source consumes the request and ends exactly that session through the
+     * shared termination boundary. Consuming never loses a second request.
+     */
+    int32 ConsumeSessionEndRequest();
 
 private:
     static double Now();
@@ -213,14 +215,14 @@ private:
     static constexpr double CameraPumpIntervalSeconds = 0.01;
 
     void SendControl(TArray<uint8>&& Packet);
-    /** Whether an error reply is a real failure or normal scheduling noise. */
-    enum class ESendErrorKind : uint8
-    {
-        Failure,
-        Scheduling
-    };
+    /**
+     * Answer with an `error` of the given kind (see `ESendErrorKind`). An error
+     * that refuses a parsed group passes it, so the reply carries its
+     * `eval_id` and `sample_serial`.
+     */
     void SendError(const FString& Code, const FString& Message, const FString& Details,
-        ESendErrorKind Kind = ESendErrorKind::Failure);
+        ESendErrorKind Kind = ESendErrorKind::Failure,
+        const FMtoUPoseGroupMessage* RefusedGroup = nullptr);
     void PublishView();
     void UpdateConvergence(double NowSeconds);
     void PumpCameraTargets(double NowSeconds, bool bAskEditorNow);
@@ -241,6 +243,9 @@ private:
     void EndForLostTakeover(const FString& Reason,
         const TCHAR* Code = TEXT("TARGET_UNKNOWN"));
     void RestoreBorrowedWriters(FString& OutResidual);
+    // Writes what a restore could not hand back into the view and, the first
+    // time it is reported, into the log.
+    void ReportResidual(const FString& Residual, const TCHAR* Context);
 
     FMtoULinkageHooks Hooks;
 
@@ -265,6 +270,8 @@ private:
     /** The last takeover's writers were handed back; the residual when they were not. */
     bool bWritersRestored = false;
     FString RecoveryResidual;
+    /** RecoveryResidual was written to the log already. */
+    bool bResidualLogged = false;
     /** Groups refused as scheduling noise (cancelled, superseded, older mode). */
     int32 RefusedGroupCount = 0;
     FString RefusedCode;
@@ -277,7 +284,8 @@ private:
     int32 FrameSerial = 0;
     int32 IssueSerial = 0;
     double LastPumpSeconds = 0.0;
-    bool bSessionEndRequested = false;
+    // The session whose failed restore asked to end it; 0 when none did.
+    int32 SessionEndRequestedFor = 0;
 
     TArray<FMtoUStagedPoseGroup> Staged;
     FString LastAppliedEvalId;
@@ -298,7 +306,4 @@ private:
     bool bIssueOpen = false;
     /** Its record in `Stats.Records`, or INDEX_NONE once records are full. */
     int32 IssuedRecord = INDEX_NONE;
-    // Transfers this session offered, so a reference result for a handoff that
-    // was never offered cannot report an outcome.
-    TSet<FString> OfferedTransferIds;
 };

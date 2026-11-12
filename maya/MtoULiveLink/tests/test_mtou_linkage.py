@@ -13,6 +13,7 @@ if str(SCRIPTS) not in sys.path:
 from mtou_livelink import config as mtou_config  # noqa: E402
 from mtou_livelink import linkage as mtou_linkage  # noqa: E402
 from mtou_livelink import protocol as mtou_protocol  # noqa: E402
+from mtou_livelink import timecontrol as mtou_timecontrol  # noqa: E402
 
 
 def camera_time(eval_id="seq@10+0/cam#c1", eval_serial=1, transport_serial=1,
@@ -63,8 +64,7 @@ IDENTITY_ANCHOR = {"location_cm": [0.0, 0.0, 0.0],
                    "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
 
 
-def mode_state(mode_revision, mode=mtou_config.LINKAGE_MODE, session_id=5, detail="",
-               anchor=IDENTITY_ANCHOR):
+def mode_state(mode_revision, mode=mtou_config.LINKAGE_MODE, session_id=5, detail=""):
     message = {
         "type": "mode_state", "session_id": session_id,
         "mode_revision": mode_revision, "mode": mode,
@@ -73,7 +73,7 @@ def mode_state(mode_revision, mode=mtou_config.LINKAGE_MODE, session_id=5, detai
         "detail": detail,
     }
     if mode == mtou_config.LINKAGE_MODE:
-        message["anchor"] = anchor
+        message["anchor"] = IDENTITY_ANCHOR
     return message
 
 
@@ -85,12 +85,6 @@ class FakeHost(object):
         self.sampled = 0
         self.restore_residual = ()
         self.apply_error = None
-        self.stale = None
-        self.anchors = []
-
-    def stale_reference(self, anchor):
-        self.anchors.append(anchor)
-        return self.stale
 
     def capture_state(self):
         self.captured += 1
@@ -117,6 +111,7 @@ class FakeSession(object):
     def __init__(self):
         self.messages = []
         self.ready = True
+        self.time_control = mtou_timecontrol.TimeControl()
 
     def submit_linkage(self, message):
         self.messages.append(message)
@@ -550,54 +545,6 @@ class RemoteTransitionTests(unittest.TestCase):
         self.assertEqual(1, len(host.restored))
         self.assertFalse(instance.takeover_held())
 
-    def test_a_stale_reference_refuses_unreals_transition_before_maya_changes(self):
-        instance, host, session, events = build()
-        host.stale = "the reference was placed for another anchor"
-        moved = {"location_cm": [60.0, 40.0, 0.0],
-                 "rotation_deg": {"roll": 3.0, "pitch": -4.0, "yaw": 37.0}}
-        self.assertEqual("enter", instance.note_mode_state(mode_state(1, anchor=moved)))
-        with self.assertRaises(mtou_linkage.LinkageError) as raised:
-            instance.enter(1, remote=True, anchor=moved)
-        self.assertEqual("REFERENCE_STALE", raised.exception.code)
-        self.assertEqual([moved], host.anchors)
-        self.assertEqual(0, host.captured)
-        self.assertFalse(instance.is_active)
-        # Unreal hears the failed transition and hands its writers back.
-        self.assertEqual(
-            [("mode", "realtime", 1, "failed")],
-            [(m["type"], m["mode"], m["mode_revision"], m["transition"])
-             for m in session.messages])
-        self.assertEqual("REFERENCE_STALE", events[-1].diagnostic["code"])
-
-    def test_a_stale_reference_fails_the_linkage_maya_started_at_confirmation(self):
-        instance, host, session, events = build()
-        instance.enter(2)
-        host.stale = "the reference was placed for another anchor"
-        self.assertEqual("refused", instance.note_mode_state(mode_state(2)))
-        self.assertFalse(instance.is_active)
-        self.assertEqual(1, len(host.restored))
-        self.assertFalse(instance.takeover_held())
-        self.assertEqual(
-            [("mode", "linkage", "ready"), ("mode", "realtime", "failed")],
-            [(m["type"], m["mode"], m["transition"]) for m in session.messages])
-        self.assertEqual("REFERENCE_STALE", events[-1].diagnostic["code"])
-
-    def test_a_current_reference_lets_the_confirmation_through(self):
-        instance, host, session, events = build()
-        instance.enter(2)
-        self.assertEqual("confirmed", instance.note_mode_state(mode_state(2)))
-        self.assertEqual([IDENTITY_ANCHOR], host.anchors)
-        self.assertTrue(instance.is_active)
-
-    def test_an_echo_after_the_confirmation_checks_nothing_again(self):
-        instance, host, session, events = build()
-        instance.enter(2)
-        instance.note_mode_state(mode_state(2))
-        host.stale = "moved after the confirmation"
-        self.assertEqual("noted", instance.note_mode_state(mode_state(1)))
-        self.assertTrue(instance.is_active)
-        self.assertEqual(1, len(host.anchors))
-
     def test_a_stale_realtime_statement_keeps_the_confirmed_linkage(self):
         instance, host, session, events = build()
         instance.enter(3)
@@ -754,6 +701,89 @@ class LinkageProtocolTests(unittest.TestCase):
                                             "unreal", "done")
         with self.assertRaises(ValueError):
             mtou_protocol.make_leave_linkage_message(5, 1, "pause")
+
+    def test_a_mode_message_names_a_legal_mode_control_transition(self):
+        legal = (
+            (mtou_config.LINKAGE_MODE, mtou_config.CONTROL_UNREAL, "ready"),
+            (mtou_config.REALTIME_MODE, mtou_config.CONTROL_MAYA, "ready"),
+            (mtou_config.REALTIME_MODE, mtou_config.CONTROL_MAYA, "failed"),
+        )
+        for mode, control, transition in legal:
+            with self.subTest(mode=mode, control=control, transition=transition):
+                message = mtou_protocol.make_mode_message(
+                    5, 1, mode, control, transition, "detail")
+                self.assertEqual(
+                    (mode, control, transition),
+                    (message["mode"], message["control"], message["transition"]))
+        illegal = (
+            (mtou_config.REALTIME_MODE, mtou_config.CONTROL_UNREAL, "ready"),
+            (mtou_config.REALTIME_MODE, mtou_config.CONTROL_UNREAL, "failed"),
+            (mtou_config.LINKAGE_MODE, mtou_config.CONTROL_MAYA, "ready"),
+            (mtou_config.LINKAGE_MODE, mtou_config.CONTROL_MAYA, "failed"),
+            (mtou_config.LINKAGE_MODE, mtou_config.CONTROL_UNREAL, "failed"),
+            (mtou_config.CACHED_MODE, mtou_config.CONTROL_MAYA, "ready"),
+            (mtou_config.CACHED_MODE, mtou_config.CONTROL_UNREAL, "ready"),
+        )
+        for mode, control, transition in illegal:
+            with self.subTest(mode=mode, control=control, transition=transition):
+                with self.assertRaises(ValueError):
+                    mtou_protocol.make_mode_message(5, 1, mode, control, transition)
+
+    def test_the_wire_modes_exclude_cached_and_pair_with_one_control(self):
+        self.assertEqual(
+            (mtou_config.REALTIME_MODE, mtou_config.LINKAGE_MODE), mtou_config.MODES)
+        self.assertEqual(mtou_config.CONTROL_MAYA,
+                         mtou_config.MODE_CONTROL[mtou_config.REALTIME_MODE])
+        self.assertEqual(mtou_config.CONTROL_UNREAL,
+                         mtou_config.MODE_CONTROL[mtou_config.LINKAGE_MODE])
+        # The panel's cached state is internal and never a wire value.
+        self.assertNotIn(mtou_config.CACHED_MODE, mtou_config.MODES)
+
+    def test_a_mode_state_names_a_legal_mode_control_pair(self):
+        anchor = {"location_cm": [0.0, 0.0, 0.0],
+                  "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
+
+        def statement(mode, control, **extra):
+            message = {"type": "mode_state", "session_id": 1, "mode_revision": 2,
+                       "mode": mode, "control": control, "detail": ""}
+            message.update(extra)
+            return message
+
+        mtou_protocol.validate_reply(statement("realtime", "maya"))
+        mtou_protocol.validate_reply(statement("linkage", "unreal", anchor=anchor))
+        for mode, control in (("realtime", "unreal"), ("linkage", "maya"),
+                              ("cached", "maya"), ("cached", "unreal")):
+            with self.subTest(mode=mode, control=control):
+                with self.assertRaises(ValueError):
+                    mtou_protocol.validate_reply(
+                        statement(mode, control, anchor=anchor))
+
+    def test_an_error_names_its_kind_by_one_of_two_values(self):
+        base = {"type": "error", "code": "EVAL_STALE", "message": "m", "details": "d"}
+        for kind in (None, "scheduling", "failure"):
+            reply = dict(base) if kind is None else dict(base, kind=kind)
+            self.assertEqual(reply, mtou_protocol.validate_reply(reply))
+        for bad in ("fatal", "", "Scheduling", 7, True, None, ["failure"]):
+            with self.subTest(kind=bad):
+                with self.assertRaisesRegex(ValueError, "kind"):
+                    mtou_protocol.validate_reply(dict(base, kind=bad))
+        identity = dict(base, kind="scheduling", eval_id="seq@1", sample_serial=3)
+        self.assertEqual(identity, mtou_protocol.validate_reply(identity))
+        for field, value in (("eval_id", 3), ("sample_serial", "3"),
+                             ("sample_serial", 1.5), ("sample_serial", True)):
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(ValueError):
+                    mtou_protocol.validate_reply(
+                        dict(base, kind="scheduling", **{field: value}))
+
+    def test_retired_messages_have_no_constructor_and_are_not_replies(self):
+        for name in ("make_cache_play_message", "make_cache_stop_message",
+                     "make_reference_query_message"):
+            self.assertFalse(hasattr(mtou_protocol, name), name)
+        with self.assertRaisesRegex(ValueError, "type"):
+            mtou_protocol.validate_reply({
+                "type": "reference_query", "session_id": 1, "transfer_id": "t",
+                "scope": {"level": "L"}})
 
     def test_hello_message_declares_units_and_capabilities(self):
         message = mtou_protocol.make_hello_message(

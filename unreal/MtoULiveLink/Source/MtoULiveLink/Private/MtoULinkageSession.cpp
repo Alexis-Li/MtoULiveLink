@@ -12,6 +12,8 @@
 
 #include "Engine/World.h"
 
+DEFINE_LOG_CATEGORY_STATIC(LogMtoULinkageSession, Log, All);
+
 namespace
 {
 /** One placed Editor-world Binding actor is the only pairable target. */
@@ -53,10 +55,6 @@ bool MtoUSharesAnchor(const FTransform& Primary, const FTransform& Other, FStrin
     return false;
 }
 
-// The one module-level hooks seam. A source that starts before the editor
-// registered adopts them, so the registration order never loses a hook.
-static FMtoULinkageHooks GMtoULinkageHooks;
-
 // One listener serves the Editor session, so the pairing registry is
 // process-wide: the user's pairing of a Binding actor with one Maya object id
 // survives a source restart (module reload, automation host) instead of
@@ -73,7 +71,6 @@ double FMtoULinkageSession::Now()
 void FMtoULinkageSession::SetHooks(const FMtoULinkageHooks& InHooks)
 {
     Hooks = InHooks;
-    GMtoULinkageHooks = InHooks;
 }
 
 bool FMtoULinkageSession::PairTarget(
@@ -250,6 +247,18 @@ FMtoULinkageView FMtoULinkageSession::GetView() const
 
 void FMtoULinkageSession::BeginSession(int32 InSessionId)
 {
+    // A session that ended without handing everything back (a greeting-phase
+    // end, a restore that failed) must neither lose the writers it still
+    // borrows nor hide what it could not restore from the session that
+    // replaces it: hand the writers back first, reset the state, and only then
+    // write the residual, or the reset would erase the report.
+    if (bWritersBorrowed)
+    {
+        FString Restored;
+        RestoreBorrowedWriters(Restored);
+    }
+    const FString Leftover = RecoveryResidual;
+
     SessionId = InSessionId;
     ResetScheduleStats();
     bIssueOpen = false;
@@ -265,14 +274,13 @@ void FMtoULinkageSession::BeginSession(int32 InSessionId)
     ModeRevision = 0;
     bTransitioning = false;
     bWritersBorrowed = false;
-    bSessionEndRequested = false;
+    SessionEndRequestedFor = 0;
     Issued.Reset();
     Desired.Reset();
     TransportSerial = 0;
     FrameSerial = 0;
     LastPumpSeconds = 0.0;
     Staged.Reset();
-    OfferedTransferIds.Reset();
     LastAppliedEvalId.Reset();
     LastAppliedSampleSerial = 0;
     bLastApplied = false;
@@ -288,6 +296,10 @@ void FMtoULinkageSession::BeginSession(int32 InSessionId)
     RefusedMessage.Reset();
     Error.Reset();
     ErrorCode.Reset();
+    if (!Leftover.IsEmpty())
+    {
+        ReportResidual(Leftover, TEXT("A new session began"));
+    }
     PublishView();
 }
 
@@ -295,17 +307,22 @@ void FMtoULinkageSession::EndSession()
 {
     // The takeover is keyed on what is actually borrowed, not on the mode: a
     // disconnect while the writers are muted must hand them back even when the
-    // session already returned to realtime.
+    // session already returned to realtime. A restore that failed earlier
+    // (RestoreBorrowedWriters clears the borrowed flag either way) left its
+    // residual behind, and it counts here as well.
     if (bWritersBorrowed)
     {
-        FString Residual;
-        RestoreBorrowedWriters(Residual);
-        if (!Residual.IsEmpty())
-        {
-            Error = Residual;
-            ErrorCode = TEXT("RECOVERY_REFUSED");
-        }
+        FString Restored;
+        RestoreBorrowedWriters(Restored);
     }
+    const FString Residual = RecoveryResidual;
+
+    // The session's identity goes with it: nothing that names it can be
+    // answered or entered any more, and a request to end it is spent.
+    SessionId = 0;
+    SetRevision = 0;
+    SpaceRevision = 1;
+    SessionObjectId.Reset();
     Mode = TEXT("realtime");
     Control = TEXT("maya");
     ModeRevision = 0;
@@ -318,8 +335,35 @@ void FMtoULinkageSession::EndSession()
     SetObjectIds.Reset();
     PendingRemovalObjectId.Reset();
     PendingRemovalSetRevision = 0;
-    Detail = TEXT("Disconnected; the linkage takeover was restored.");
+    SessionEndRequestedFor = 0;
+    if (Residual.IsEmpty())
+    {
+        Detail = TEXT("Disconnected; the linkage takeover was restored.");
+    }
+    else
+    {
+        // Never claim a restore that did not happen: the residual stays in the
+        // view for the operator.
+        ReportResidual(Residual, TEXT("Disconnected"));
+    }
     PublishView();
+}
+
+void FMtoULinkageSession::ReportResidual(const FString& Residual, const TCHAR* Context)
+{
+    RecoveryResidual = Residual;
+    bWritersRestored = false;
+    Error = Residual;
+    ErrorCode = TEXT("RECOVERY_REFUSED");
+    Detail = FString::Printf(
+        TEXT("%s; the linkage takeover could not be restored: %s"), Context, *Residual);
+    // A residual is logged once, when the restore that left it is reported; the
+    // sessions that carry the report on do not repeat it.
+    if (!bResidualLogged)
+    {
+        bResidualLogged = true;
+        UE_LOG(LogMtoULinkageSession, Warning, TEXT("%s"), *Detail);
+    }
 }
 
 void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello)
@@ -349,7 +393,6 @@ void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello)
     const TSharedRef<FJsonObject> Anchor = MakeShared<FJsonObject>();
     SendControl(FMtoUProtocol::EncodeHelloAck(
         SessionId,
-        true,
         true,
         true,
         true,
@@ -602,7 +645,7 @@ void FMtoULinkageSession::NoteMode(const FMtoUModeMessage& Message, double NowSe
         return;
     }
 
-    // realtime or cached: Maya returned to its own time authority.
+    // realtime: Maya returned to its own time authority.
     if (Message.ModeRevision <= ModeRevision)
     {
         SendError(
@@ -612,8 +655,10 @@ void FMtoULinkageSession::NoteMode(const FMtoUModeMessage& Message, double NowSe
         return;
     }
     ModeRevision = Message.ModeRevision;
-    Mode = Message.Mode;
-    Control = Message.Control.IsEmpty() ? TEXT("maya") : Message.Control;
+    // The parser admits only (realtime, maya) here; the control is Maya's
+    // whatever the message carried.
+    Mode = TEXT("realtime");
+    Control = TEXT("maya");
     Issued.Reset();
     Desired.Reset();
     Staged.Reset();
@@ -693,7 +738,7 @@ void FMtoULinkageSession::NoteLeaveLinkage(
         Detail = Residual;
         Error = Residual;
         ErrorCode = TEXT("RECOVERY_REFUSED");
-        bSessionEndRequested = true;
+        SessionEndRequestedFor = SessionId;
     }
     else
     {
@@ -715,7 +760,8 @@ void FMtoULinkageSession::StagePoseGroup(const FMtoUPoseGroupMessage& Message, d
         SendError(
             TEXT("RESOURCE_LIMIT"),
             TEXT("Linkage groups arrive faster than the game thread applies them."),
-            FString::Printf(TEXT("staged groups %d"), Staged.Num()));
+            FString::Printf(TEXT("staged groups %d"), Staged.Num()),
+            ESendErrorKind::Failure, &Message);
         return;
     }
     FMtoUStagedPoseGroup& StagedGroup = Staged.AddDefaulted_GetRef();
@@ -737,20 +783,22 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
             SendError(
                 TEXT("INVALID_MESSAGE"),
                 TEXT("A group named another session."),
-                FString::Printf(TEXT("group session %d, current session %d"), Group.SessionId, SessionId));
+                FString::Printf(TEXT("group session %d, current session %d"), Group.SessionId, SessionId),
+                ESendErrorKind::Failure, &Group);
             continue;
         }
         if (bTransitioning)
         {
             // The gate is closed during a transition: nothing is accepted for
-            // the previous revision and the last complete display stays. Maya
-            // counts this details form, and the older-revision one below, as
-            // scheduling instead of a conflict dialog (linkage.py).
+            // the previous revision and the last complete display stays. The
+            // refusal is scheduling, so Maya counts it instead of reporting a
+            // conflict; this and the three gates below that mark themselves
+            // scheduling are the only ones that do.
             SendError(
                 TEXT("MODE_CONFLICT"),
                 TEXT("A group arrived during a time-control transition."),
                 FString::Printf(TEXT("target mode revision %d"), Group.ModeRevision),
-                ESendErrorKind::Scheduling);
+                ESendErrorKind::Scheduling, &Group);
             continue;
         }
         if (Mode != TEXT("linkage"))
@@ -759,7 +807,7 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 TEXT("LINKAGE_NOT_ACTIVE"),
                 TEXT("A group arrived while another host owns time."),
                 FString::Printf(TEXT("current mode %s"), *Mode),
-                ESendErrorKind::Scheduling);
+                ESendErrorKind::Scheduling, &Group);
             continue;
         }
         if (Group.ModeRevision != ModeRevision)
@@ -770,7 +818,8 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 TEXT("MODE_CONFLICT"),
                 TEXT("A group named a different mode revision."),
                 FString::Printf(TEXT("group mode revision %d, current %d"), Group.ModeRevision, ModeRevision),
-                Group.ModeRevision < ModeRevision ? ESendErrorKind::Scheduling : ESendErrorKind::Failure);
+                Group.ModeRevision < ModeRevision ? ESendErrorKind::Scheduling : ESendErrorKind::Failure,
+                &Group);
             continue;
         }
         if (Group.SetRevision != SetRevision)
@@ -781,7 +830,8 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 TEXT("SET_REVISION_STALE"),
                 TEXT("A group named an older object set."),
                 FString::Printf(TEXT("group set revision %d, current %d"), Group.SetRevision, SetRevision),
-                Group.SetRevision < SetRevision ? ESendErrorKind::Scheduling : ESendErrorKind::Failure);
+                Group.SetRevision < SetRevision ? ESendErrorKind::Scheduling : ESendErrorKind::Failure,
+                &Group);
             continue;
         }
         {
@@ -818,7 +868,7 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 SendError(
                     TEXT("INVALID_MESSAGE"),
                     TEXT("A group does not carry exactly the negotiated object set."),
-                    SetMismatch);
+                    SetMismatch, ESendErrorKind::Failure, &Group);
                 continue;
             }
         }
@@ -827,7 +877,8 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
             SendError(
                 TEXT("SPACE_REVISION_STALE"),
                 TEXT("A group named an older common space."),
-                FString::Printf(TEXT("group space revision %d, current %d"), Group.SpaceRevision, SpaceRevision));
+                FString::Printf(TEXT("group space revision %d, current %d"), Group.SpaceRevision, SpaceRevision),
+                ESendErrorKind::Failure, &Group);
             continue;
         }
         if (!Issued.IsSet() || Issued->EvalId != Group.EvalId)
@@ -840,20 +891,7 @@ bool FMtoULinkageSession::TakeNextStagedGroup(FMtoUPoseGroupMessage& OutMessage)
                 FString::Printf(TEXT("group eval %s, current target %s"),
                     *Group.EvalId,
                     Issued.IsSet() ? *Issued->EvalId : TEXT("none")),
-                ESendErrorKind::Scheduling);
-            continue;
-        }
-        if (Group.EvalId == LastAppliedEvalId && Group.SampleSerial <= LastAppliedSampleSerial)
-        {
-            // A repeated publication of an already applied sample is refused.
-            SendError(
-                TEXT("INVALID_MESSAGE"),
-                TEXT("A group repeated a publication that was already applied."),
-                FString::Printf(
-                    TEXT("group sample_serial %d, applied sample_serial %d for eval %s"),
-                    Group.SampleSerial,
-                    LastAppliedSampleSerial,
-                    *Group.EvalId));
+                ESendErrorKind::Scheduling, &Group);
             continue;
         }
         OutMessage = MoveTemp(Entry.Message);
@@ -1058,7 +1096,7 @@ bool FMtoULinkageSession::RequestLeave(
         Detail = Residual;
         Error = Residual;
         ErrorCode = TEXT("RECOVERY_REFUSED");
-        bSessionEndRequested = true;
+        SessionEndRequestedFor = SessionId;
     }
     else
     {
@@ -1069,148 +1107,6 @@ bool FMtoULinkageSession::RequestLeave(
     SendControl(FMtoUProtocol::EncodeModeState(SessionId, ModeRevision, Mode, Control, Detail));
     PublishView();
     return true;
-}
-
-bool FMtoULinkageSession::OfferReferenceHandoff(
-    const FString& TransferId,
-    const FString& Directory,
-    const FString& ManifestDigest,
-    const TSharedPtr<FJsonObject>& Scope,
-    int64 ByteCount,
-    int32 ObjectCount,
-    int32 TriangleCount,
-    FString& OutError)
-{
-    OutError.Reset();
-    if (SessionId == 0)
-    {
-        OutError = TEXT("A reference handoff requires an active streaming session.");
-        return false;
-    }
-    if (TransferId.IsEmpty() || Directory.IsEmpty() || !Scope.IsValid())
-    {
-        OutError = TEXT("A reference handoff requires a transfer id, a directory and a scope.");
-        Error = OutError;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return false;
-    }
-    if (ManifestDigest.IsEmpty())
-    {
-        // The digest is what lets Maya verify the directory content, so an
-        // empty one cannot describe a handoff.
-        OutError = TEXT("A reference handoff requires a non-empty manifest_digest.");
-        Error = OutError;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return false;
-    }
-    if (ByteCount < 1)
-    {
-        OutError = TEXT(
-            "A reference handoff requires a positive byte count: the offer's "
-            "'bytes' field must be a positive integer.");
-        Error = OutError;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return false;
-    }
-    if (ObjectCount < 0 || TriangleCount < 0)
-    {
-        OutError = TEXT("A reference handoff cannot name a negative object or triangle count.");
-        Error = OutError;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return false;
-    }
-    if (ByteCount > FMtoUProtocol::MaxReferenceBytes
-        || ObjectCount > FMtoUProtocol::MaxReferenceObjects
-        || TriangleCount > FMtoUProtocol::MaxReferenceTriangles)
-    {
-        OutError = FString::Printf(
-            TEXT("The handoff exceeds a frozen reference budget (%lld bytes, %d objects, %d triangles)."),
-            ByteCount,
-            ObjectCount,
-            TriangleCount);
-        Error = OutError;
-        ErrorCode = TEXT("REFERENCE_OVER_BUDGET");
-        PublishView();
-        return false;
-    }
-
-    SendControl(FMtoUProtocol::EncodeReferenceOffer(
-        SessionId, TransferId, Directory, ManifestDigest, Scope, SpaceRevision,
-        ByteCount, ObjectCount, TriangleCount));
-    OfferedTransferIds.Add(TransferId);
-    Detail = FString::Printf(TEXT("Offered reference handoff %s."), *TransferId);
-    PublishView();
-    return true;
-}
-
-void FMtoULinkageSession::NoteReferenceResult(const FMtoUReferenceResultMessage& Message)
-{
-    if (Message.SessionId != SessionId)
-    {
-        return;
-    }
-    if (Message.TransferId.IsEmpty())
-    {
-        Error = TEXT("A reference result must name its transfer_id.");
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return;
-    }
-    if (!OfferedTransferIds.Contains(Message.TransferId))
-    {
-        // A result for a transfer this session never offered names work that
-        // never started, so it cannot report an outcome.
-        Detail = FString::Printf(
-            TEXT("Reference result names transfer_id '%s', which this session "
-                 "never offered."),
-            *Message.TransferId);
-        Error = Detail;
-        ErrorCode = TEXT("INVALID_MESSAGE");
-        PublishView();
-        return;
-    }
-    Detail = FString::Printf(
-        TEXT("Reference %s %s: %s (%lld objects, %lld triangles, %lld bytes)."),
-        *Message.TransferId,
-        Message.bAccepted ? TEXT("accepted") : TEXT("refused"),
-        *Message.Detail,
-        Message.ObjectCount,
-        Message.TriangleCount,
-        Message.ByteCount);
-    if (!Message.bAccepted)
-    {
-        Error = Message.Detail;
-        // The importer names why it refused the handoff; a fixed code would
-        // report every refusal as a stale space revision.
-        ErrorCode = Message.Code.IsEmpty() ? TEXT("REFERENCE_STALE") : Message.Code;
-    }
-    PublishView();
-}
-
-void FMtoULinkageSession::NoteReferenceRemoved(const FMtoUReferenceRemovedMessage& Message)
-{
-    if (Message.SessionId != SessionId)
-    {
-        return;
-    }
-    Detail = FString::Printf(TEXT("Reference container removed: %s"), *Message.Detail);
-    PublishView();
-}
-
-void FMtoULinkageSession::NoteReferenceQuery(const FMtoUReferenceQueryMessage& Message)
-{
-    if (Message.SessionId != SessionId)
-    {
-        return;
-    }
-    // The Maya side owns the import; the editor answers the query by offering
-    // a handoff of the scope the user selected in Unreal.
-    Detail = FString::Printf(TEXT("Reference query %s for the selected scope."), *Message.TransferId);
-    PublishView();
 }
 
 void FMtoULinkageSession::PumpCameraTargets(double NowSeconds, bool bAskEditorNow)
@@ -1344,6 +1240,15 @@ bool FMtoULinkageSession::BeginTakeover(
         PublishView();
         return false;
     };
+    if (EntryGuard)
+    {
+        FString GuardCode;
+        FString GuardError;
+        if (!EntryGuard(GuardCode, GuardError))
+        {
+            return Refuse(*GuardCode, GuardError);
+        }
+    }
     if (!PendingRemovalObjectId.IsEmpty())
     {
         return Refuse(TEXT("MODE_CONFLICT"),
@@ -1403,6 +1308,13 @@ bool FMtoULinkageSession::BeginTakeover(
     if (Hooks.GetAnchor)
     {
         Hooks.GetAnchor(TakeoverAnchor);
+    }
+    // This takeover answers for its own writers: what an earlier restore could
+    // not hand back, and the error that reported it, stop being open here.
+    if (ErrorCode == TEXT("RECOVERY_REFUSED"))
+    {
+        Error.Reset();
+        ErrorCode.Reset();
     }
     RecoveryResidual.Reset();
     Mode = TEXT("linkage");
@@ -1505,6 +1417,7 @@ void FMtoULinkageSession::RestoreBorrowedWriters(FString& OutResidual)
     }
     bWritersRestored = OutResidual.IsEmpty();
     RecoveryResidual = OutResidual;
+    bResidualLogged = false;
 }
 
 void FMtoULinkageSession::EndIssueRecord(const TCHAR* Outcome, double NowSeconds)
@@ -1588,9 +1501,13 @@ void FMtoULinkageSession::SendControl(TArray<uint8>&& Packet)
 }
 
 void FMtoULinkageSession::SendError(
-    const FString& Code, const FString& Message, const FString& Details, ESendErrorKind Kind)
+    const FString& Code, const FString& Message, const FString& Details, ESendErrorKind Kind,
+    const FMtoUPoseGroupMessage* RefusedGroup)
 {
-    SendControl(FMtoUProtocol::EncodeError(Code, Message, Details));
+    SendControl(FMtoUProtocol::EncodeError(
+        Code, Message, Details, INDEX_NONE, INDEX_NONE, Kind,
+        RefusedGroup ? RefusedGroup->EvalId : FString(),
+        RefusedGroup ? RefusedGroup->SampleSerial : INDEX_NONE));
     if (Kind == ESendErrorKind::Scheduling)
     {
         // Normal while scrubbing or switching mode: the peer hears the refusal,
@@ -1615,11 +1532,11 @@ void FMtoULinkageSession::PublishView()
     }
 }
 
-bool FMtoULinkageSession::ConsumeSessionEndRequest()
+int32 FMtoULinkageSession::ConsumeSessionEndRequest()
 {
-    const bool bRequested = bSessionEndRequested;
-    bSessionEndRequested = false;
-    return bRequested;
+    const int32 Requested = SessionEndRequestedFor;
+    SessionEndRequestedFor = 0;
+    return Requested;
 }
 
 // ---------------------------------------------------------------------------
@@ -1630,7 +1547,6 @@ bool FMtoULinkageSession::ConsumeSessionEndRequest()
 
 void MtoUSetLinkageHooks(const FMtoULinkageHooks& Hooks)
 {
-    GMtoULinkageHooks = Hooks;
     if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
     {
         Source->GetLinkageSession().SetHooks(Hooks);
@@ -1716,6 +1632,15 @@ FMtoULinkageView MtoUGetLinkageView()
     return FMtoULinkageView();
 }
 
+FMtoUTimeControlView MtoUGetTimeControlView()
+{
+    if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
+    {
+        return Source->GetTimeControlView();
+    }
+    return FMtoUTimeControlView();
+}
+
 FMtoULinkageScheduleStats MtoUGetLinkageScheduleStats()
 {
     if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
@@ -1740,8 +1665,7 @@ bool MtoURequestLinkageEnter(int32 ModeRevision, FString& OutError)
 {
     if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
     {
-        FString ErrorCode;
-        return Source->GetLinkageSession().RequestEnter(ModeRevision, OutError, ErrorCode);
+        return Source->RequestLinkageEnter(ModeRevision, OutError);
     }
     OutError = TEXT("The MtoU_LiveLink listener is unavailable.");
     return false;
@@ -1754,26 +1678,6 @@ bool MtoURequestLinkageLeave(
     {
         FString ErrorCode;
         return Source->GetLinkageSession().RequestLeave(Target, ModeRevision, OutError, ErrorCode);
-    }
-    OutError = TEXT("The MtoU_LiveLink listener is unavailable.");
-    return false;
-}
-
-bool MtoUOfferReferenceHandoff(
-    const FString& TransferId,
-    const FString& Directory,
-    const FString& ManifestDigest,
-    const TSharedPtr<FJsonObject>& Scope,
-    int64 ByteCount,
-    int32 ObjectCount,
-    int32 TriangleCount,
-    FString& OutError)
-{
-    if (const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin())
-    {
-        return Source->GetLinkageSession().OfferReferenceHandoff(
-            TransferId, Directory, ManifestDigest, Scope, ByteCount, ObjectCount,
-            TriangleCount, OutError);
     }
     OutError = TEXT("The MtoU_LiveLink listener is unavailable.");
     return false;

@@ -5,7 +5,7 @@
 证据见[项目历史](history/README.md)。本文只记录现行范围、仍然有效的产品约束
 和下一阶段的候选方向；候选项立项时在 Issue 中定义需求与验收。
 
-## 1.0.0 范围
+## 现行范围
 
 - **实时预览**：Animation 与 Model 两种工作流，单角色或主角色加一个独立
   骨骼对象（道具或副角色），Additional Parts 属于同一角色的组成。
@@ -15,27 +15,29 @@
 - **镜头联动**：Maya 跟随 UE Level Sequence 的时间与求值相机，互斥时间控制，
   整组姿势一致显示，两端都可返回实时或结束预览
   （[ADR 0014](adr/0014-one-time-authority-and-staged-pose-groups.md)）。
-- **场景参考**：UE 按显式关卡范围导出静态参考几何，Maya 校验后导入，
-  与角色和相机处于同一共同空间。
 
-宿主：Windows 64 位，Maya 2024（Maya 2022.4 支持），stock UE 5.7.4 与
-Topia 5.7.4；仅编辑器内使用。线上协议见 [protocol/](../protocol/README.md)。
+宿主：Windows 64 位，Maya 2024（Maya 2022.4 支持），stock UE 5.7.4；
+仅编辑器内使用。线上协议见 [protocol/](../protocol/README.md)。
 
 ## 持续约束
 
 - 最终效果以 UE 场景和镜头为准，动画在 Maya 制作；沿用既有导出、导入与
-  Sequencer 组装流程，产品不创建动画或预览资产。
+  Sequencer 组装流程，产品不在 UE 中创建动画或预览资产。
 - 独立道具和不同骨架角色不套用 Additional Parts，也不自动重定向。
-- 场景参考范围必须显式，不能悄悄改成 Actor 选择；不交付图片数据，允许材质
-  分配及外部图片路径引用。
-- 共同原点／摆放同时适用于相机、参考和动画对象。
+- 镜头导入独立于连接与角色：UE 把 Level Sequence 的镜头导出为镜头包，Maya
+  据此生成相机，画框参数尽量与 UE 一致，无法对应的列为近似项；相机以 UE
+  为准，单向导入（[#40](https://github.com/Alexis-Li/MtoULiveLink/issues/40)）。
+- 附带场景由用户勾选内容，结果与引擎「导出选中项」后在 Maya 默认导入一致，
+  产品不追加坐标变换；不交付图片数据，允许材质分配及外部图片路径引用。
+- 镜头与场景使用 UE 关卡世界坐标。连接时 Maya 世界坐标默认也对应关卡世界
+  坐标，Binding 的摆放不改变角色与相机位置；以 Binding 为原点只在用户选择时
+  使用（[#41](https://github.com/Alexis-Li/MtoULiveLink/issues/41)）。
 - 真实输入变化结束流（[ADR 0002](adr/0002-end-streaming-when-preview-inputs-change.md)）；
   预览网格保持瞬态（[ADR 0001](adr/0001-keep-preview-meshes-transient.md)）。
 
 ## 已知限制
 
-- Maya 2022.4 只做过安装与语法检查，未运行交互联动验收；Topia 5.7.4 的
-  支持声明来自[插件构建与加载验收](history/topia-engine-acceptance.md)。
+- Maya 2022.4 只做过安装与语法检查，未运行交互联动验收。
 - 从含中文的路径编译 UE 插件源码会失败（MSVC 无法打开 PCH），属于工具链
   限制；已编译的插件可在此类工程中加载。
 - 宿主验收由脚本驱动真实 Maya GUI 与 UnrealEditor；交互视口逐帧观测、生产

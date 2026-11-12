@@ -225,6 +225,14 @@ name Maya and the Unreal cache clock; linkage names Unreal. The authority is
 stated by both adapters and refuses work that contradicts it.
 _Avoid_: Time owner, clock owner, master
 
+**Time-control lease**:
+On the Maya side, the claim Cached Playback or linkage holds on one connection's
+time control. While it is held, live sampling pauses, delivery is ordered and
+the results of that state reach the holder; only the holder's release returns
+to realtime. Linkage is refused while the cache holds the connection, which
+lasts until Unreal confirms the clear that released the cache's lease.
+_Avoid_: Mode flag, pause token
+
 **Camera/time target**:
 One evaluated request from Unreal: the sequence time, the cut, the evaluated
 camera and the output gate, identified by an evaluation identity that changes
@@ -248,15 +256,3 @@ The state in which nothing is in flight, no newer target waits, and the last
 group was applied. Lagging but complete groups are shown as lagging and are not
 convergence.
 _Avoid_: Sync, lock, in-step
-
-**Scene reference handoff**:
-One finished Unreal export of an explicitly selected level scope, delivered as
-files beside a manifest with a transfer identity, a content digest and the space
-revision it belongs to. Maya imports it only after validating it.
-_Avoid_: Reference download, level copy, geometry stream
-
-**Reference container**:
-The single tool-owned Maya transform and namespace that holds the imported scene
-reference, marked with its ownership value so an update can replace, roll back
-or remove only what the tool created.
-_Avoid_: Reference group, import root, staging scene

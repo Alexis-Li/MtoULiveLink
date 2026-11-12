@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "protocol_version": 11,
+  "protocol_version": 12,
   "cases": [
     {
       "id": "framing-partial-packet",
@@ -107,7 +107,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -169,7 +169,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -232,7 +232,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -294,7 +294,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -356,7 +356,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -421,7 +421,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -487,7 +487,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -553,7 +553,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -620,7 +620,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "model",
         "blendshapes_enabled": true,
@@ -687,7 +687,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "model",
         "blendshapes_enabled": false,
@@ -733,7 +733,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "model",
         "blendshapes_enabled": true,
@@ -777,7 +777,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -1057,7 +1057,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "blendshapes_enabled": true,
         "bones": [
@@ -1103,7 +1103,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": 7,
         "blendshapes_enabled": true,
@@ -1150,7 +1150,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "preview",
         "blendshapes_enabled": true,
@@ -1197,7 +1197,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "model",
         "bones": [
@@ -1243,7 +1243,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "model",
         "blendshapes_enabled": "true",
@@ -1290,7 +1290,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -1336,7 +1336,7 @@
       ],
       "payload": {
         "type": "init",
-        "version": 11,
+        "version": 12,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -2786,10 +2786,9 @@
       }
     },
     {
-      "id": "cache-play-basic",
-      "operation": "cache_play",
+      "id": "retired-cache-play-is-unknown",
+      "operation": "unknown_type",
       "applies_to": [
-        "maya",
         "unreal"
       ],
       "payload": {
@@ -2797,84 +2796,11 @@
         "play_id": 1
       },
       "expected": {
-        "accepted": true,
-        "close": false
-      }
-    },
-    {
-      "id": "cache-play-id-zero",
-      "operation": "cache_play",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "cache_play",
-        "play_id": 0
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "CACHE_METADATA_INVALID",
-        "close": false,
-        "keywords": [
-          "play_id"
-        ]
-      },
-      "session": "fresh"
-    },
-    {
-      "id": "cache-play-missing-play-id",
-      "operation": "cache_play",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "cache_play"
-      },
-      "expected": {
         "accepted": false,
         "error_code": "INVALID_MESSAGE",
         "close": true,
         "keywords": [
-          "play_id"
-        ]
-      }
-    },
-    {
-      "id": "cache-play-id-non-integer",
-      "operation": "cache_play",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "cache_play",
-        "play_id": 1.5
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "INVALID_MESSAGE",
-        "close": true,
-        "keywords": [
-          "play_id"
-        ]
-      }
-    },
-    {
-      "id": "cache-play-without-cache-is-not-ready",
-      "operation": "cache_play",
-      "applies_to": [
-        "unreal"
-      ],
-      "session": "fresh",
-      "payload": {
-        "type": "cache_play",
-        "play_id": 1
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "CACHE_NOT_READY",
-        "close": false,
-        "keywords": [
-          "cache"
+          "type"
         ]
       }
     },
@@ -2906,33 +2832,21 @@
       }
     },
     {
-      "id": "cache-stop-basic",
-      "operation": "cache_stop",
+      "id": "retired-cache-stop-is-unknown",
+      "operation": "unknown_type",
       "applies_to": [
-        "maya",
         "unreal"
       ],
       "payload": {
         "type": "cache_stop"
       },
       "expected": {
-        "accepted": true,
-        "close": false
-      }
-    },
-    {
-      "id": "cache-stop-idempotent-without-playback",
-      "operation": "cache_stop",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "cache_stop",
-        "future": true
-      },
-      "expected": {
-        "accepted": true,
-        "close": false
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "type"
+        ]
       }
     },
     {
@@ -4171,7 +4085,7 @@
         "type": "error",
         "code": "CACHE_NOT_READY",
         "message": "No completed cache is buffered for playback.",
-        "details": "cache_play arrived before cache_ready"
+        "details": "Playback was requested before cache_ready"
       },
       "expected": {
         "accepted": true,
@@ -4254,6 +4168,48 @@
       }
     },
     {
+      "id": "error-scheduling-refusal-is-accepted",
+      "operation": "error",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "EVAL_STALE",
+        "message": "A group answered a cancelled or superseded target.",
+        "details": "group eval eval-1000-0-camera-a, current target eval-1001-0-camera-a",
+        "kind": "scheduling",
+        "eval_id": "eval-1000-0-camera-a",
+        "sample_serial": 1
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "error-failure-kind-is-accepted",
+      "operation": "error",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "SET_REVISION_STALE",
+        "message": "A group named an older object set.",
+        "details": "group set revision 3, current 2",
+        "kind": "failure",
+        "eval_id": "eval-1000-0-camera-a",
+        "sample_serial": 2
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
       "id": "error-missing-details",
       "operation": "error",
       "applies_to": [
@@ -4291,6 +4247,174 @@
         "close": true,
         "keywords": [
           "code"
+        ]
+      }
+    },
+    {
+      "id": "error-unknown-kind-refused",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "EVAL_STALE",
+        "message": "Bad kind",
+        "details": "kind fatal is not defined",
+        "kind": "fatal"
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "kind"
+        ]
+      }
+    },
+    {
+      "id": "error-kind-wrong-type-refused",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "EVAL_STALE",
+        "message": "Bad kind",
+        "details": "kind is a number",
+        "kind": 7
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "kind"
+        ]
+      }
+    },
+    {
+      "id": "error-version-mismatch-names-refusing-release",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "PROTOCOL_VERSION_MISMATCH",
+        "message": "Unsupported protocol version; expected 20.",
+        "details": "Unsupported protocol version; expected 20.",
+        "kind": "failure",
+        "protocol_version": 20,
+        "plugin_version": "2.0.0"
+      },
+      "expected": {
+        "accepted": true,
+        "close": true,
+        "peer_versions": {
+          "plugin_version": "2.0.0",
+          "protocol_version": 20
+        }
+      }
+    },
+    {
+      "id": "error-version-mismatch-from-earlier-peer",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "PROTOCOL_VERSION_MISMATCH",
+        "message": "Unsupported protocol version; expected 11.",
+        "details": "Unsupported protocol version; expected 11."
+      },
+      "expected": {
+        "accepted": true,
+        "close": true,
+        "peer_versions": {
+          "plugin_version": null,
+          "protocol_version": null
+        }
+      }
+    },
+    {
+      "id": "error-version-mismatch-same-plugin-other-protocol",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "PROTOCOL_VERSION_MISMATCH",
+        "message": "Unsupported protocol version; expected 11.",
+        "details": "Unsupported protocol version; expected 11.",
+        "kind": "failure",
+        "protocol_version": 11,
+        "plugin_version": "1.0.0"
+      },
+      "expected": {
+        "accepted": true,
+        "close": true,
+        "peer_versions": {
+          "plugin_version": "1.0.0",
+          "protocol_version": 11
+        }
+      }
+    },
+    {
+      "id": "error-version-mismatch-plugin-version-wrong-type-refused",
+      "operation": "error",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "error",
+        "code": "PROTOCOL_VERSION_MISMATCH",
+        "message": "Unsupported protocol version; expected 20.",
+        "details": "Unsupported protocol version; expected 20.",
+        "kind": "failure",
+        "protocol_version": 20,
+        "plugin_version": 2
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "plugin_version"
+        ]
+      }
+    },
+    {
+      "id": "mixed-version-v11-hello-refused",
+      "operation": "hello",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 11,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        }
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "PROTOCOL_VERSION_MISMATCH",
+        "close": true,
+        "keywords": [
+          "version"
         ]
       }
     },
@@ -4344,6 +4468,47 @@
       "payload": {
         "type": "init",
         "version": 10,
+        "revision": 7,
+        "workflow": "animation",
+        "blendshapes_enabled": true,
+        "bones": [
+          [
+            "root",
+            -1,
+            [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0,
+              1,
+              1,
+              1,
+              1
+            ]
+          ]
+        ],
+        "curves": []
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "PROTOCOL_VERSION_MISMATCH",
+        "close": true,
+        "keywords": [
+          "version"
+        ]
+      }
+    },
+    {
+      "id": "mixed-version-v11-init-refused",
+      "operation": "init",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "init",
+        "version": 11,
         "revision": 7,
         "workflow": "animation",
         "blendshapes_enabled": true,
@@ -4449,6 +4614,42 @@
       }
     },
     {
+      "id": "mixed-version-v11-frame-refused",
+      "operation": "frame",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "frame",
+        "version": 11,
+        "transforms": [
+          [
+            1,
+            2,
+            3,
+            0,
+            0,
+            0,
+            1,
+            1,
+            1,
+            1
+          ]
+        ],
+        "curves": [
+          0.5
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "PROTOCOL_VERSION_MISMATCH",
+        "close": true,
+        "keywords": [
+          "version"
+        ]
+      }
+    },
+    {
       "id": "mixed-version-v9-cache-begin-refused",
       "operation": "cache_begin",
       "applies_to": [
@@ -4501,6 +4702,32 @@
       }
     },
     {
+      "id": "mixed-version-v11-cache-begin-refused",
+      "operation": "cache_begin",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "cache_begin",
+        "version": 11,
+        "upload_id": 3,
+        "revision": 7,
+        "fps": 30.0,
+        "start_frame": 1,
+        "end_frame": 3,
+        "frame_count": 3,
+        "payload_size": 96
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "PROTOCOL_VERSION_MISMATCH",
+        "close": false,
+        "keywords": [
+          "version"
+        ]
+      }
+    },
+    {
       "id": "mixed-version-v9-hello-ack-refused",
       "operation": "hello_ack",
       "applies_to": [
@@ -4512,7 +4739,6 @@
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -4550,7 +4776,11 @@
         "close": true,
         "keywords": [
           "version"
-        ]
+        ],
+        "peer_versions": {
+          "plugin_version": null,
+          "protocol_version": 9
+        }
       }
     },
     {
@@ -4565,7 +4795,6 @@
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -4603,7 +4832,69 @@
         "close": true,
         "keywords": [
           "version"
+        ],
+        "peer_versions": {
+          "plugin_version": null,
+          "protocol_version": 10
+        }
+      }
+    },
+    {
+      "id": "mixed-version-v11-hello-ack-refused",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 11,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [
+          {
+            "object_id": "character",
+            "kind": "skeletal_mesh",
+            "binding_path": "/Game/Characters/Hero",
+            "generation": "1"
+          }
         ]
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "PROTOCOL_VERSION_MISMATCH",
+        "close": true,
+        "keywords": [
+          "version"
+        ],
+        "peer_versions": {
+          "plugin_version": null,
+          "protocol_version": 11
+        }
       }
     },
     {
@@ -4614,7 +4905,7 @@
       ],
       "payload": {
         "type": "hello",
-        "version": 11,
+        "version": 12,
         "host": "maya",
         "maya_version": "2024",
         "scene": {
@@ -4624,7 +4915,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -4642,7 +4932,7 @@
       ],
       "payload": {
         "type": "hello",
-        "version": 11,
+        "version": 12,
         "host": "maya",
         "maya_version": "2024",
         "scene": {
@@ -4652,7 +4942,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -4674,7 +4963,7 @@
       ],
       "payload": {
         "type": "hello",
-        "version": 11,
+        "version": 12,
         "host": "maya",
         "maya_version": "2024",
         "scene": {
@@ -4684,7 +4973,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -4707,7 +4995,7 @@
       ],
       "payload": {
         "type": "hello",
-        "version": 11,
+        "version": 12,
         "host": "maya",
         "maya_version": "2024",
         "scene": {
@@ -4717,7 +5005,6 @@
         },
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         }
@@ -4733,6 +5020,67 @@
       }
     },
     {
+      "id": "hello-plugin-version-is-accepted",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": "0.0.0-example"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "hello-plugin-version-wrong-type-refused",
+      "operation": "hello",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": 7
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "plugin_version"
+        ]
+      }
+    },
+    {
       "id": "hello-ack-paired-target-is-accepted",
       "operation": "hello_ack",
       "applies_to": [
@@ -4740,11 +5088,10 @@
       ],
       "payload": {
         "type": "hello_ack",
-        "version": 11,
+        "version": 12,
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -4791,11 +5138,10 @@
       ],
       "payload": {
         "type": "hello_ack",
-        "version": 11,
+        "version": 12,
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -4835,11 +5181,10 @@
       ],
       "payload": {
         "type": "hello_ack",
-        "version": 11,
+        "version": 12,
         "session_id": 4242,
         "capabilities": {
           "linkage": true,
-          "reference": true,
           "cache": true,
           "model": true
         },
@@ -4888,7 +5233,8 @@
       "id": "mode-linkage-control-handover-is-accepted",
       "operation": "mode",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
         "type": "mode",
@@ -4915,7 +5261,8 @@
       "id": "mode-realtime-is-accepted",
       "operation": "mode",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
         "type": "mode",
@@ -4932,10 +5279,11 @@
       }
     },
     {
-      "id": "mode-cached-is-accepted",
+      "id": "mode-cached-refused",
       "operation": "mode",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
         "type": "mode",
@@ -4944,18 +5292,23 @@
         "mode": "cached",
         "control": "maya",
         "transition": "ready",
-        "detail": "Maya replays the uploaded cache"
+        "detail": "Cached is not a wire mode"
       },
       "expected": {
-        "accepted": true,
-        "close": false
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": false,
+        "keywords": [
+          "mode"
+        ]
       }
     },
     {
       "id": "mode-unknown-value-refused",
       "operation": "mode",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
         "type": "mode",
@@ -4979,7 +5332,8 @@
       "id": "mode-unknown-control-owner-refused",
       "operation": "mode",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
         "type": "mode",
@@ -4996,6 +5350,81 @@
         "close": false,
         "keywords": [
           "control"
+        ]
+      }
+    },
+    {
+      "id": "mode-realtime-with-unreal-control-refused",
+      "operation": "mode",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "mode",
+        "session_id": 4242,
+        "mode_revision": 4,
+        "mode": "realtime",
+        "control": "unreal",
+        "transition": "ready",
+        "detail": ""
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": false,
+        "keywords": [
+          "control"
+        ]
+      }
+    },
+    {
+      "id": "mode-linkage-with-maya-control-refused",
+      "operation": "mode",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "mode",
+        "session_id": 4242,
+        "mode_revision": 4,
+        "mode": "linkage",
+        "control": "maya",
+        "transition": "ready",
+        "detail": ""
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": false,
+        "keywords": [
+          "control"
+        ]
+      }
+    },
+    {
+      "id": "mode-linkage-failed-refused",
+      "operation": "mode",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "mode",
+        "session_id": 4242,
+        "mode_revision": 4,
+        "mode": "linkage",
+        "control": "unreal",
+        "transition": "failed",
+        "detail": "Maya cannot follow"
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": false,
+        "keywords": [
+          "transition"
         ]
       }
     },
@@ -5084,6 +5513,108 @@
         "close": true,
         "keywords": [
           "mode"
+        ]
+      },
+      "linkage": {
+        "session_id": 4242,
+        "mode_revision": 4,
+        "set_revision": 1,
+        "space_revision": 1,
+        "active": true
+      }
+    },
+    {
+      "id": "mode-state-cached-refused",
+      "operation": "mode_state",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "mode_state",
+        "session_id": 4242,
+        "mode_revision": 4,
+        "mode": "cached",
+        "control": "maya",
+        "detail": "illegal pairing"
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "mode"
+        ]
+      },
+      "linkage": {
+        "session_id": 4242,
+        "mode_revision": 4,
+        "set_revision": 1,
+        "space_revision": 1,
+        "active": true
+      }
+    },
+    {
+      "id": "mode-state-realtime-with-unreal-control-refused",
+      "operation": "mode_state",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "mode_state",
+        "session_id": 4242,
+        "mode_revision": 4,
+        "mode": "realtime",
+        "control": "unreal",
+        "detail": "illegal pairing"
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "control"
+        ]
+      },
+      "linkage": {
+        "session_id": 4242,
+        "mode_revision": 4,
+        "set_revision": 1,
+        "space_revision": 1,
+        "active": true
+      }
+    },
+    {
+      "id": "mode-state-linkage-with-maya-control-refused",
+      "operation": "mode_state",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "mode_state",
+        "session_id": 4242,
+        "mode_revision": 4,
+        "mode": "linkage",
+        "control": "maya",
+        "detail": "illegal pairing",
+        "anchor": {
+          "location_cm": [
+            60.0,
+            40.0,
+            0.0
+          ],
+          "rotation_deg": {
+            "roll": 3.0,
+            "pitch": -4.0,
+            "yaw": 37.0
+          }
+        }
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "control"
         ]
       },
       "linkage": {
@@ -5996,11 +6527,12 @@
       ],
       "expected": {
         "accepted": false,
-        "error_code": "INVALID_MESSAGE",
+        "error_code": "EVAL_STALE",
         "close": false,
         "keywords": [
-          "sample_serial"
-        ]
+          "eval"
+        ],
+        "kind": "scheduling"
       }
     },
     {
@@ -6199,7 +6731,8 @@
         "close": false,
         "keywords": [
           "secondary"
-        ]
+        ],
+        "kind": "failure"
       }
     },
     {
@@ -6374,7 +6907,8 @@
         "close": false,
         "keywords": [
           "secondary"
-        ]
+        ],
+        "kind": "failure"
       }
     },
     {
@@ -6531,7 +7065,8 @@
         "close": false,
         "keywords": [
           "set revision"
-        ]
+        ],
+        "kind": "failure"
       }
     },
     {
@@ -6585,7 +7120,8 @@
         "close": false,
         "keywords": [
           "space revision"
-        ]
+        ],
+        "kind": "failure"
       }
     },
     {
@@ -6639,7 +7175,8 @@
         "close": false,
         "keywords": [
           "mode revision"
-        ]
+        ],
+        "kind": "scheduling"
       }
     },
     {
@@ -6797,245 +7334,11 @@
       }
     },
     {
-      "id": "reference-offer-is-accepted",
-      "operation": "reference_offer",
+      "id": "retired-reference-query-is-unknown",
+      "operation": "unknown_type",
       "applies_to": [
-        "maya"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "directory": "handoff/transfer-1",
-        "manifest_digest": "sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
-        "scope": {
-          "level": "/Game/Maps/Lvl",
-          "sublevels": [
-            "/Game/Maps/Lvl/Sub"
-          ],
-          "completeness": "complete",
-          "unloaded_sublevels": []
-        },
-        "space_revision": 1,
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 2048
-        }
-      },
-      "expected": {
-        "accepted": true,
-        "close": false
-      },
-      "linkage": {
-        "session_id": 4242,
-        "mode_revision": 4,
-        "set_revision": 1,
-        "space_revision": 1,
-        "active": true
-      }
-    },
-    {
-      "id": "reference-offer-stale-space-revision-refused",
-      "operation": "reference_offer",
-      "applies_to": [
-        "maya"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "directory": "handoff/transfer-1",
-        "manifest_digest": "sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
-        "scope": {
-          "level": "/Game/Maps/Lvl",
-          "sublevels": [
-            "/Game/Maps/Lvl/Sub"
-          ],
-          "completeness": "complete",
-          "unloaded_sublevels": []
-        },
-        "space_revision": 0,
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 2048
-        }
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "SPACE_REVISION_STALE",
-        "close": false,
-        "keywords": [
-          "space revision"
-        ]
-      },
-      "linkage": {
-        "session_id": 4242,
-        "mode_revision": 4,
-        "set_revision": 1,
-        "space_revision": 1,
-        "active": true
-      }
-    },
-    {
-      "id": "reference-offer-empty-digest-refused",
-      "operation": "reference_offer",
-      "applies_to": [
+        "maya",
         "unreal"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "directory": "handoff/transfer-1",
-        "manifest_digest": "",
-        "scope": {
-          "level": "/Game/Maps/Lvl",
-          "sublevels": [
-            "/Game/Maps/Lvl/Sub"
-          ],
-          "completeness": "complete",
-          "unloaded_sublevels": []
-        },
-        "space_revision": 1,
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 2048
-        }
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "INVALID_MESSAGE",
-        "close": false,
-        "keywords": [
-          "manifest_digest"
-        ]
-      },
-      "linkage": {
-        "session_id": 4242,
-        "mode_revision": 4,
-        "set_revision": 1,
-        "space_revision": 1,
-        "active": true
-      }
-    },
-    {
-      "id": "reference-offer-non-positive-byte-count-refused",
-      "operation": "reference_offer",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "directory": "handoff/transfer-1",
-        "manifest_digest": "sha256:6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b",
-        "scope": {
-          "level": "/Game/Maps/Lvl",
-          "sublevels": [
-            "/Game/Maps/Lvl/Sub"
-          ],
-          "completeness": "complete",
-          "unloaded_sublevels": []
-        },
-        "space_revision": 1,
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 0
-        }
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "INVALID_MESSAGE",
-        "close": false,
-        "keywords": [
-          "bytes"
-        ]
-      },
-      "linkage": {
-        "session_id": 4242,
-        "mode_revision": 4,
-        "set_revision": 1,
-        "space_revision": 1,
-        "active": true
-      }
-    },
-    {
-      "id": "reference-result-unknown-transfer-id-refused",
-      "operation": "reference_result",
-      "applies_to": [
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_result",
-        "session_id": 4242,
-        "transfer_id": "",
-        "accepted": false,
-        "detail": "no handoff of that identity",
-        "counts": {
-          "objects": 0,
-          "triangles": 0,
-          "bytes": 0
-        }
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "INVALID_MESSAGE",
-        "close": false,
-        "keywords": [
-          "transfer_id"
-        ]
-      }
-    },
-    {
-      "id": "reference-result-import-is-accepted",
-      "operation": "reference_result",
-      "applies_to": [
-        "maya"
-      ],
-      "payload": {
-        "type": "reference_result",
-        "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "accepted": true,
-        "detail": "imported 12 objects",
-        "counts": {
-          "objects": 12,
-          "triangles": 4500,
-          "bytes": 2048
-        },
-        "container": "MtoU_UE_SceneRef"
-      },
-      "expected": {
-        "accepted": true,
-        "close": false
-      }
-    },
-    {
-      "id": "reference-removed-is-accepted",
-      "operation": "reference_removed",
-      "applies_to": [
-        "maya"
-      ],
-      "payload": {
-        "type": "reference_removed",
-        "session_id": 4242,
-        "detail": "user removed the tool-owned container"
-      },
-      "expected": {
-        "accepted": true,
-        "close": false
-      }
-    },
-    {
-      "id": "reference-query-scope-is-accepted",
-      "operation": "reference_query",
-      "applies_to": [
-        "maya"
       ],
       "payload": {
         "type": "reference_query",
@@ -7049,30 +7352,74 @@
         }
       },
       "expected": {
-        "accepted": true,
-        "close": false
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "type"
+        ]
       }
     },
     {
-      "id": "reference-query-missing-level-refused",
-      "operation": "reference_query",
+      "id": "retired-reference-offer-is-unknown",
+      "operation": "unknown_type",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
-        "type": "reference_query",
+        "type": "reference_offer",
         "session_id": 4242,
-        "transfer_id": "transfer-1",
-        "scope": {
-          "sublevels": []
-        }
+        "transfer_id": "transfer-1"
       },
       "expected": {
         "accepted": false,
         "error_code": "INVALID_MESSAGE",
-        "close": false,
+        "close": true,
         "keywords": [
-          "level"
+          "type"
+        ]
+      }
+    },
+    {
+      "id": "retired-reference-result-is-unknown",
+      "operation": "unknown_type",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "reference_result",
+        "session_id": 4242,
+        "transfer_id": "transfer-1",
+        "accepted": true
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "type"
+        ]
+      }
+    },
+    {
+      "id": "retired-reference-removed-is-unknown",
+      "operation": "unknown_type",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "reference_removed",
+        "session_id": 4242
+      },
+      "expected": {
+        "accepted": false,
+        "error_code": "INVALID_MESSAGE",
+        "close": true,
+        "keywords": [
+          "type"
         ]
       }
     },
@@ -7096,52 +7443,6 @@
         "close": false,
         "keywords": [
           "max_linkage_group_bytes"
-        ]
-      }
-    },
-    {
-      "id": "resource-reference-objects-over-budget",
-      "operation": "resource_limit",
-      "applies_to": [
-        "maya",
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "budget": "max_reference_objects",
-        "measured": 20001,
-        "limit": 20000,
-        "unit": "objects"
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "RESOURCE_LIMIT",
-        "close": false,
-        "keywords": [
-          "max_reference_objects"
-        ]
-      }
-    },
-    {
-      "id": "resource-reference-triangles-over-budget",
-      "operation": "resource_limit",
-      "applies_to": [
-        "maya",
-        "unreal"
-      ],
-      "payload": {
-        "type": "reference_offer",
-        "budget": "max_reference_triangles",
-        "measured": 20000001,
-        "limit": 20000000,
-        "unit": "triangles"
-      },
-      "expected": {
-        "accepted": false,
-        "error_code": "RESOURCE_LIMIT",
-        "close": false,
-        "keywords": [
-          "max_reference_triangles"
         ]
       }
     },
@@ -7365,9 +7666,6 @@
     "max_message_bytes": 33554432,
     "max_linkage_group_bytes": 33554432,
     "max_control_queue": 16,
-    "max_reference_bytes": 268435456,
-    "max_reference_objects": 20000,
-    "max_reference_triangles": 20000000,
     "max_cache_payload_bytes": 1073741824,
     "max_cache_frame_count": 20000,
     "max_set_objects": 2

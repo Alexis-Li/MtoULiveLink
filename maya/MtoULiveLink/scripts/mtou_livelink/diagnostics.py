@@ -3,12 +3,13 @@
 # Licensed under the GPL with additional terms; see NOTICE.
 """Stable diagnostic codes and the diagnostics derived from Unreal replies."""
 
+from . import config
 from .config import WORKFLOW_MODEL
 
 DIAGNOSTICS = {
     "PROTOCOL_VERSION_MISMATCH": (
-        "Maya 与 UE 插件版本不匹配",
-        "请安装同一版本的 Maya 和 UE MtoU_LiveLink 组件。"),
+        "连接失败 · 插件协议版本不匹配",
+        "请从同一发行包重新安装两端组件，重启 Maya 和 UE 后连接。"),
     "UNREAL_NOT_REACHABLE": (
         "无法连接 Unreal Editor",
         "请确认 UE 已启动、MtoU_LiveLink 已启用，并检查 54321 端口。"),
@@ -95,36 +96,20 @@ DIAGNOSTICS = {
         "缓存播放尚未清除，无法进入镜头联动",
         "请先返回实时预览并等待缓存清除完成，再进入镜头联动。"),
     "SET_REVISION_STALE": (
-        "UE 使用了过期的角色集合",
+        "角色集合修订号不一致",
         "请重新连接以建立当前集合，再进入镜头联动。"),
     "SPACE_REVISION_STALE": (
         "UE 使用了过期的共同空间",
-        "请重新建立会话与参考；仅修改版本号不能继续联动。"),
+        "请重新建立会话；仅修改版本号不能继续联动。"),
     "EVAL_STALE": (
         "UE 已取消该求值目标",
         "无需处理；工具会丢弃该结果并使用最新目标。"),
     "RESOURCE_LIMIT": (
         "镜头联动数据超出冻结的资源上限",
         "请缩短角色或减少 BlendShape 后重试；预算在测试前固定，不会为通过而放宽。"),
-    "REFERENCE_STALE": (
-        "场景参考属于旧的共同空间",
-        "请在 UE 中重新导出当前范围的参考并导入；"
-        "不需要参考时，在场景参考窗口点击“移除参考”后再进入镜头联动。"),
-    "REFERENCE_DIGEST_MISMATCH": (
-        "场景参考交接内容与摘要不符",
-        "请确认交接目录未被修改，并在 UE 中重新导出。"),
-    "REFERENCE_IMAGE_DATA": (
-        "场景参考交接包含图片数据",
-        "请在 UE 中关闭贴图烘焙后重新导出；工具不导入图片数据。"),
-    "REFERENCE_OVER_BUDGET": (
-        "场景参考超出冻结的规模上限",
-        "请缩小 UE 参考范围或减少对象后再导出。"),
-    "CONTAINER_NOT_OWNED": (
-        "参考容器名称被场景中的其他节点占用",
-        "请重命名该节点或删除它，然后重试导入；工具只删除自己创建的容器。"),
     "RECOVERY_REFUSED": (
-        "上一次参考更新的恢复被拒绝",
-        "请按诊断详情中的残留路径处理后重试；旧参考会保留在原地。"),
+        "之前的状态无法安全恢复",
+        "请按诊断详情中的残留路径处理后重试。"),
     "LINKAGE_NOT_ACTIVE": (
         "当前不在镜头联动状态",
         "请先进入镜头联动，再执行该操作。"),
@@ -146,6 +131,12 @@ DIAGNOSTICS = {
     "CACHED_UPLOAD_FAILED": (
         "缓存上传被 Unreal 拒绝",
         "Unreal 已丢弃未完成的缓存；请重新捕获后再试。"),
+    "CACHED_UPLOAD_TIMEOUT": (
+        "Unreal 未在时限内确认缓存上传",
+        "已恢复实时预览，连接保持。请再次切换到“缓存播放”并点击“捕获并上传”。"),
+    "CACHED_UPLOAD_INTERRUPTED": (
+        "缓存上传未能完成",
+        "已恢复实时预览，连接保持。请再次切换到“缓存播放”并点击“捕获并上传”。"),
     "CACHED_PLAYBACK_FRAME_LIMIT": (
         "缓存帧数超过 20,000 上限，捕获已提前停止",
         "请缩短 Playback Range 后重新捕获。"),
@@ -179,6 +170,68 @@ def make_diagnostic(code, message="", solution="", details=""):
         "message": message or summary,
         "details": details or message,
     }
+
+
+# What a version line shows for an item the peer did not provide.
+UNKNOWN_PEER_VALUE = "未知（对端未提供）"
+
+
+def _peer_text(value):
+    return UNKNOWN_PEER_VALUE if value is None else str(value)
+
+
+def _version_line(side, plugin_version, protocol_version):
+    return "{0} · 插件 {1}，协议 {2}".format(
+        side, _peer_text(plugin_version), _peer_text(protocol_version))
+
+
+def version_mismatch_diagnostic(plugin_version=None, protocol_version=None,
+                                message="", details=""):
+    """The diagnostic of a refused protocol version.
+
+    Maya's own side is the release that is loaded; Unreal's side is what the
+    peer provided, ``None`` for an item it did not provide. The text of the
+    peer's ``details`` is kept as it is but never read for a version.
+    """
+    diagnostic = make_diagnostic(
+        "PROTOCOL_VERSION_MISMATCH", message, details=details)
+    unreal = {"plugin_version": plugin_version, "protocol_version": protocol_version}
+    maya = {"plugin_version": config.__version__,
+            "protocol_version": config.PROTOCOL_VERSION}
+    diagnostic["versions"] = {"maya": maya, "unreal": unreal}
+    diagnostic["version_lines"] = [
+        _version_line("Maya 端", maya["plugin_version"], maya["protocol_version"]),
+        _version_line("UE 端", plugin_version, protocol_version),
+    ]
+    return diagnostic
+
+
+def error_reply_diagnostic(reply):
+    """The diagnostic of one Unreal ``error``: the same when it is reported and
+    when it later ends the connection, so the panel recognises a repeat."""
+    message = reply.get("message") or "Unreal 报告了一个错误。"
+    code = reply.get("code") or "STREAM_INTERRUPTED"
+    details = reply.get("details") or message
+    if code == "PROTOCOL_VERSION_MISMATCH":
+        plugin_version = reply.get("plugin_version")
+        protocol_version = reply.get("protocol_version")
+        return version_mismatch_diagnostic(
+            plugin_version if isinstance(plugin_version, str) else None,
+            protocol_version if (isinstance(protocol_version, int)
+                                 and not isinstance(protocol_version, bool)) else None,
+            message, details)
+    return make_diagnostic(code, message, details=details)
+
+
+def diagnostic_dialog_text(diagnostic):
+    """The text of a problem dialog: the summary, the version lines when the
+    diagnostic has them, then what to do, separated by blank lines."""
+    parts = [diagnostic["summary"]]
+    lines = diagnostic.get("version_lines")
+    if lines:
+        parts.append("\n".join(lines))
+    parts.append(diagnostic["solution"])
+    return "\n\n".join(parts)
 
 
 def blendshape_warning_from_reply(reply):

@@ -9,7 +9,6 @@
 
 #include "MtoULinkage.h"
 #include "MtoULinkageEditor.h"
-#include "MtoUSceneRefExport.h"
 
 #include "DetailCategoryBuilder.h"
 #include "DetailLayoutBuilder.h"
@@ -34,20 +33,6 @@
 namespace
 {
 using ESeverity = FMtoULiveLinkActorDetails::ESeverity;
-
-/** The user-facing meaning of the source's connection status string. */
-enum class EMtoUConnectionState : uint8
-{
-    /** No session yet, or a status this build does not classify. */
-    Unknown,
-    Disconnected,
-    Validating,
-    NotReady,
-    Partial,
-    BoneOnly,
-    Connected,
-    Error
-};
 
 FText StageText(EMtoUPreviewBuildStage Stage)
 {
@@ -155,46 +140,6 @@ FText CacheSummaryText(const FMtoUCachePlaybackView& View)
         FText::FromString(FString::FromInt(View.FrameCount)));
 }
 
-EMtoUConnectionState ClassifyConnection(const FString& Status)
-{
-    // The strings are the ones MtoULiveLinkSource publishes for the actor; a
-    // status this build does not know keeps its raw text in the headline.
-    if (Status.IsEmpty())
-    {
-        return EMtoUConnectionState::Unknown;
-    }
-    if (Status.StartsWith(TEXT("Error"))
-        || Status.StartsWith(TEXT("Preview morph mismatch")))
-    {
-        return EMtoUConnectionState::Error;
-    }
-    if (Status.StartsWith(TEXT("Preview not ready")))
-    {
-        return EMtoUConnectionState::NotReady;
-    }
-    if (Status.StartsWith(TEXT("Validating")))
-    {
-        return EMtoUConnectionState::Validating;
-    }
-    if (Status.StartsWith(TEXT("Connected: bone-only")))
-    {
-        return EMtoUConnectionState::BoneOnly;
-    }
-    if (Status.StartsWith(TEXT("Connected: partial")))
-    {
-        return EMtoUConnectionState::Partial;
-    }
-    if (Status.StartsWith(TEXT("Connected")))
-    {
-        return EMtoUConnectionState::Connected;
-    }
-    if (Status.StartsWith(TEXT("Disconnected")))
-    {
-        return EMtoUConnectionState::Disconnected;
-    }
-    return EMtoUConnectionState::Unknown;
-}
-
 FText ReadinessHeadline(const FMtoUPreviewReadiness& Readiness, ESeverity& OutSeverity)
 {
     switch (Readiness.State)
@@ -222,53 +167,47 @@ FText ReadinessHeadline(const FMtoUPreviewReadiness& Readiness, ESeverity& OutSe
 }
 
 FText ConnectionHeadline(
-    EMtoUConnectionState State, const FString& Status, EMtoULinkSessionState Session,
-    ESeverity& OutSeverity)
+    EMtoUConnectionState State, EMtoULinkSessionState Session, ESeverity& OutSeverity)
 {
     switch (State)
     {
-    case EMtoUConnectionState::Disconnected:
-        OutSeverity = ESeverity::Neutral;
-        // Every session that ends reports the same "Disconnected" string, so
-        // only the actor's session lifecycle separates a link that was lost
-        // from one that was never established.
-        return Session == EMtoULinkSessionState::Ended
-            ? LOCTEXT("ConnectionInterrupted", "连接已中断")
-            : LOCTEXT("ConnectionDisconnected", "未连接");
     case EMtoUConnectionState::Validating:
         OutSeverity = ESeverity::Info;
         return LOCTEXT("ConnectionValidating", "连接中");
-    case EMtoUConnectionState::NotReady:
+    case EMtoUConnectionState::PreviewNotReady:
         OutSeverity = ESeverity::Warning;
         return LOCTEXT("ConnectionNotReady", "未连接（预览未就绪）");
-    case EMtoUConnectionState::Partial:
+    case EMtoUConnectionState::ConnectedPartialMorph:
         OutSeverity = ESeverity::Warning;
         return LOCTEXT("ConnectionPartial", "已连接（部分 Morph）");
-    case EMtoUConnectionState::BoneOnly:
+    case EMtoUConnectionState::ConnectedBoneOnly:
         OutSeverity = ESeverity::Warning;
         return LOCTEXT("ConnectionBoneOnly", "已连接（仅骨骼）");
     case EMtoUConnectionState::Connected:
         OutSeverity = ESeverity::Success;
         return LOCTEXT("ConnectionConnected", "已连接");
+    case EMtoUConnectionState::ConnectedAsSecondObject:
+        OutSeverity = ESeverity::Success;
+        return LOCTEXT("ConnectionSecondObject", "已连接（副对象）");
+    case EMtoUConnectionState::PreviewMorphMismatch:
+        OutSeverity = ESeverity::Error;
+        return LOCTEXT("ConnectionMorphMismatch", "连接出错（Morph 不匹配）");
+    case EMtoUConnectionState::RemovedFromSet:
+        OutSeverity = ESeverity::Neutral;
+        return LOCTEXT("ConnectionRemovedFromSet", "已移出对象集合");
     case EMtoUConnectionState::Error:
         OutSeverity = ESeverity::Error;
         return LOCTEXT("ConnectionError", "连接出错");
-    case EMtoUConnectionState::Unknown:
+    case EMtoUConnectionState::Disconnected:
     default:
         OutSeverity = ESeverity::Neutral;
-        return Status.TrimStartAndEnd().IsEmpty()
-            ? LOCTEXT("ConnectionIdle", "未连接")
-            : LOCTEXT("ConnectionUnknown", "连接状态未知");
+        // Every session that ends leaves the actor Disconnected, so only the
+        // actor's session lifecycle separates a link that was lost from one
+        // that was never established.
+        return Session == EMtoULinkSessionState::Ended
+            ? LOCTEXT("ConnectionInterrupted", "连接已中断")
+            : LOCTEXT("ConnectionDisconnected", "未连接");
     }
-}
-
-/** The raw message is shown whenever it says more than the headline already does. */
-bool ConnectionNeedsDetail(const FString& Status)
-{
-    return !Status.IsEmpty()
-        && Status != TEXT("Connected")
-        && Status != TEXT("Disconnected")
-        && Status != TEXT("Validating");
 }
 
 /**
@@ -306,7 +245,8 @@ EStatusIssue ClassifyIssue(EMtoUConnectionState Connection, const FMtoUPreviewRe
     {
         return EStatusIssue::PreviewFailed;
     }
-    if (Connection == EMtoUConnectionState::Error)
+    if (Connection == EMtoUConnectionState::Error
+        || Connection == EMtoUConnectionState::PreviewMorphMismatch)
     {
         return EStatusIssue::ConnectionBlocked;
     }
@@ -329,11 +269,12 @@ EStatusIssue ClassifyIssue(EMtoUConnectionState Connection, const FMtoUPreviewRe
     {
     case EMtoUConnectionState::Validating:
         return EStatusIssue::LinkValidating;
-    case EMtoUConnectionState::BoneOnly:
+    case EMtoUConnectionState::ConnectedBoneOnly:
         return EStatusIssue::LinkBoneOnly;
-    case EMtoUConnectionState::Partial:
+    case EMtoUConnectionState::ConnectedPartialMorph:
         return EStatusIssue::LinkPartial;
     case EMtoUConnectionState::Connected:
+    case EMtoUConnectionState::ConnectedAsSecondObject:
         return EStatusIssue::LinkConnected;
     default:
         return EStatusIssue::Idle;
@@ -511,13 +452,13 @@ FText LinkageSecondsText(double Seconds)
     return FText::AsNumber(Seconds, &Options);
 }
 
-FText LinkageStatusText(const FMtoULinkageView& View)
+FText LinkageStatusText(const FMtoULinkageView& View, const FMtoUTimeControlView& Time)
 {
-    if (View.bTransitioning)
+    if (Time.bTransitioning)
     {
         return LOCTEXT("LinkageStatusTransitioning", "正在切换镜头联动，请稍候");
     }
-    if (View.Mode == TEXT("linkage"))
+    if (Time.Authority == EMtoUTimeAuthority::Sequence)
     {
         if (LinkageLagging(View))
         {
@@ -527,11 +468,11 @@ FText LinkageStatusText(const FMtoULinkageView& View)
             ? LOCTEXT("LinkageStatusSyncing", "镜头联动中 · Unreal 控制时间 · 正在同步")
             : LOCTEXT("LinkageStatusSynced", "镜头联动中 · Unreal 控制时间 · 同步正常");
     }
-    if (View.Mode == TEXT("cached"))
+    if (Time.Authority == EMtoUTimeAuthority::Cache)
     {
         return LOCTEXT("LinkageStatusCached", "未进入联动 · 缓存播放中");
     }
-    return View.bTakeoverHeld
+    return Time.bTakeoverHeld
         ? LOCTEXT("LinkageStatusHeld", "未进入联动 · 仍接管目标，点击“结束预览”交还原动画")
         : LOCTEXT("LinkageStatusIdle", "未进入联动");
 }
@@ -623,13 +564,14 @@ FText LinkageDiagnosticsText(const FMtoULinkageView& View)
     return FText::FromString(FString::Join(Lines, TEXT("\n")));
 }
 
-FText LinkageEnterTooltip(TWeakObjectPtr<AMtoULiveLinkActor> Actor, const FMtoULinkageView& View)
+FText LinkageEnterTooltip(TWeakObjectPtr<AMtoULiveLinkActor> Actor, const FMtoULinkageView& View,
+    const FMtoUTimeControlView& Time)
 {
     if (!Actor.IsValid())
     {
         return LOCTEXT("LinkageEnterNoActor", "选择绑定 Actor 后进入镜头联动。");
     }
-    if (View.bTransitioning)
+    if (Time.bTransitioning)
     {
         return LOCTEXT("LinkageEnterTransitioning", "正在切换镜头联动，请等待 Maya 确认。");
     }
@@ -637,11 +579,11 @@ FText LinkageEnterTooltip(TWeakObjectPtr<AMtoULiveLinkActor> Actor, const FMtoUL
     {
         return LOCTEXT("LinkageEnterUnpaired", "先点击“配对”，把这个角色与 Maya 配对。");
     }
-    if (View.Mode == TEXT("linkage"))
+    if (Time.Authority == EMtoUTimeAuthority::Sequence)
     {
         return LOCTEXT("LinkageEnterAlready", "已在镜头联动中：Level Sequence 控制时间和相机。");
     }
-    if (View.Mode == TEXT("cached"))
+    if (Time.Authority == EMtoUTimeAuthority::Cache)
     {
         return LOCTEXT("LinkageEnterCached", "缓存播放中：先在 Maya 返回实时预览，再进入镜头联动。");
     }
@@ -747,91 +689,18 @@ bool CanRemoveSecondary(const FMtoULinkageView& View)
     return Secondary && Secondary->bNegotiated && !View.bRemovingObject && !View.bTransitioning;
 }
 
-/** Formats the scene-reference handoff result into the panel's one report line. */
-FText SceneReferenceResultText(const FMtoUSceneRefExportResult& Result)
-{
-    if (!Result.Error.IsEmpty())
-    {
-        return FText::Format(LOCTEXT("SceneReferenceFailed", "场景参考：{0}"),
-            FText::FromString(Result.Error));
-    }
-    if (Result.Directory.IsEmpty())
-    {
-        return LOCTEXT("SceneReferenceIdle", "场景参考：尚未导出。");
-    }
-    const FText Objects = FText::AsNumber(Result.ExportedObjectCount);
-    if (Result.bScopeComplete)
-    {
-        return FText::Format(LOCTEXT("SceneReferenceValue", "已导出 {0} 个对象，可在 Maya 导入。"), Objects);
-    }
-    // The export names why its scope is partial; the panel says which reason
-    // applies so the user knows what to load or select.
-    if (!Result.UnloadedSublevels.IsEmpty())
-    {
-        return FText::Format(LOCTEXT("SceneReferenceUnloadedValue",
-            "已导出 {0} 个对象，可在 Maya 导入；勾选的 {1} 个子关卡未加载，未包含在内，加载后重新导出即可补上。"),
-            Objects, FText::AsNumber(Result.UnloadedSublevels.Num()));
-    }
-    if (!Result.ExcludedSublevels.IsEmpty())
-    {
-        // Excluded names were selected but the world does not stream them.
-        return FText::Format(LOCTEXT("SceneReferenceExcludedValue",
-            "已导出 {0} 个对象，可在 Maya 导入；勾选的 {1} 个子关卡不在当前世界中，未包含在内。请检查关卡的流式设置，或重新选择子关卡。"),
-            Objects, FText::AsNumber(Result.ExcludedSublevels.Num()));
-    }
-    return FText::Format(LOCTEXT("SceneReferencePartitionedValue",
-        "已导出 {0} 个对象，可在 Maya 导入；World Partition 世界只包含当前已加载区域的内容。"), Objects);
-}
-
-FText SceneReferenceDiagnosticsText(const FMtoUSceneRefExportResult& Result)
-{
-    if (Result.Directory.IsEmpty() && Result.Error.IsEmpty())
-    {
-        return FText::GetEmpty();
-    }
-    TArray<FString> Lines;
-    Lines.Add(TEXT("场景参考诊断"));
-    Lines.Add(FString::Printf(TEXT("交付 ID：%s"), Result.TransferId.IsEmpty() ? TEXT("—") : *Result.TransferId));
-    Lines.Add(FString::Printf(TEXT("清单摘要：%s"), Result.ManifestDigest.IsEmpty() ? TEXT("—") : *Result.ManifestDigest));
-    Lines.Add(FString::Printf(TEXT("目录：%s"), Result.Directory.IsEmpty() ? TEXT("—") : *Result.Directory));
-    Lines.Add(FString::Printf(TEXT("范围：%s · 常驻关卡 %s · 范围%s"),
-        *Result.ScopeName, *Result.LevelPackage,
-        Result.bScopeComplete ? TEXT("完整") : TEXT("未确认")));
-    Lines.Add(FString::Printf(TEXT("子关卡：请求 %s · 已加载 %s · 排除 %s · 未加载 %s"),
-        *FString::Join(Result.RequestedSublevels, TEXT(", ")),
-        *FString::Join(Result.LoadedSublevels, TEXT(", ")),
-        *FString::Join(Result.ExcludedSublevels, TEXT(", ")),
-        *FString::Join(Result.UnloadedSublevels, TEXT(", "))));
-    Lines.Add(FString::Printf(TEXT("对象 %d · 三角形 %d · 顶点 %d · 字节 %lld（几何 %lld + 清单 %lld）"),
-        Result.ExportedObjectCount, Result.TriangleCount, Result.VertexCount,
-        Result.GeometryBytes + Result.ManifestBytes, Result.GeometryBytes, Result.ManifestBytes));
-    Lines.Add(FString::Printf(TEXT("跳过 Actor %d · 抑制组件 %d · 图片数据 %s"),
-        Result.SkippedActorCount, Result.SuppressedComponentCount,
-        Result.bImageDataDetected ? TEXT("有") : TEXT("无")));
-    for (const FString& Warning : Result.Warnings)
-    {
-        Lines.Add(FString::Printf(TEXT("告警：%s"), *Warning));
-    }
-    if (!Result.Error.IsEmpty())
-    {
-        Lines.Add(FString::Printf(TEXT("错误：%s"), *Result.Error));
-    }
-    return FText::FromString(FString::Join(Lines, TEXT("\n")));
-}
-
 /** Builds the one status view from an already-read axis snapshot. */
 FMtoULiveLinkActorDetails::FStatusView BuildStatusView(
     AMtoULiveLinkActor& Target, const FMtoUPreviewReadiness& Readiness)
 {
     FMtoULiveLinkActorDetails::FStatusView View;
-    const FString& ConnectionStatus = Target.GetConnectionStatus();
-    const EMtoUConnectionState Connection = ClassifyConnection(ConnectionStatus);
+    const EMtoUConnectionState Connection = Target.GetConnectionState();
 
     ESeverity ReadinessSeverity = ESeverity::Neutral;
     const FText ReadinessText = ReadinessHeadline(Readiness, ReadinessSeverity);
     ESeverity ConnectionSeverity = ESeverity::Neutral;
     const FText ConnectionText = ConnectionHeadline(
-        Connection, ConnectionStatus, Target.GetLinkSessionState(), ConnectionSeverity);
+        Connection, Target.GetLinkSessionState(), ConnectionSeverity);
 
     View.Preview = ReadinessText;
     View.Connection = ConnectionText;
@@ -898,10 +767,8 @@ FMtoULiveLinkActorDetails::FStatusView BuildStatusView(
     }
     AddRaw(Target.GetCharacterPartDiagnostics());
     AddRaw(Target.GetModelDiagnostics());
-    if (ConnectionNeedsDetail(ConnectionStatus))
-    {
-        AddRaw(ConnectionStatus);
-    }
+    // The headline names the state; the failure behind an error is the detail.
+    AddRaw(Target.GetConnectionDetail());
     View.RawDiagnostics = FText::FromString(FString::Join(RawMessages, TEXT("\n\n")));
     return View;
 }
@@ -927,9 +794,16 @@ FText FMtoULiveLinkActorDetails::FormatCacheState(const FMtoUCachePlaybackView& 
     return CacheStateText(View);
 }
 
-FText FMtoULiveLinkActorDetails::FormatLinkageStatus(const FMtoULinkageView& View)
+FText FMtoULiveLinkActorDetails::FormatLinkageStatus(
+    const FMtoULinkageView& View, const FMtoUTimeControlView& Time)
 {
-    return LinkageStatusText(View);
+    return LinkageStatusText(View, Time);
+}
+
+bool FMtoULiveLinkActorDetails::CanEnterLinkage(
+    const FMtoULinkageView& View, const FMtoUTimeControlView& Time)
+{
+    return View.bPaired && !Time.bTransitioning && Time.Authority == EMtoUTimeAuthority::Maya;
 }
 
 FText FMtoULiveLinkActorDetails::FormatLinkageLag(const FMtoULinkageView& View)
@@ -945,16 +819,6 @@ FText FMtoULiveLinkActorDetails::FormatLinkageRecovery(const FMtoULinkageView& V
 FText FMtoULiveLinkActorDetails::FormatLinkageDiagnostics(const FMtoULinkageView& View)
 {
     return LinkageDiagnosticsText(View);
-}
-
-FText FMtoULiveLinkActorDetails::FormatSceneReferenceResult(const FMtoUSceneRefExportResult& Result)
-{
-    return SceneReferenceResultText(Result);
-}
-
-FText FMtoULiveLinkActorDetails::FormatSceneReferenceDiagnostics(const FMtoUSceneRefExportResult& Result)
-{
-    return SceneReferenceDiagnosticsText(Result);
 }
 
 bool FMtoULiveLinkActorDetails::bExpandAllGroups = false;
@@ -1007,8 +871,9 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
         }
     }
 
-    // Curated rows own all status text. Keep the serialized property intact.
-    DetailBuilder.HideProperty(FName(TEXT("ConnectionStatus")));
+    // Curated rows own all status text.
+    DetailBuilder.HideProperty(FName(TEXT("ConnectionState")));
+    DetailBuilder.HideProperty(FName(TEXT("ConnectionDetail")));
     const TSharedRef<FStatusPresenter> Status = MakeShared<FStatusPresenter>(Actor);
 
     IDetailCategoryBuilder& Runtime = DetailBuilder.EditCategory(
@@ -1440,7 +1305,7 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
         Row.WholeRowContent()[Widget];
         FMtoULinkageEditor::RegisterLinkagePanelWidget(Row.WholeRowWidget.Widget);
     };
-    // Protocol v11 pairs the primary character ("character") and at most one
+    // The protocol pairs the primary character ("character") and at most one
     // second object ("secondary"); each actor of the set serves one of them,
     // so the row names the role instead of asking for an id.
     const auto PairAs = [Actor, LinkageMessage](const FString& ObjectId)
@@ -1562,13 +1427,12 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
                 .Text(LOCTEXT("LinkageEnter", "进入联动"))
                 .ToolTipText_Lambda([Actor]()
                 {
-                    return LinkageEnterTooltip(Actor, MtoUGetLinkageView());
+                    return LinkageEnterTooltip(Actor, MtoUGetLinkageView(), MtoUGetTimeControlView());
                 })
                 .IsEnabled_Lambda([Actor]()
                 {
-                    const FMtoULinkageView View = MtoUGetLinkageView();
-                    return Actor.IsValid() && View.bPaired && !View.bTransitioning
-                        && View.Mode != TEXT("linkage") && View.Mode != TEXT("cached");
+                    return Actor.IsValid() && FMtoULiveLinkActorDetails::CanEnterLinkage(
+                        MtoUGetLinkageView(), MtoUGetTimeControlView());
                 })
                 .OnClicked_Lambda([Actor, LinkageMessage]()
                 {
@@ -1659,7 +1523,10 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
     AddLinkageRow(LOCTEXT("LinkageStatusRow", "联动状态"),
         SNew(STextBlock)
             .AutoWrapText(true)
-            .Text_Lambda([]() { return LinkageStatusText(MtoUGetLinkageView()); })
+            .Text_Lambda([]()
+            {
+                return LinkageStatusText(MtoUGetLinkageView(), MtoUGetTimeControlView());
+            })
         );
 
     AddLinkageRow(LOCTEXT("LinkageLagRow", "滞后"),
@@ -1711,224 +1578,6 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
             })
         );
 
-    IDetailCategoryBuilder& SceneReference = DetailBuilder.EditCategory(
-        "MtoU Scene Reference", LOCTEXT("SceneReferenceCategory", "场景参考"),
-        ECategoryPriority::Default);
-    SceneReference.InitiallyCollapsed(!bExpandAllGroups);
-
-    UWorld* PanelWorld = Actor.IsValid() ? Actor->GetWorld() : nullptr;
-    struct FMtoUSublevelChoice
-    {
-        FString Package;
-        TSharedPtr<bool> bRequested;
-    };
-    const TSharedPtr<TArray<FMtoUSublevelChoice>> SublevelChoices =
-        MakeShared<TArray<FMtoUSublevelChoice>>();
-    const TSharedPtr<FMtoUSceneRefExportResult> ReferenceResult =
-        MakeShared<FMtoUSceneRefExportResult>();
-    const TSharedPtr<FText> ReferenceMessage = MakeShared<FText>();
-    if (PanelWorld)
-    {
-        for (ULevelStreaming* Streaming : PanelWorld->GetStreamingLevels())
-        {
-            if (Streaming && Streaming->GetLoadedLevel())
-            {
-                FMtoUSublevelChoice Choice;
-                Choice.Package = FPaths::GetBaseFilename(
-                    Streaming->GetWorldAsset().ToSoftObjectPath().GetLongPackageName());
-                Choice.bRequested = MakeShared<bool>(false);
-                SublevelChoices->Add(MoveTemp(Choice));
-            }
-        }
-    }
-
-    SceneReference.AddCustomRow(LOCTEXT("SceneReferenceScopeFilter", "范围 关卡"))
-        .WholeRowContent()
-        [
-            SNew(SVerticalBox)
-            + SVerticalBox::Slot().AutoHeight()
-            [
-                SNew(STextBlock)
-                .AutoWrapText(true)
-                .Text_Lambda([Actor]()
-                {
-                    const UWorld* World = Actor.IsValid() ? Actor->GetWorld() : nullptr;
-                    const ULevel* Level = World ? World->PersistentLevel : nullptr;
-                    return FText::Format(LOCTEXT("SceneReferenceLevel", "常驻关卡：{0}"),
-                        Level ? FText::FromString(Level->GetPackage()->GetName())
-                              : LOCTEXT("SceneReferenceNoWorld", "未知"));
-                })
-                .ToolTipText(LOCTEXT("SceneReferenceScopeTip",
-                    "范围是显式的：当前常驻关卡加上勾选的已加载子关卡；不会自动加载任何子关卡。"))
-            ]
-            + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 4.0f, 0.0f, 0.0f)
-            [
-                SNew(STextBlock)
-                .AutoWrapText(true)
-                .ColorAndOpacity(FSlateColor::UseSubduedForeground())
-                .Text_Lambda([Actor]()
-                {
-                    const UWorld* World = Actor.IsValid() ? Actor->GetWorld() : nullptr;
-                    if (!World)
-                    {
-                        return LOCTEXT("SceneReferenceNoLevels", "子关卡：无世界");
-                    }
-                    if (World->IsPartitionedWorld())
-                    {
-                        return LOCTEXT("SceneReferencePartitioned",
-                            "子关卡：该世界为 World Partition，范围只含已加载单元格内容。");
-                    }
-                    if (World->GetStreamingLevels().IsEmpty())
-                    {
-                        return LOCTEXT("SceneReferenceNoSublevels", "子关卡：该世界没有流式子关卡。");
-                    }
-                    return LOCTEXT("SceneReferenceSublevelCount", "子关卡：见下方勾选。");
-                })
-            ]
-        ];
-
-    if (SublevelChoices->Num() > 0)
-    {
-        TSharedRef<SVerticalBox> SublevelList = SNew(SVerticalBox);
-        for (const FMtoUSublevelChoice& Choice : *SublevelChoices)
-        {
-            SublevelList->AddSlot()
-                .AutoHeight()
-                .Padding(0.0f, 0.0f, 0.0f, 2.0f)
-                [
-                    SNew(SCheckBox)
-                    .Content()
-                    [
-                        SNew(STextBlock).Text(FText::FromString(Choice.Package))
-                    ]
-                    .ToolTipText(LOCTEXT("SceneReferenceSublevelTip",
-                        "勾选后进入显式范围；未加载的子关卡不会出现在这里。"))
-                    .IsChecked_Lambda([Choice]()
-                    {
-                        return Choice.bRequested.IsValid() && *Choice.bRequested
-                            ? ECheckBoxState::Checked : ECheckBoxState::Unchecked;
-                    })
-                    .OnCheckStateChanged_Lambda([Choice](ECheckBoxState State)
-                    {
-                        if (Choice.bRequested.IsValid())
-                        {
-                            *Choice.bRequested = State == ECheckBoxState::Checked;
-                        }
-                    })
-                ];
-        }
-        SceneReference.AddCustomRow(LOCTEXT("SceneReferenceSublevelsFilter", "已加载子关卡"))
-            .WholeRowContent()
-            [
-                SNew(SVerticalBox)
-                + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 0.0f, 0.0f, 4.0f)
-                [
-                    SNew(STextBlock)
-                    .AutoWrapText(true)
-                    .ColorAndOpacity(FSlateColor::UseSubduedForeground())
-                    .Text(LOCTEXT("SceneReferenceSublevelsHint",
-                        "勾选要放进移交的子关卡；未勾选的子关卡保持不动。"))
-                ]
-                + SVerticalBox::Slot().AutoHeight()
-                [
-                    SublevelList
-                ]
-            ];
-    }
-
-    SceneReference.AddCustomRow(LOCTEXT("SceneReferenceActionsFilter", "导出 移交"))
-        .WholeRowContent()
-        [
-            SNew(SVerticalBox)
-            + SVerticalBox::Slot().AutoHeight()
-            [
-                SNew(SHorizontalBox)
-                + SHorizontalBox::Slot().AutoWidth().Padding(0.0f, 0.0f, 8.0f, 0.0f)
-                [
-                    SNew(SButton)
-                    .Text(LOCTEXT("SceneReferenceExport", "导出场景参考"))
-                    .ToolTipText(LOCTEXT("SceneReferenceExportTip",
-                        "用引擎自己的 FBX 关卡导出具名范围内的静态网格，写清单并检查无图片数据后移交给 Maya。"))
-                    .IsEnabled_Lambda([Actor]()
-                    {
-                        return Actor.IsValid() && Actor->GetWorld() != nullptr;
-                    })
-                    .OnClicked_Lambda([Actor, SublevelChoices, ReferenceResult, ReferenceMessage]()
-                    {
-                        AMtoULiveLinkActor* Target = Actor.Get();
-                        UWorld* World = Target ? Target->GetWorld() : nullptr;
-                        if (!World)
-                        {
-                            return FReply::Handled();
-                        }
-                        TArray<FString> Requested;
-                        for (const FMtoUSublevelChoice& Choice : *SublevelChoices)
-                        {
-                            if (Choice.bRequested.IsValid() && *Choice.bRequested)
-                            {
-                                Requested.Add(Choice.Package);
-                            }
-                        }
-                        *ReferenceMessage = FText::GetEmpty();
-                        FScopedSlowTask ExportTask(1.0f,
-                            LOCTEXT("SceneReferenceExportProgress", "导出场景参考"));
-                        ExportTask.MakeDialog();
-                        if (!FMtoUSceneRefExport::Run(*World, Requested, *ReferenceResult))
-                        {
-                            *ReferenceMessage = FText::Format(
-                                LOCTEXT("SceneReferenceExportRefused", "导出失败：{0}"),
-                                FText::FromString(ReferenceResult->Error));
-                        }
-                        else if (ReferenceResult->bImageDataDetected)
-                        {
-                            *ReferenceMessage = LOCTEXT("SceneReferenceImageData",
-                                "导出的移交包含图片数据，已拒绝。");
-                        }
-                        return FReply::Handled();
-                    })
-                ]
-            ]
-            + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 5.0f, 0.0f, 0.0f)
-            [
-                SNew(STextBlock)
-                .AutoWrapText(true)
-                .Text_Lambda([Actor, ReferenceResult, ReferenceMessage]()
-                {
-                    if (!ReferenceMessage->IsEmpty())
-                    {
-                        return *ReferenceMessage;
-                    }
-                    return SceneReferenceResultText(*ReferenceResult);
-                })
-                .Visibility_Lambda([Actor, ReferenceResult, ReferenceMessage]()
-                {
-                    return !ReferenceMessage->IsEmpty() || !ReferenceResult->Directory.IsEmpty()
-                        || !ReferenceResult->Error.IsEmpty()
-                        ? EVisibility::Visible : EVisibility::Collapsed;
-                })
-            ]
-            + SVerticalBox::Slot().AutoHeight().Padding(0.0f, 3.0f, 0.0f, 0.0f)
-            [
-                SNew(STextBlock)
-                .AutoWrapText(true)
-                .ColorAndOpacity(FSlateColor(FLinearColor(1.0f, 0.35f, 0.25f)))
-                .Text_Lambda([ReferenceResult]()
-                {
-                    if (ReferenceResult->bSucceeded)
-                    {
-                        return FText::GetEmpty();
-                    }
-                    return FText::Format(LOCTEXT("SceneReferenceError", "场景参考错误：{0}"),
-                        FText::FromString(ReferenceResult->Error));
-                })
-                .Visibility_Lambda([ReferenceResult]()
-                {
-                    return ReferenceResult->bSucceeded || ReferenceResult->Error.IsEmpty()
-                        ? EVisibility::Collapsed : EVisibility::Visible;
-                })
-            ]
-        ];
-
     IDetailCategoryBuilder& Advanced = DetailBuilder.EditCategory(
         "MtoU Advanced", LOCTEXT("AdvancedCategory", "高级设置与诊断"),
         ECategoryPriority::Default);
@@ -1959,13 +1608,12 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
             })
         ];
     // The full report: the preview and connection diagnostics plus the linkage
-    // read-back and the handoff identity the groups above leave out.
-    auto FullDiagnostics = [Status, ReferenceResult]()
+    // read-back the groups above leave out.
+    auto FullDiagnostics = [Status]()
     {
         const FText Parts[] = {
             Status->Get().RawDiagnostics,
-            LinkageDiagnosticsText(MtoUGetLinkageView()),
-            SceneReferenceDiagnosticsText(*ReferenceResult)};
+            LinkageDiagnosticsText(MtoUGetLinkageView())};
         TArray<FString> Sections;
         for (const FText& Section : Parts)
         {
@@ -1977,7 +1625,7 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
         return FText::FromString(FString::Join(Sections, TEXT("\n\n")));
     };
     FDetailWidgetRow& DiagnosticsRow = Advanced.AddCustomRow(
-        LOCTEXT("DiagnosticsFilter", "错误详情 原始诊断 镜头联动 场景参考"));
+        LOCTEXT("DiagnosticsFilter", "错误详情 原始诊断 镜头联动"));
     DiagnosticsRow.WholeRowContent()
         [
             SNew(SVerticalBox)
@@ -2107,10 +1755,12 @@ const FMtoULiveLinkActorDetails::FStatusView& FMtoULiveLinkActorDetails::FStatus
     }
 
     // The change key reads each axis once: readiness state and stage, the
-    // connection message, the display selection. Readiness is read through the
-    // actor's one coherent snapshot and only formatted when the key moved.
+    // connection state and its detail, the display selection. Readiness is read
+    // through the actor's one coherent snapshot and only formatted when the key
+    // moved.
     const FMtoUPreviewReadiness Readiness = Target->GetPreviewReadiness();
-    const FString& Connection = Target->GetConnectionStatus();
+    const EMtoUConnectionState Connection = Target->GetConnectionState();
+    const FString& ConnectionDetail = Target->GetConnectionDetail();
     const EMtoUDisplayTarget Display = Target->GetDisplayTarget();
     const EMtoULinkSessionState Session = Target->GetLinkSessionState();
     if (bHasView
@@ -2122,6 +1772,7 @@ const FMtoULiveLinkActorDetails::FStatusView& FMtoULiveLinkActorDetails::FStatus
         && CachedKey.PreviewDiagnostics == Readiness.Diagnostics
         && CachedKey.PreviewSummary == Readiness.Summary
         && CachedKey.Connection == Connection
+        && CachedKey.ConnectionDetail == ConnectionDetail
         && CachedKey.ModelDiagnostics == Target->GetModelDiagnostics()
         && CachedKey.CharacterDiagnostics == Target->GetCharacterPartDiagnostics())
     {
@@ -2137,6 +1788,7 @@ const FMtoULiveLinkActorDetails::FStatusView& FMtoULiveLinkActorDetails::FStatus
     CachedKey.Display = Display;
     CachedKey.Session = Session;
     CachedKey.Connection = Connection;
+    CachedKey.ConnectionDetail = ConnectionDetail;
     CachedKey.ModelDiagnostics = Target->GetModelDiagnostics();
     CachedKey.CharacterDiagnostics = Target->GetCharacterPartDiagnostics();
     bHasView = true;

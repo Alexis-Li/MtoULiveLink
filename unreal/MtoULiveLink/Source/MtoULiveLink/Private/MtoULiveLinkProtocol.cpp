@@ -15,6 +15,9 @@
 
 namespace
 {
+// The release of this plugin; see FMtoUProtocol::SetPluginVersionName.
+FString GPluginVersionName;
+
 // Absolute determinant tolerances reject valid small-scale rigs (for example
 // pupil joints at 1e-12). Use the engine's checked inverse, bypassing Inverse()'s
 // nearly-zero-axis identity fallback, and reject non-finite results explicitly.
@@ -157,6 +160,15 @@ bool GetOptionalIdentityInt(
     return GetIdentityInt(Object, Name, OutValue, OutError);
 }
 
+bool GetOptionalString(
+    const TSharedPtr<FJsonObject>& Object,
+    const TCHAR* Name,
+    FString& OutValue,
+    FString& OutError)
+{
+    return !Object->HasField(Name) || GetStringField(Object, Name, OutValue, OutError);
+}
+
 bool GetOptionalObject(
     const TSharedPtr<FJsonObject>& Object,
     const TCHAR* Name,
@@ -229,7 +241,8 @@ bool ParseFrameBody(
     int32 ExpectedCurveCount,
     FMtoUFrameMessage& OutMessage,
     FString& OutError,
-    bool* bOutCountMismatch = nullptr)
+    bool* bOutCountMismatch = nullptr,
+    FString* OutErrorCode = nullptr)
 {
     if (bOutCountMismatch)
     {
@@ -252,6 +265,10 @@ bool ParseFrameBody(
         OutError = FString::Printf(
             TEXT("Unsupported protocol version; expected %d."),
             FMtoUProtocol::Version);
+        if (OutErrorCode)
+        {
+            *OutErrorCode = TEXT("PROTOCOL_VERSION_MISMATCH");
+        }
         return false;
     }
 
@@ -376,6 +393,16 @@ EMtoUDecodeResult FMtoUFrameDecoder::Pop(TArray<uint8>& OutPayload, FString& Out
     return EMtoUDecodeResult::Message;
 }
 
+void FMtoUProtocol::SetPluginVersionName(const FString& InPluginVersionName)
+{
+    GPluginVersionName = InPluginVersionName;
+}
+
+const FString& FMtoUProtocol::PluginVersionName()
+{
+    return GPluginVersionName;
+}
+
 bool FMtoUProtocol::ParseInit(
     const TArray<uint8>& Payload,
     FMtoUInitMessage& OutMessage,
@@ -409,6 +436,7 @@ bool FMtoUProtocol::ParseInit(
         OutError = TEXT("Field 'version' must be an integer JSON number.");
         return false;
     }
+    OutMessage.Version = MessageVersion;
     if (MessageVersion != FMtoUProtocol::Version)
     {
         OutError = FString::Printf(
@@ -491,7 +519,7 @@ bool FMtoUProtocol::ParseInit(
         return false;
     }
 
-    // v11 object set: the ordered ids the connection negotiates, primary
+    // Object set: the ordered ids the connection negotiates, primary
     // first. Every init of the set names the same list and its own id in it.
     const TArray<TSharedPtr<FJsonValue>>* SetValues = nullptr;
     if (!GetArrayField(Object, TEXT("set_objects"), SetValues, OutError) || SetValues->IsEmpty())
@@ -682,17 +710,23 @@ bool FMtoUProtocol::ParseInit(
 bool FMtoUProtocol::ParseFrame(
     const TArray<uint8>& Payload,
     FMtoUFrameMessage& OutMessage,
-    FString& OutError)
+    FString& OutError,
+    FString* OutErrorCode)
 {
     OutMessage = FMtoUFrameMessage();
     OutError.Reset();
+    if (OutErrorCode)
+    {
+        *OutErrorCode = TEXT("INVALID_MESSAGE");
+    }
     TSharedPtr<FJsonObject> Object;
     if (!ParseObject(Payload, Object, OutError))
     {
         return false;
     }
     if (!ParseFrameBody(
-            Object, TEXT("frame"), INDEX_NONE, INDEX_NONE, OutMessage, OutError))
+            Object, TEXT("frame"), INDEX_NONE, INDEX_NONE, OutMessage, OutError,
+            nullptr, OutErrorCode))
     {
         return false;
     }
@@ -700,7 +734,7 @@ bool FMtoUProtocol::ParseFrame(
     {
         return true;
     }
-    // v11: the other objects of a two-object set, sampled at the same Maya
+    // The other objects of a two-object set, sampled at the same Maya
     // time as the primary. A row names one object beside the primary, once.
     const TArray<TSharedPtr<FJsonValue>>* RowValues = nullptr;
     if (!GetArrayField(Object, TEXT("objects"), RowValues, OutError))
@@ -743,7 +777,8 @@ bool FMtoUProtocol::ParseFrame(
         // the frame's, so the body parser sees one.
         Row->SetStringField(TEXT("type"), TEXT("frame"));
         FMtoUFrameMessage Values;
-        if (!ParseFrameBody(Row, TEXT("frame"), INDEX_NONE, INDEX_NONE, Values, OutError))
+        if (!ParseFrameBody(Row, TEXT("frame"), INDEX_NONE, INDEX_NONE, Values, OutError,
+                nullptr, OutErrorCode))
         {
             OutError = FString::Printf(TEXT("Frame object '%s': %s"), *Parsed.ObjectId, *OutError);
             return false;
@@ -781,8 +816,8 @@ bool FMtoUProtocol::ParseHello(
     }
 
     // The greeting is answered before anything else is discovered, so a peer
-    // with a different protocol version never borrows a camera, mutes a
-    // writer or reads a handoff directory.
+    // with a different protocol version never borrows a camera or mutes a
+    // writer.
     if (!GetIdentityInt(Object, TEXT("version"), OutMessage.Version, OutError))
     {
         OutError = TEXT("Field 'version' must be an integer JSON number.");
@@ -790,6 +825,14 @@ bool FMtoUProtocol::ParseHello(
     }
     if (OutMessage.Version != FMtoUProtocol::Version)
     {
+        // The release is read for the log only, and only when it is a string:
+        // a greeting of another version is refused with the version code
+        // whatever else it holds.
+        const TSharedPtr<FJsonValue> PluginVersion = Object->TryGetField(TEXT("plugin_version"));
+        if (PluginVersion.IsValid() && PluginVersion->Type == EJson::String)
+        {
+            PluginVersion->TryGetString(OutMessage.PluginVersion);
+        }
         OutError = FString::Printf(
             TEXT("Unsupported protocol version; expected %d."), FMtoUProtocol::Version);
         if (OutErrorCode)
@@ -800,7 +843,8 @@ bool FMtoUProtocol::ParseHello(
     }
 
     if (!GetStringField(Object, TEXT("host"), OutMessage.Host, OutError)
-        || !GetStringField(Object, TEXT("maya_version"), OutMessage.MayaVersion, OutError))
+        || !GetStringField(Object, TEXT("maya_version"), OutMessage.MayaVersion, OutError)
+        || !GetOptionalString(Object, TEXT("plugin_version"), OutMessage.PluginVersion, OutError))
     {
         return false;
     }
@@ -858,7 +902,6 @@ bool FMtoUProtocol::ParseHello(
         return true;
     };
     if (!ReadCapability(TEXT("linkage"), OutMessage.bLinkage)
-        || !ReadCapability(TEXT("reference"), OutMessage.bReference)
         || !ReadCapability(TEXT("cache"), OutMessage.bCache)
         || !ReadCapability(TEXT("model"), OutMessage.bModel))
     {
@@ -903,10 +946,9 @@ bool FMtoUProtocol::ParseMode(
         OutError = TEXT("Fields 'session_id' and 'mode_revision' must be positive integers.");
         return false;
     }
-    if (OutMessage.Mode != TEXT("realtime") && OutMessage.Mode != TEXT("cached")
-        && OutMessage.Mode != TEXT("linkage"))
+    if (OutMessage.Mode != TEXT("realtime") && OutMessage.Mode != TEXT("linkage"))
     {
-        OutError = TEXT("Field 'mode' must be 'realtime', 'cached' or 'linkage'.");
+        OutError = TEXT("Field 'mode' must be 'realtime' or 'linkage'.");
         return false;
     }
     if (OutMessage.Control != TEXT("maya") && OutMessage.Control != TEXT("unreal"))
@@ -917,6 +959,23 @@ bool FMtoUProtocol::ParseMode(
     if (OutMessage.Transition != TEXT("ready") && OutMessage.Transition != TEXT("failed"))
     {
         OutError = TEXT("Field 'transition' must be 'ready' or 'failed'.");
+        return false;
+    }
+    // A mode has exactly one controller: linkage is Unreal's and realtime is
+    // Maya's. A statement that pairs them otherwise contradicts itself, and
+    // a linkage statement is `ready`: Maya reports a failed transition as
+    // realtime.
+    const bool bLinkage = OutMessage.Mode == TEXT("linkage");
+    if (OutMessage.Control != (bLinkage ? TEXT("unreal") : TEXT("maya")))
+    {
+        OutError = FString::Printf(
+            TEXT("Field 'control' must be '%s' when mode is '%s'."),
+            bLinkage ? TEXT("unreal") : TEXT("maya"), *OutMessage.Mode);
+        return false;
+    }
+    if (bLinkage && OutMessage.Transition != TEXT("ready"))
+    {
+        OutError = TEXT("Field 'transition' must be 'ready' when mode is 'linkage'.");
         return false;
     }
     // detail is diagnostic text; an absent one names no failure, but a
@@ -1252,187 +1311,6 @@ bool FMtoUProtocol::ParseRemoveObject(
     return true;
 }
 
-bool FMtoUProtocol::ParseReferenceResult(
-    const TArray<uint8>& Payload,
-    FMtoUReferenceResultMessage& OutMessage,
-    FString& OutError,
-    FString* OutErrorCode)
-{
-    OutMessage = FMtoUReferenceResultMessage();
-    OutError.Reset();
-    if (OutErrorCode)
-    {
-        *OutErrorCode = TEXT("INVALID_MESSAGE");
-    }
-    TSharedPtr<FJsonObject> Object;
-    if (!ParseObject(Payload, Object, OutError))
-    {
-        return false;
-    }
-    FString Type;
-    if (!GetStringField(Object, TEXT("type"), Type, OutError)
-        || Type != TEXT("reference_result"))
-    {
-        OutError = TEXT("Message type must be 'reference_result'.");
-        return false;
-    }
-    if (!GetIdentityInt(Object, TEXT("session_id"), OutMessage.SessionId, OutError)
-        || !GetStringField(Object, TEXT("transfer_id"), OutMessage.TransferId, OutError)
-        || !GetStringField(Object, TEXT("detail"), OutMessage.Detail, OutError))
-    {
-        return false;
-    }
-    if (Object->HasField(TEXT("code"))
-        && !GetStringField(Object, TEXT("code"), OutMessage.Code, OutError))
-    {
-        return false;
-    }
-    if (OutMessage.SessionId < 1 || OutMessage.TransferId.IsEmpty())
-    {
-        OutError = TEXT("Fields 'session_id' must be positive and 'transfer_id' non-empty.");
-        return false;
-    }
-    TSharedPtr<FJsonValue> AcceptedValue;
-    if (!GetTypedField(Object, TEXT("accepted"), EJson::Boolean, AcceptedValue, OutError)
-        || !AcceptedValue->TryGetBool(OutMessage.bAccepted))
-    {
-        OutError = TEXT("Field 'accepted' must be a JSON boolean.");
-        return false;
-    }
-    TSharedPtr<FJsonObject> Counts;
-    if (Object->HasField(TEXT("counts"))
-        && (!GetOptionalObject(Object, TEXT("counts"), Counts, OutError) || !Counts.IsValid()))
-    {
-        OutError = TEXT("Field 'counts' must be an object.");
-        return false;
-    }
-    if (Counts.IsValid())
-    {
-        const auto ReadCount = [&](const TCHAR* Name, int64& OutValue) -> bool
-        {
-            if (!Counts->HasField(Name))
-            {
-                return true;
-            }
-            TSharedPtr<FJsonValue> Value;
-            int64 Parsed = 0;
-            if (!GetTypedField(Counts, Name, EJson::Number, Value, OutError)
-                || !GetExactInt64(Value, Parsed)
-                || Parsed < 0)
-            {
-                OutError = FString::Printf(
-                    TEXT("Field 'counts.%s' must be a non-negative integer."), Name);
-                return false;
-            }
-            OutValue = Parsed;
-            return true;
-        };
-        if (!ReadCount(TEXT("objects"), OutMessage.ObjectCount)
-            || !ReadCount(TEXT("triangles"), OutMessage.TriangleCount)
-            || !ReadCount(TEXT("bytes"), OutMessage.ByteCount))
-        {
-            return false;
-        }
-    }
-    if (Object->HasField(TEXT("container"))
-        && !GetStringField(Object, TEXT("container"), OutMessage.Container, OutError))
-    {
-        return false;
-    }
-    return true;
-}
-
-bool FMtoUProtocol::ParseReferenceRemoved(
-    const TArray<uint8>& Payload,
-    FMtoUReferenceRemovedMessage& OutMessage,
-    FString& OutError,
-    FString* OutErrorCode)
-{
-    OutMessage = FMtoUReferenceRemovedMessage();
-    OutError.Reset();
-    if (OutErrorCode)
-    {
-        *OutErrorCode = TEXT("INVALID_MESSAGE");
-    }
-    TSharedPtr<FJsonObject> Object;
-    if (!ParseObject(Payload, Object, OutError))
-    {
-        return false;
-    }
-    FString Type;
-    if (!GetStringField(Object, TEXT("type"), Type, OutError)
-        || Type != TEXT("reference_removed"))
-    {
-        OutError = TEXT("Message type must be 'reference_removed'.");
-        return false;
-    }
-    if (!GetIdentityInt(Object, TEXT("session_id"), OutMessage.SessionId, OutError))
-    {
-        return false;
-    }
-    if (OutMessage.SessionId < 1)
-    {
-        OutError = TEXT("Field 'session_id' must be a positive integer.");
-        return false;
-    }
-    if (Object->HasField(TEXT("detail"))
-        && !GetStringField(Object, TEXT("detail"), OutMessage.Detail, OutError))
-    {
-        return false;
-    }
-    return true;
-}
-
-bool FMtoUProtocol::ParseReferenceQuery(
-    const TArray<uint8>& Payload,
-    FMtoUReferenceQueryMessage& OutMessage,
-    FString& OutError,
-    FString* OutErrorCode)
-{
-    OutMessage = FMtoUReferenceQueryMessage();
-    OutError.Reset();
-    if (OutErrorCode)
-    {
-        *OutErrorCode = TEXT("INVALID_MESSAGE");
-    }
-    TSharedPtr<FJsonObject> Object;
-    if (!ParseObject(Payload, Object, OutError))
-    {
-        return false;
-    }
-    FString Type;
-    if (!GetStringField(Object, TEXT("type"), Type, OutError)
-        || Type != TEXT("reference_query"))
-    {
-        OutError = TEXT("Message type must be 'reference_query'.");
-        return false;
-    }
-    if (!GetIdentityInt(Object, TEXT("session_id"), OutMessage.SessionId, OutError)
-        || !GetStringField(Object, TEXT("transfer_id"), OutMessage.TransferId, OutError))
-    {
-        return false;
-    }
-    if (OutMessage.SessionId < 1 || OutMessage.TransferId.IsEmpty())
-    {
-        OutError = TEXT("Fields 'session_id' must be positive and 'transfer_id' non-empty.");
-        return false;
-    }
-    TSharedPtr<FJsonObject> Scope;
-    if (!GetOptionalObject(Object, TEXT("scope"), Scope, OutError) || !Scope.IsValid())
-    {
-        OutError = TEXT("Field 'scope' must be an object.");
-        return false;
-    }
-    FString Level;
-    if (!GetStringField(Scope, TEXT("level"), Level, OutError) || Level.IsEmpty())
-    {
-        OutError = TEXT("Field 'scope.level' must be a non-empty string.");
-        return false;
-    }
-    OutMessage.Scope = Scope;
-    return true;
-}
-
 bool FMtoUProtocol::PeekType(
     const TArray<uint8>& Payload,
     FString& OutType,
@@ -1493,6 +1371,36 @@ bool FMtoUProtocol::PeekType(
     }
     OutError = TEXT("Field 'type' has the wrong JSON type.");
     return false;
+}
+
+bool FMtoUProtocol::IsDefinedMessageType(const FString& Type)
+{
+    // Every message Maya sends to Unreal. The table is the protocol's own
+    // list, not a prefix: a retired type is absent from it and so is any type
+    // the protocol never had.
+    static const TCHAR* const Defined[] = {
+        TEXT("hello"), TEXT("init"), TEXT("frame"),
+        TEXT("cache_enter"), TEXT("cache_begin"), TEXT("cache_frame"),
+        TEXT("cache_end"), TEXT("cache_clear"),
+        TEXT("mode"), TEXT("group"), TEXT("leave_linkage"), TEXT("remove_object")};
+    for (const TCHAR* Name : Defined)
+    {
+        if (Type == Name)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+FString FMtoUProtocol::UndefinedTypeError(const FString& Type)
+{
+    return FString::Printf(TEXT("Message type '%s' is not defined by the protocol."), *Type);
+}
+
+const TCHAR* FMtoUProtocol::ErrorKindName(ESendErrorKind Kind)
+{
+    return Kind == ESendErrorKind::Scheduling ? TEXT("scheduling") : TEXT("failure");
 }
 
 bool FMtoUProtocol::ParseCacheBegin(
@@ -1728,34 +1636,6 @@ bool FMtoUProtocol::ParseCacheEnd(const TArray<uint8>& Payload, FString& OutErro
     return true;
 }
 
-bool FMtoUProtocol::ParseCachePlay(
-    const TArray<uint8>& Payload,
-    int32& OutPlayId,
-    FString& OutError)
-{
-    OutPlayId = INDEX_NONE;
-    OutError.Reset();
-    TSharedPtr<FJsonObject> Object;
-    if (!ParseObject(Payload, Object, OutError))
-    {
-        return false;
-    }
-    FString Type;
-    if (!GetStringField(Object, TEXT("type"), Type, OutError) || Type != TEXT("cache_play"))
-    {
-        OutError = TEXT("Message type must be 'cache_play'.");
-        return false;
-    }
-    TSharedPtr<FJsonValue> PlayIdValue;
-    if (!GetTypedField(Object, TEXT("play_id"), EJson::Number, PlayIdValue, OutError)
-        || !GetExactInt(PlayIdValue, OutPlayId))
-    {
-        OutError = TEXT("Field 'play_id' must be an integer JSON number.");
-        return false;
-    }
-    return true;
-}
-
 bool ParseCacheTypeOnly(const TArray<uint8>& Payload, const TCHAR* ExpectedType, FString& OutError)
 {
     TSharedPtr<FJsonObject> Object;
@@ -1775,11 +1655,6 @@ bool ParseCacheTypeOnly(const TArray<uint8>& Payload, const TCHAR* ExpectedType,
 bool FMtoUProtocol::ParseCacheEnter(const TArray<uint8>& Payload, FString& OutError)
 {
     return ParseCacheTypeOnly(Payload, TEXT("cache_enter"), OutError);
-}
-
-bool FMtoUProtocol::ParseCacheStop(const TArray<uint8>& Payload, FString& OutError)
-{
-    return ParseCacheTypeOnly(Payload, TEXT("cache_stop"), OutError);
 }
 
 bool FMtoUProtocol::ParseCacheClear(
@@ -1998,7 +1873,6 @@ TArray<uint8> FMtoUProtocol::EncodeReady(
 TArray<uint8> FMtoUProtocol::EncodeHelloAck(
     int32 SessionId,
     bool bLinkage,
-    bool bReference,
     bool bCache,
     bool bModel,
     const TArray<FMtoUHelloTarget>& Targets,
@@ -2012,7 +1886,6 @@ TArray<uint8> FMtoUProtocol::EncodeHelloAck(
 
     const TSharedRef<FJsonObject> Capabilities = MakeShared<FJsonObject>();
     Capabilities->SetBoolField(TEXT("linkage"), bLinkage);
-    Capabilities->SetBoolField(TEXT("reference"), bReference);
     Capabilities->SetBoolField(TEXT("cache"), bCache);
     Capabilities->SetBoolField(TEXT("model"), bModel);
     Object->SetObjectField(TEXT("capabilities"), Capabilities);
@@ -2187,36 +2060,6 @@ TArray<uint8> FMtoUProtocol::EncodeApplied(
     return EncodeObject(Object);
 }
 
-TArray<uint8> FMtoUProtocol::EncodeReferenceOffer(
-    int32 SessionId,
-    const FString& TransferId,
-    const FString& Directory,
-    const FString& ManifestDigest,
-    const TSharedPtr<FJsonObject>& Scope,
-    int32 SpaceRevision,
-    int64 ByteCount,
-    int32 ObjectCount,
-    int32 TriangleCount)
-{
-    const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
-    Object->SetStringField(TEXT("type"), TEXT("reference_offer"));
-    Object->SetNumberField(TEXT("session_id"), SessionId);
-    Object->SetStringField(TEXT("transfer_id"), TransferId);
-    Object->SetStringField(TEXT("directory"), Directory);
-    Object->SetStringField(TEXT("manifest_digest"), ManifestDigest);
-    Object->SetObjectField(TEXT("scope"), Scope.IsValid()
-        ? Scope.ToSharedRef()
-        : MakeShared<FJsonObject>());
-    Object->SetNumberField(TEXT("space_revision"), SpaceRevision);
-
-    const TSharedRef<FJsonObject> Counts = MakeShared<FJsonObject>();
-    Counts->SetNumberField(TEXT("objects"), ObjectCount);
-    Counts->SetNumberField(TEXT("triangles"), TriangleCount);
-    Counts->SetNumberField(TEXT("bytes"), ByteCount);
-    Object->SetObjectField(TEXT("counts"), Counts);
-    return EncodeObject(Object);
-}
-
 TArray<uint8> FMtoUProtocol::EncodeCacheReady(int32 UploadId, int32 NegotiatedRevision, int32 FrameCount)
 {
     const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
@@ -2347,13 +2190,35 @@ TArray<uint8> FMtoUProtocol::EncodeError(
     const FString& Message,
     const FString& Details,
     int32 UploadId,
-    int32 PlayId)
+    int32 PlayId,
+    ESendErrorKind Kind,
+    const FString& EvalId,
+    int32 SampleSerial)
 {
     const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetStringField(TEXT("type"), TEXT("error"));
     Object->SetStringField(TEXT("code"), Code);
     Object->SetStringField(TEXT("message"), Message);
     Object->SetStringField(TEXT("details"), Details.IsEmpty() ? Message : Details);
+    Object->SetStringField(TEXT("kind"), ErrorKindName(Kind));
+    // A refused protocol version names this side's release, so Maya can show
+    // both. The plugin version is left out when the descriptor was not read,
+    // never replaced by a constant.
+    if (Code == TEXT("PROTOCOL_VERSION_MISMATCH"))
+    {
+        Object->SetNumberField(TEXT("protocol_version"), Version);
+        if (!GPluginVersionName.IsEmpty())
+        {
+            Object->SetStringField(TEXT("plugin_version"), GPluginVersionName);
+        }
+    }
+    // An error that refuses a parsed group repeats the group's identity; Maya
+    // frees the issued slot only when both name the sample it issued.
+    if (!EvalId.IsEmpty() && SampleSerial != INDEX_NONE)
+    {
+        Object->SetStringField(TEXT("eval_id"), EvalId);
+        Object->SetNumberField(TEXT("sample_serial"), SampleSerial);
+    }
     // Cache-operation errors echo the owning identity so Maya can discard
     // late errors from older uploads or play attempts.
     if (UploadId > 0)

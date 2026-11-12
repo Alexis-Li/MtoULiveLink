@@ -13,6 +13,7 @@ import time
 import uuid
 
 from .config import (
+    CACHED_MODE,
     CACHE_CONFIRMATION_BYTES,
     CACHE_FILE_PREFIX,
     CACHE_FORMAT_VERSION,
@@ -45,6 +46,7 @@ from .protocol import (
 from .scene import CharacterSceneError
 from .session import StreamingSessionError, copy_session_payload
 from .space import validate_frame_rate
+from .timecontrol import TimeControlRefused
 from .timeline import MayaTimeline
 
 
@@ -676,8 +678,10 @@ class CacheUpload(object):
                 and self._is_drained() and self._deadline is None):
             self._deadline = time.time() + UPLOAD_READY_TIMEOUT_SECONDS
         if self._deadline is not None and time.time() > self._deadline:
-            return CacheUploadResult(False, self.TRANSPORT, make_diagnostic(
-                "STREAM_INTERRUPTED",
+            # Unreal has not answered, but the connection may still be open:
+            # the upload fails and the connection is not blamed.
+            return CacheUploadResult(False, self.FAILED, make_diagnostic(
+                "CACHED_UPLOAD_TIMEOUT",
                 "Timed out waiting for Unreal to accept the uploaded cache."))
         if self._declaring:
             return self._pump_declaration()
@@ -868,7 +872,8 @@ class CachedPlayback(object):
         self._timer_api = timer_api if timer_api is not None else getattr(om, "MTimerMessage", None)
         self._cache = None
         self._phase = "idle"
-        self._paused_streaming = False
+        # The connection's time-control lease while this playback owns it.
+        self._lease = None
         self._capture_cache = None
         self._capture_cancel_requested = False
         self._capture_generation = 0
@@ -910,6 +915,10 @@ class CachedPlayback(object):
         if retention is not None:
             self._cache = retention._consume(revision)
         self._last_view = self._make_view()
+
+    @property
+    def _paused_streaming(self):
+        return self._lease is not None
 
     def _semantic_state(self):
         if self._closed or self._phase in ("closed", "detached", "transport_failed"):
@@ -1030,23 +1039,24 @@ class CachedPlayback(object):
                 "streaming revision {0}, current revision {1}".format(expected, current))
         return expected if expected is not None else current
 
-    def reply_sink(self):
-        """Where Unreal's replies go while this playback owns the connection."""
-        return self._replies.put
-
     def _pause_streaming(self):
-        if self._paused_streaming:
+        if self._lease is not None:
             return
-        if self._streaming_session is not None:
-            self._streaming_session.pause_for_cached(self._replies.put)
-        self._paused_streaming = True
+        session = self._streaming_session
+        if session is None:
+            return
+        try:
+            # The connection delivers cache outcomes to the lease holder.
+            self._lease = session.time_control.acquire(
+                CACHED_MODE, self, receive=self._replies.put)
+        except TimeControlRefused as refusal:
+            raise CachedPlaybackError(refusal.code, refusal.message, refusal.details)
 
-    def _resume_streaming(self):
-        if not self._paused_streaming:
-            return
-        if self._streaming_session is not None:
-            self._streaming_session.resume_from_cached()
-        self._paused_streaming = False
+    def _resume_streaming(self, clear_id=None):
+        """Release the lease; ``clear_id`` is the clear queued just before."""
+        lease, self._lease = self._lease, None
+        if lease is not None:
+            lease.release(clear_id)
 
     def enter(self):
         self._ensure_ready()
@@ -1195,11 +1205,14 @@ class CachedPlayback(object):
             # UE must acknowledge dropping the old cache and ending any active
             # playback before Maya samples the first frame of a new capture.
             self._awaiting_clear = self._send_clear_best_effort()
-            self._clear_wait_deadline = time.monotonic() + UPLOAD_READY_TIMEOUT_SECONDS
             self._send_enter_best_effort()
         else:
-            self._awaiting_clear = None
-            self._clear_wait_deadline = None
+            # The clear that ended the previous Cached Playback may still be
+            # unconfirmed; the new capture waits for it the same way.
+            self._awaiting_clear = self._streaming_session.time_control.pending_clear()
+        self._clear_wait_deadline = (
+            None if self._awaiting_clear is None
+            else time.monotonic() + UPLOAD_READY_TIMEOUT_SECONDS)
         if self._phase == "uploading":
             # Abort the in-flight transfer; the fresh cache_begin below resets
             # Unreal's buffer coherently, so stale frames cannot mix.
@@ -1260,10 +1273,9 @@ class CachedPlayback(object):
         self._clear_wait_deadline = None
         self._remove_playback_poller()
         self._discard_upload()
-        if send_clear:
-            self._send_clear_best_effort()
+        clear_id = self._send_clear_best_effort() if send_clear else None
         if resume_streaming:
-            self._resume_streaming()
+            self._resume_streaming(clear_id)
 
     def _capture_failure(self, error, transport_lost=False):
         # Timers and iterators die first so no further capture work fires.
@@ -1278,19 +1290,14 @@ class CachedPlayback(object):
         if transport_lost:
             self._phase = "transport_failed"
             self._publish(current=0, total=0, diagnostic=diagnostic)
-            if self._streaming_session is not None:
-                try:
-                    self._streaming_session.stop()
-                except (RuntimeError, TypeError):
-                    pass
+            self._end_with_connection()
             return error
         self._phase = "cancelled" if error.code == "CACHED_PLAYBACK_CANCELLED" else "failed"
         # A failed capture leaves Unreal owning cached entry state; drop it in
         # order before live poses flow again. Resuming Real-time Preview here
         # and clearing Unreal ownership is the complete, truthful transition:
         # the published view renders as REALTIME with this diagnostic.
-        self._send_clear_best_effort()
-        self._resume_streaming()
+        self._resume_streaming(self._send_clear_best_effort())
         self._publish(current=0, total=0, diagnostic=diagnostic)
         if error.code == "CACHED_PLAYBACK_CANCELLED":
             return None
@@ -1830,16 +1837,17 @@ class CachedPlayback(object):
         return processed
 
     def _send_clear_best_effort(self):
+        """Queue the next ``cache_clear``; its id, or None when nothing was sent."""
         self._clear_id += 1
         clear_id = self._clear_id
         session = self._streaming_session
         if session is None or not session.is_ready:
-            return clear_id
+            return None
         try:
             session.submit_cached(make_cache_clear_message(clear_id))
         except (CachedPlaybackError, StreamingSessionError,
                 RuntimeError, TypeError, ValueError):
-            pass
+            return None
         return clear_id
 
     def _invalidate_incompatible_cache(self, error):
@@ -1854,8 +1862,7 @@ class CachedPlayback(object):
             "CACHED_PLAYBACK_INCOMPATIBLE", error.message, details=error.details)
         # Unreal may still own entered or partially received state; drop it in
         # order before live poses resume.
-        self._send_clear_best_effort()
-        self._resume_streaming()
+        self._resume_streaming(self._send_clear_best_effort())
         self._publish(current=0, total=0, diagnostic=diagnostic)
 
     def _invalidate_corrupt_cache(self, error):
@@ -1872,8 +1879,7 @@ class CachedPlayback(object):
             details=str(error))
         # A mid-upload corruption leaves Unreal holding a partial buffer;
         # clear that ownership in order before streaming resumes.
-        self._send_clear_best_effort()
-        self._resume_streaming()
+        self._resume_streaming(self._send_clear_best_effort())
         self._publish(current=0, total=0, diagnostic=diagnostic)
 
     def _handle_transport_failure(self, error):
@@ -1890,18 +1896,29 @@ class CachedPlayback(object):
                 "The streaming connection ended during capture."),
                 transport_lost=True)
             return
-        self._remove_playback_poller()
-        self._discard_upload()
-        self._phase = "transport_failed"
         diagnostic = error if isinstance(error, dict) else make_diagnostic(
             "STREAM_INTERRUPTED", str(getattr(error, "message", error)),
             details=str(getattr(error, "details", error)))
+        session = self._streaming_session
+        if session is not None and session.is_ready:
+            # The connection is still usable, so it is not what failed: end
+            # the upload and give time back to realtime instead of holding the
+            # lease behind a view that says the connection is gone.
+            self._fail_upload(make_diagnostic(
+                "CACHED_UPLOAD_INTERRUPTED", diagnostic["message"],
+                details=diagnostic["details"]))
+            return
+        self._remove_playback_poller()
+        self._discard_upload()
+        self._phase = "transport_failed"
         self._publish(diagnostic=diagnostic)
-        if self._streaming_session is not None:
-            try:
-                self._streaming_session.stop()
-            except (RuntimeError, TypeError):
-                pass
+        self._end_with_connection()
+
+    def _end_with_connection(self):
+        """The connection is unusable: let the session end it with its reason."""
+        session = self._streaming_session
+        if session is not None:
+            session.poll_connection()
 
     def upload_retained_cache(self):
         """Reupload a retained local cache after a new negotiated connection."""
@@ -1953,7 +1970,7 @@ class CachedPlayback(object):
         self._cache = None
         self._uploaded_revision = None
         self._streaming_session = None
-        self._paused_streaming = False
+        self._lease = None
         self._closed = True
         self._phase = "detached"
         self._publish(diagnostic=diagnostic)
@@ -1965,8 +1982,11 @@ class CachedPlayback(object):
             self._remove_playback_poller()
             self._discard_upload()
             self._restore_capture_frame()
-            self._send_clear_best_effort()
-            self._resume_streaming()
+            # Every release of the lease already sent its own clear; without
+            # the lease Unreal holds no cache of this connection, and during
+            # linkage it would refuse the clear.
+            self._resume_streaming(
+                self._send_clear_best_effort() if self._paused_streaming else None)
         for cache in (self._capture_cache, self._cache):
             if cache is not None:
                 cache.delete()
@@ -1977,7 +1997,7 @@ class CachedPlayback(object):
         self._issued_retention = None
         self._uploaded_revision = None
         self._streaming_session = None
-        self._paused_streaming = False
+        self._lease = None
         self._closed = True
         self._phase = "detached"
         self._publish(current=0, total=0)

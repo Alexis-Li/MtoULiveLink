@@ -7,7 +7,7 @@ import os
 
 __version__ = "1.0.0"
 
-PROTOCOL_VERSION = 11
+PROTOCOL_VERSION = 12
 
 WORKFLOW_ANIMATION = "animation"
 
@@ -80,8 +80,16 @@ UPLOAD_CHUNK_FRAMES = 64
 # itself has no real-time deadline and is never paced by this value.
 UPLOAD_READY_TIMEOUT_SECONDS = 60.0
 
+# Unreal closes the connection right after the error that ends it. A close
+# later than this after Maya received that error, or after any other message,
+# is not explained by it.
+ERROR_CLOSE_WINDOW_SECONDS = 2.0
+
 REALTIME_MODE = "realtime"
 
+# Cached Playback owns time inside the panel and the time-control lease, but it
+# is not a wire mode: the connection never names it in ``mode`` or
+# ``mode_state``.
 CACHED_MODE = "cached"
 
 # The third exclusive time-control state: Unreal drives the Level Sequence
@@ -89,13 +97,28 @@ CACHED_MODE = "cached"
 # pose groups. See protocol/README.md.
 LINKAGE_MODE = "linkage"
 
-MODES = (REALTIME_MODE, CACHED_MODE, LINKAGE_MODE)
-
 CONTROL_MAYA = "maya"
 
 CONTROL_UNREAL = "unreal"
 
-# Frozen v11 budgets. The linkage group is metered as one message, not per
+# The ``mode`` values on the wire and the one controller each has. A mode and
+# a control that do not pair up are not a statement either host can follow.
+MODE_CONTROL = {
+    REALTIME_MODE: CONTROL_MAYA,
+    LINKAGE_MODE: CONTROL_UNREAL,
+}
+
+MODES = tuple(MODE_CONTROL)
+
+# ``error.kind``: a scheduling refusal answers a group that Unreal's own
+# scheduling made obsolete; every other error is a failure.
+ERROR_KIND_SCHEDULING = "scheduling"
+
+ERROR_KIND_FAILURE = "failure"
+
+ERROR_KINDS = (ERROR_KIND_SCHEDULING, ERROR_KIND_FAILURE)
+
+# Frozen budgets. The linkage group is metered as one message, not per
 # object, so the framing ceiling is also the group ceiling.
 MAX_LINKAGE_GROUP_BYTES = MAX_MESSAGE_BYTES
 
@@ -112,36 +135,6 @@ LINKAGE_CONVERGENCE_SECONDS = 2.0
 # Unreal confirms a transition Maya started with its own mode_state; Maya waits
 # the same 2.5x convergence window Unreal allows for Maya's confirmation.
 LINKAGE_MODE_CONFIRMATION_SECONDS = LINKAGE_CONVERGENCE_SECONDS * 2.5
-
-# Scene-reference handoff budgets, enforced by the Maya importer before any
-# staging node is created.
-MAX_REFERENCE_BYTES = 256 * 1024 * 1024
-
-MAX_REFERENCE_OBJECTS = 20000
-
-MAX_REFERENCE_TRIANGLES = 20000000
-
-# Tool-owned scene-reference container and its ownership mark.
-REFERENCE_CONTAINER = "MtoU_UE_SceneRef"
-
-REFERENCE_MARK_ATTRIBUTE = "mtouSceneRefContainer"
-
-REFERENCE_MARK_VALUE = "mtou-scene-ref-container/1"
-
-# The anchor the container was placed for, so a reference exported before the
-# target moved cannot enter linkage as if it were current.
-REFERENCE_ANCHOR_ATTRIBUTE = "mtouSceneRefAnchor"
-
-# The UUIDs of every node one import created, so cleanup deletes only those:
-# a namespace alone does not prove where a node came from.
-REFERENCE_INVENTORY_ATTRIBUTE = "mtouSceneRefNodes"
-
-# A reference matches the linkage anchor within the common-anchor tolerances.
-REFERENCE_ANCHOR_TOLERANCE_CM = 0.01
-
-REFERENCE_ANCHOR_TOLERANCE_DEG = 0.01
-
-REFERENCE_GRAY_SHADER = "MtoU_UE_SceneRef_Gray"
 
 # Tool-owned temporary camera that follows the Unreal evaluated camera.
 LINK_CAMERA_NAME = "MtoU_LinkCamera"

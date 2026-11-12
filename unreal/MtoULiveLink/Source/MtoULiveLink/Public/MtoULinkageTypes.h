@@ -67,20 +67,6 @@ struct MTOULIVELINK_API FMtoUPoseGroup
     double UeDisplayFrame = 0.0;
 };
 
-/** Actual component completion evidence for one applied group. */
-struct MTOULIVELINK_API FMtoUAppliedEvidence
-{
-    FString EvalId;
-    int32 SampleSerial = 0;
-    bool bApplied = false;
-    double AppliedDisplayFrame = 0.0;
-    double LagSeconds = 0.0;
-    FString Reason;
-    int32 BoneCount = 0;
-    int32 CurveCount = 0;
-    int32 PartCount = 0;
-};
-
 /** One object of the set as the panel shows it. */
 struct MTOULIVELINK_API FMtoULinkageObjectView
 {
@@ -134,6 +120,33 @@ struct MTOULIVELINK_API FMtoULinkageView
     FString Detail;
     FString Error;
     FString ErrorCode;
+};
+
+/** The clock that drives time on the connection (ADR 0014). */
+enum class EMtoUTimeAuthority : uint8
+{
+    /** Realtime preview: Maya's own time. */
+    Maya,
+    /** Cached Playback holds the connection, from `cache_enter` until its clear. */
+    Cache,
+    /** Linkage: the Level Sequence. */
+    Sequence,
+};
+
+/**
+ * The connection's time control, merged from the cache session and the
+ * linkage session the source owns, so a panel never combines the two itself.
+ * Who drives time and whether the takeover is still held are separate: after
+ * 返回实时 Maya drives time while the writers stay borrowed until 结束预览.
+ */
+struct MTOULIVELINK_API FMtoUTimeControlView
+{
+    EMtoUTimeAuthority Authority = EMtoUTimeAuthority::Maya;
+    /** A linkage transition waits for the other host. */
+    bool bTransitioning = false;
+    /** The paired targets' writers are still borrowed. */
+    bool bTakeoverHeld = false;
+    int32 ModeRevision = 0;
 };
 
 /** One issued linkage target and how it ended, on the game thread's monotonic clock. */
@@ -218,8 +231,8 @@ struct MTOULIVELINK_API FMtoULinkageHooks
     TFunction<bool(FString& OutReason)> ValidateTakeover;
     /**
      * The common anchor of the takeover: the primary target's placement.
-     * Linkage's `mode_state` names it so Maya can tell a scene reference
-     * exported for another placement from a current one.
+     * Linkage's `mode_state` names it as the static anchor `A` of the
+     * common space the targets and the linkage camera share.
      */
     TFunction<bool(FTransform& OutAnchor)> GetAnchor;
     /** Report a new view snapshot for the panel. */

@@ -29,7 +29,12 @@ public:
     static FText CompactLinkageText(const FText& Text);
 
     /** The 镜头联动 group's one status line: who controls time and whether Maya keeps up. */
-    static FText FormatLinkageStatus(const struct FMtoULinkageView& View);
+    static FText FormatLinkageStatus(
+        const struct FMtoULinkageView& View, const struct FMtoUTimeControlView& Time);
+
+    /** 进入联动 is available: the target is paired and Maya drives time, no transition waits. */
+    static bool CanEnterLinkage(
+        const struct FMtoULinkageView& View, const struct FMtoUTimeControlView& Time);
 
     /** The lag row; empty while Maya keeps up, so the row is hidden. */
     static FText FormatLinkageLag(const struct FMtoULinkageView& View);
@@ -39,12 +44,6 @@ public:
 
     /** Every linkage read-back the group leaves out, for 高级设置与诊断. */
     static FText FormatLinkageDiagnostics(const struct FMtoULinkageView& View);
-
-    /** The 场景参考 result line in the user's terms. */
-    static FText FormatSceneReferenceResult(const struct FMtoUSceneRefExportResult& Result);
-
-    /** The handoff identity, counts and scope the result line leaves out. */
-    static FText FormatSceneReferenceDiagnostics(const struct FMtoUSceneRefExportResult& Result);
 
     /**
      * Acceptance renders open every MtoU group, so the check sees rows that
@@ -115,7 +114,8 @@ public:
             EMtoUPreviewBuildStage Stage = EMtoUPreviewBuildStage::None;
             FString PreviewDiagnostics;
             FString PreviewSummary;
-            FString Connection;
+            EMtoUConnectionState Connection = EMtoUConnectionState::Disconnected;
+            FString ConnectionDetail;
             EMtoULinkSessionState Session = EMtoULinkSessionState::Idle;
             FString ModelDiagnostics;
             FString CharacterDiagnostics;

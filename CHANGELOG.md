@@ -7,11 +7,75 @@ repository's issues.
 
 ## Unreleased
 
+### Upgrade notes
+
+- Update the Maya and Unreal components together: protocol v12 refuses a mixed
+  pair before it touches either scene. (#14)
+- The scene reference is removed: Unreal's **场景参考** group in the Binding Actor
+  Details and Maya's **打开场景参考窗口** button and **MtoU 场景参考** window no longer
+  exist, and the Maya and Unreal components must be updated together. (#42)
+- You can delete by hand any `MtoU_UE_SceneRef` node an earlier version imported
+  into a Maya scene. Camera import follows in #40. (#42)
+
 ### Added
 
 - Both archives now contain `LICENSE` and `NOTICE`, and the copyright and license
   are shown under **关于** at the bottom right of the Maya panel and in Unreal's
   plugin entry. The license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
+
+### Changed
+
+- A refused protocol version now reads 连接失败 · 插件协议版本不匹配 and lists the plugin and
+  protocol version that Maya and Unreal each have loaded (未知（对端未提供） for an item the
+  other side did not provide), with the advice to reinstall both from one release. (#34)
+
+### Fixed
+
+- A realtime frame from another protocol version now reports the plugin protocol
+  mismatch before disconnecting, and Maya identifies its running version. (#39)
+- **结束预览** during Cached Playback no longer freezes Unreal: the cache keeps the
+  connection until **实时**, which then clears it and resumes the live pose. **进入联动**
+  stays unavailable until Unreal confirms that clear. (#9)
+- During Cached Playback, Unreal's **进入联动** is disabled and the 镜头联动 status reads
+  缓存播放中; an entry from either host is refused before any Sequencer track is muted,
+  so the cache upload is not interrupted. (#9)
+- During Cached Playback, second-object removals from Unreal still reach Maya. (#9)
+- An Unreal error is shown once and the same way whatever modes the connection used.
+  When Unreal then closes the connection, the Maya panel shows that reason, also during
+  Cached Playback and linkage, instead of a generic disconnect; an error that only
+  refuses one message keeps the connection. (#9)
+- When Unreal does not confirm a cache upload within 60 seconds, Maya returns to **实时**
+  on the same connection and says so, instead of disconnecting; switch to **缓存播放**
+  and click **捕获并上传** to try again. (#9)
+- After opening a scene or starting a new one, a role and second object set right away
+  in the Maya panel are no longer cleared a moment later, which ended the connection
+  and linkage. (#9)
+- After linkage sessions have ended several times, Unreal no longer refuses a new Maya
+  connection with a full control queue (`RESOURCE_LIMIT`), so restarting the editor is
+  not needed to connect again. (#11)
+- Leaving linkage no longer reports a "恢复残留" for a locked output-resolution attribute
+  that linkage never changed; only an attribute that could not be put back is listed. (#12)
+- The Sequencer tracks that **进入联动** muted are handed back when the connection ends
+  before the character connects and when the MtoU source is removed in the Live Link
+  window; they no longer stay muted. (#13)
+- After a disconnect, **进入联动** is refused at once and no Sequencer track is muted. (#13)
+- When a track cannot be handed back at the end of a connection, the Binding Actor's
+  Details show 恢复未完成 in the **恢复结果** row instead of reporting a restore. (#13)
+- Placing, refreshing or deleting a Binding Actor that does not take part in the
+  running connection no longer ends it; only the actors the connection streams do. (#13)
+- A Binding Actor taken out of the object set shows 已移出对象集合 in its Details instead
+  of 连接状态未知. (#13)
+- After Maya disconnects, the Live Link source status no longer reports a control-queue
+  overflow that did not happen. (#13)
+- When Maya quits or its connection drops while Unreal is still sending to it, Unreal
+  notices at once: the connection ends, muted Sequencer tracks are handed back and a new
+  Maya can connect, instead of staying 已连接 until the source is removed. (#29)
+- Undoing or redoing an Additional Parts edit in Unreal now always ends the streaming
+  connection of the affected Binding actor, as the edit itself does, instead of sometimes
+  leaving Maya streaming to the old part set. (#31)
+- A real linkage conflict, such as Unreal using another character-set revision than
+  Maya (角色集合修订号不一致), is now reported instead of counted with the cancelled
+  targets. (#14)
 
 ## 1.0.0 - 2026-10-30
 

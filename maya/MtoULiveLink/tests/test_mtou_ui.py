@@ -1,4 +1,4 @@
-"""Panel, controller and window tests for the linkage and reference workflow.
+"""Panel, controller and window tests for the linkage workflow.
 
 Everything runs against fake ``cmds``/``om`` bindings and a fake streaming
 session, so no timer, socket or Unreal peer is involved: the pump is driven by
@@ -30,14 +30,13 @@ from mtou_livelink import scene as mtou_scene  # noqa: E402
 from mtou_livelink import session as mtou_session  # noqa: E402
 from mtou_livelink import space as mtou_space  # noqa: E402
 from mtou_livelink import timeline as mtou_timeline  # noqa: E402
-from mtou_livelink.ui import reference_window as mtou_reference_window  # noqa: E402
+from mtou_livelink import timecontrol as mtou_timecontrol  # noqa: E402
 
 # Every module that binds a Maya global at import time; the detail windows read
 # theirs through `mayaapi`, so patching that module covers them too.
 _PACKAGE_MODULES = (mtou_cache, mtou_config, mtou_controller, mtou_diagnostics,
                     mtou_linkage, mtou_mayaapi, mtou_protocol, mtou_scene,
-                    mtou_session, mtou_space, mtou_timeline,
-                    mtou_reference_window)
+                    mtou_session, mtou_space, mtou_timeline)
 
 
 class _Bindings(object):
@@ -123,11 +122,6 @@ class FakeLinkageHost(object):
         self.applied = []
         self.restore_residual = list(residual)
         self.capture_error = capture_error
-        self.stale = None
-
-    def stale_reference(self, anchor):
-        del anchor
-        return self.stale
 
     def capture_state(self):
         self.captured += 1
@@ -151,16 +145,21 @@ class FakeLinkageHost(object):
 
 
 class FakeStreamingSession(object):
-    """The streaming session surface the linkage and reference paths use."""
+    """The streaming session surface the linkage paths use."""
 
     def __init__(self, ready=True, session_id=7, set_revision=1,
                  space_revision=1):
         self._ready = ready
-        self.hello = {"session_id": session_id, "version": 11}
+        self.hello = {"session_id": session_id,
+                      "version": mtou_config.PROTOCOL_VERSION}
         self.messages = []
-        self.begun = []
+        self.paused = 0
         self.resumed = 0
-        self.listeners = []
+        self.reasons = []
+        # The panel's statement handler, as connect() would register it.
+        self.statement_handler = None
+        self.time_control = mtou_timecontrol.TimeControl(
+            pause=self._pause, resume=self._resume)
         self.object_id = mtou_config.CHARACTER_OBJECT_ID
         self.set_revision = set_revision
         self.space_revision = space_revision
@@ -172,22 +171,23 @@ class FakeStreamingSession(object):
     def hello_reply(self):
         return dict(self.hello)
 
-    def begin_linkage(self, reply_listener=None):
-        self.begun.append(reply_listener)
-        self.listeners.append(reply_listener)
+    def _pause(self):
+        self.paused += 1
 
     def submit_linkage(self, message):
         self.messages.append(message)
         return True
 
-    def resume_after_linkage(self):
+    def _resume(self):
         self.resumed += 1
 
     def stop(self):
         self.stopped = True
 
-    def set_cached_reply_listener(self, listener):
-        self.listeners.append(listener)
+    def route(self, reply):
+        """Deliver one Unreal message the way the connection's sender does."""
+        return mtou_session.route_reply(
+            reply, self.time_control, self.statement_handler, self.reasons.append)
 
 
 class FakeCharacterScene(object):
@@ -199,59 +199,6 @@ class FakeCharacterScene(object):
 
     def close(self):
         self.closed = True
-
-
-class FakeReferenceModule(object):
-    """The scene-reference module contract, recording every call."""
-
-    class ReferenceRefused(RuntimeError):
-        def __init__(self, code, detail=""):
-            RuntimeError.__init__(self, detail or code)
-            self.code = code
-            self.detail = detail
-
-    def __init__(self, inspect_report=None, import_report=None,
-                 inspect_error=None, import_error=None):
-        self.inspect_report = inspect_report or {"accepted": True, "detail": "ok"}
-        self.import_report = import_report
-        self.inspect_error = inspect_error
-        self.import_error = import_error
-        self.calls = []
-
-    def inspect(self, handoff, budget=None):
-        self.calls.append(("inspect", handoff, budget))
-        if self.inspect_error is not None:
-            raise self.inspect_error
-        return dict(self.inspect_report)
-
-    def import_handoff(self, handoff, budget=None):
-        self.calls.append(("import_handoff", handoff, budget))
-        if self.import_error is not None:
-            raise self.import_error
-        return dict(self.import_report or {})
-
-    def ReferenceContainer(self, **kwargs):
-        self.calls.append(("container", kwargs))
-        return self
-
-    def remove(self):
-        self.calls.append(("remove",))
-        return {"removed": True, "namespace_removed": True, "nodes_removed": 3,
-                "detail": "removed", "residual": {}}
-
-    def recover(self):
-        self.calls.append(("recover",))
-        return {"stale_staging_namespaces": [], "restored_previous_reference": True}
-
-
-def stale_reference():
-    """A stale-manifest refusal, with the frozen code the module raises."""
-    class _Stale(FakeReferenceModule.ReferenceRefused):
-        def __init__(self):
-            FakeReferenceModule.ReferenceRefused.__init__(
-                self, "REFERENCE_STALE", "manifest belongs to an older space")
-
-    return _Stale()
 
 
 class MainThreadDeferralTests(unittest.TestCase):
@@ -298,8 +245,23 @@ class MainThreadDeferralTests(unittest.TestCase):
             controller._linkage = mock.Mock()
             controller._report_runtime_error({
                 "type": "error", "code": "LINKAGE_NOT_ACTIVE",
-                "message": "A group arrived while another host owns time."})
-        controller._linkage.note_refused.assert_called_once()
+                "message": "A group arrived while another host owns time.",
+                "kind": "scheduling", "eval_id": "seq@10+0/cam#c1",
+                "sample_serial": 2})
+        controller._linkage.note_refused.assert_called_once_with(
+            "A group arrived while another host owns time.",
+            eval_id="seq@10+0/cam#c1", sample_serial=2)
+        fake_cmds.evalDeferred.assert_not_called()
+
+    def test_a_scheduling_refusal_without_a_linkage_session_is_not_shown(self):
+        # The kind alone makes it scheduling; there is nothing to count it on.
+        fake_cmds = mock.MagicMock()
+        with mock.patch.object(mtou_mayaapi, "utils", None),                 mock.patch.object(mtou_controller, "cmds", fake_cmds):
+            controller = mtou_controller.Controller()
+            handled = controller._report_runtime_error({
+                "type": "error", "code": "EVAL_STALE", "message": "stale",
+                "kind": "scheduling"})
+        self.assertFalse(handled)
         fake_cmds.evalDeferred.assert_not_called()
 
 
@@ -312,9 +274,11 @@ class LinkagePanelTests(unittest.TestCase):
         self.deferred = []
         self.host = FakeLinkageHost()
         self.session = FakeStreamingSession()
-        self.reference = FakeReferenceModule()
         self.controller = mtou_controller.Controller()
         self.controller._session = self.session
+        self.session.statement_handler = (
+            lambda reply: self.controller._on_session_statement(
+                {"session": self.session}, reply))
         self.controller._scene = FakeCharacterScene()
         self.fake_cmds = self._fake_cmds()
         self.fake_om = self._fake_om()
@@ -324,11 +288,6 @@ class LinkagePanelTests(unittest.TestCase):
             lambda controller, scene, object_ids, frame_rate: harness.host)
         host_patch.start()
         self.addCleanup(host_patch.stop)
-        module_patch = mock.patch.object(
-            mtou_controller.Controller, "_reference_module_or_report",
-            lambda controller: harness.reference)
-        module_patch.start()
-        self.addCleanup(module_patch.stop)
         error_patch = mock.patch.object(
             mtou_controller.Controller, "_show_error")
         error_patch.start()
@@ -439,7 +398,7 @@ class LinkagePanelTests(unittest.TestCase):
         buttons = [call[1].get("label")
                    for call in self.fake_cmds.button.call_args_list
                    if call[1].get("label")]
-        for label in ("进入联动", "返回实时", "结束预览", "打开场景参考窗口"):
+        for label in ("进入联动", "返回实时", "结束预览", "打开对象配对窗口"):
             self.assertIn(label, buttons)
         # The read-back window is gone: its values live in 诊断详情.
         self.assertNotIn("打开镜头联动窗口", buttons)
@@ -549,10 +508,10 @@ class LinkagePanelTests(unittest.TestCase):
     def test_diagnostic_details_keep_the_linkage_read_back(self):
         self.enter_linkage()
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time(display_frame=12.0))
+            self.session.route(camera_time(display_frame=12.0))
         self.run_timer()
         with self.bindings:
-            self.controller._on_runtime_reply(
+            self.session.route(
                 applied_message(eval_id="seq@10+0/cam#c1", sample_serial=1))
 
         text = self.controller._diagnostic_text()
@@ -560,7 +519,7 @@ class LinkagePanelTests(unittest.TestCase):
                          "模式：镜头联动", "mode_revision：1 · session：7",
                          "目标时间：", "已应用求值：seq@10+0/cam#c1", "样本序号：1",
                          "应用年龄：", "滞后：", "已应用 / 已拒绝：1 / 0",
-                         "在途目标：", "逐资源恢复：无", "场景参考：", "冻结上限："):
+                         "在途目标：", "逐资源恢复：无"):
             self.assertIn(expected, text)
 
     def test_cache_summary_stays_inside_its_column_with_the_full_text_as_tooltip(self):
@@ -609,11 +568,11 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertIsNone(self.controller._linkage)
         self.assertEqual([], self.timers)
         self.assertEqual(0, self.host.captured)
-        self.assertEqual([], self.session.begun)
+        self.assertEqual(0, self.session.paused)
         self.assertEqual(mtou_config.REALTIME_MODE, self.controller._mode)
 
     def test_enter_linkage_refuses_while_cached_playback_owns_the_session(self):
-        self.controller._mode = mtou_config.CACHED_MODE
+        self.session.time_control.acquire(mtou_config.CACHED_MODE, object())
         self.controller._cached_view = mtou_cache.CachedPlaybackView(
             mtou_cache.CachedPlayback.REPLAYING)
         self.enter_linkage()
@@ -646,7 +605,7 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(mtou_config.LINKAGE_MODE, self.controller._mode)
         self.assertEqual(1, linkage.mode_revision())
         self.assertEqual(1, self.host.captured)
-        self.assertEqual([self.controller._on_runtime_reply], self.session.begun)
+        self.assertEqual(1, self.session.paused)
         self.assertEqual(7, linkage.status().session_id)
         self.assertEqual(1, len(self.timers))
         self.assertLessEqual(self.timers[0][0], 1.0 / 60.0)
@@ -666,7 +625,7 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
 
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time(display_frame=12.0))
+            self.session.route(camera_time(display_frame=12.0))
         self.assertEqual(1, self.controller._linkage.pending_count())
 
         self.run_timer()
@@ -689,12 +648,12 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
 
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time(eval_serial=3))
+            self.session.route(camera_time(eval_serial=3))
         # A routed target waits for the pump; the status keeps it honest.
         self.assertEqual(1, self.controller._linkage.pending_count())
 
         with self.bindings:
-            self.controller._on_runtime_reply(
+            self.session.route(
                 applied_message(eval_id="seq@10+0/cam#c1", sample_serial=1))
         status = self.controller.linkage_status()
         self.assertEqual(1, status["applied_count"])
@@ -702,7 +661,7 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(0.02, status["lag_seconds"])
 
         with self.bindings:
-            self.controller._on_runtime_reply({
+            self.session.route({
                 "type": "mode_state", "session_id": 7, "mode_revision": 1,
                 "mode": "linkage", "control": "unreal", "detail": "UE 已接管",
                 "anchor": IDENTITY_ANCHOR})
@@ -716,9 +675,9 @@ class LinkagePanelTests(unittest.TestCase):
         current = self.controller._linkage.mode_revision()
 
         with self.bindings:
-            self.controller._on_runtime_reply(
+            self.session.route(
                 camera_time(mode_revision=current - 1))
-            self.controller._on_runtime_reply(
+            self.session.route(
                 applied_message(mode_revision=current - 1))
             self.flush()
 
@@ -728,73 +687,116 @@ class LinkagePanelTests(unittest.TestCase):
 
     def _send_one_group(self):
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time())
+            self.session.route(camera_time())
         self.run_timer()
 
-    def _assert_counted(self, details, message="A group named a different mode revision."):
+    def _scheduling(self, code, **extra):
+        reply = {"type": "error", "code": code, "kind": "scheduling",
+                 "message": "refused", "details": "free text"}
+        reply.update(extra)
+        return reply
+
+    def _assert_counted(self, reply):
         self.show_error.reset_mock()
         refused = self.controller.linkage_status()["refused_count"]
-        self._route({"type": "error", "code": "MODE_CONFLICT",
-                     "message": message, "details": details})
+        self._route(reply)
         self.flush()
         self.show_error.assert_not_called()
         self.assertEqual(refused + 1, self.controller.linkage_status()["refused_count"])
 
-    def _assert_reported(self, details, message):
+    def _assert_reported(self, reply):
         self.show_error.reset_mock()
-        self._route({"type": "error", "code": "MODE_CONFLICT",
-                     "message": message, "details": details})
+        refused = self.controller.linkage_status()["refused_count"]
+        self._route(reply)
         self.flush()
-        self.assertEqual("MODE_CONFLICT", self.show_error.call_args[0][0]["code"])
+        self.assertEqual(reply["code"], self.show_error.call_args[0][0]["code"])
+        self.assertEqual(refused, self.controller.linkage_status()["refused_count"])
 
-    def test_unreal_refusing_a_group_during_its_transition_is_counted(self):
-        # R-021: a group that reached Unreal during a transition is scheduling.
+    def test_only_the_kind_decides_a_scheduling_refusal(self):
+        # Every code Unreal can mark as scheduling is counted, whatever its
+        # details say; the free text is only displayed.
         self.enter_linkage()
         self._send_one_group()
-        self._assert_counted("target mode revision 2",
-                             "A group arrived during a time-control transition.")
+        for code in ("EVAL_STALE", "LINKAGE_NOT_ACTIVE", "SET_REVISION_STALE",
+                     "MODE_CONFLICT"):
+            with self.subTest(code=code):
+                self._assert_counted(self._scheduling(code, details="not a pattern"))
 
-    def test_unreal_refusing_a_group_of_an_older_revision_is_counted(self):
-        # The group was in flight when Maya returned to realtime; the reply of
-        # the old revision arrives afterwards.
+    def test_the_same_codes_without_the_kind_are_reported(self):
+        # R-005: a newer set revision or a refused remove_object is a real
+        # conflict that used to be counted by its code alone.
         self.enter_linkage()
         self._send_one_group()
-        with self.bindings:
-            self.controller.leave_linkage("realtime")
-        self._assert_counted("group mode revision 1, current 2")
+        for code in ("EVAL_STALE", "LINKAGE_NOT_ACTIVE", "SET_REVISION_STALE",
+                     "MODE_CONFLICT"):
+            with self.subTest(code=code):
+                self._assert_reported({
+                    "type": "error", "code": code, "message": "refused",
+                    "details": "group set revision 9, current 3"})
+                self._assert_reported({
+                    "type": "error", "code": code, "kind": "failure",
+                    "message": "refused", "details": "target mode revision 4"})
 
-    def test_a_group_of_a_newer_revision_is_still_a_conflict(self):
-        # R-022: Unreal treats a group ahead of its revision as a failure.
+    def test_a_scheduling_refusal_of_the_issued_sample_frees_the_slot(self):
         self.enter_linkage()
         self._send_one_group()
-        self._assert_reported("group mode revision 9, current 3",
-                              "A group named a different mode revision.")
+        linkage = self.controller._linkage
+        self.assertEqual(1, linkage.status().issued)
+        self._assert_counted(self._scheduling(
+            "EVAL_STALE", eval_id="seq@10+0/cam#c1", sample_serial=1))
+        self.assertEqual(0, linkage.status().issued)
+
+    def test_a_scheduling_refusal_of_another_sample_keeps_the_slot(self):
+        self.enter_linkage()
+        self._send_one_group()
+        linkage = self.controller._linkage
+        for extra in ({"eval_id": "seq@11+0/cam#c1", "sample_serial": 1},
+                      {"eval_id": "seq@10+0/cam#c1", "sample_serial": 2},
+                      {"eval_id": "seq@10+0/cam#c1"},
+                      {"sample_serial": 1},
+                      {}):
+            with self.subTest(extra=extra):
+                self._assert_counted(self._scheduling("EVAL_STALE", **extra))
+                self.assertEqual(1, linkage.status().issued)
+
+    def test_the_issued_slot_is_not_freed_by_text(self):
+        # The refusal text used to name the issued sample; it no longer counts.
+        self.enter_linkage()
+        self._send_one_group()
+        self._assert_counted(self._scheduling(
+            "EVAL_STALE",
+            details="group eval seq@10+0/cam#c1, current target none"))
+        self.assertEqual(1, self.controller._linkage.status().issued)
+
+    def test_a_missing_kind_reads_as_a_failure(self):
+        self.enter_linkage()
+        self._assert_reported({"type": "error", "code": "MODE_CONFLICT",
+                               "message": "Linkage is already active.",
+                               "details": ""})
+
+    def test_a_group_of_a_newer_revision_is_a_failure(self):
+        # R-022: Unreal marks a group ahead of its revision as a failure.
+        self.enter_linkage()
+        self._send_one_group()
+        self._assert_reported({
+            "type": "error", "code": "MODE_CONFLICT", "kind": "failure",
+            "message": "A group named a different mode revision.",
+            "details": "group mode revision 9, current 3",
+            "eval_id": "seq@10+0/cam#c1", "sample_serial": 1})
 
     def test_a_refused_mode_message_is_reported_while_a_group_is_in_flight(self):
         # R-022: a conflict about Maya's own transition is never scheduling,
         # however many groups are still on their way.
         self.enter_linkage()
         self._send_one_group()
-        self._assert_reported(
-            "current mode revision 3, message 2",
-            "A leave_linkage message named an older or repeated mode revision.")
-        self._assert_reported(
-            "message mode revision 5, current 3",
-            "A failed transition named a mode revision this session never entered.")
-
-    def test_a_mode_conflict_without_group_details_is_reported(self):
-        self.enter_linkage()
-        self._assert_reported("", "Linkage is already active.")
-
-    def test_only_the_two_group_forms_are_scheduling_conflicts(self):
-        scheduling = mtou_linkage.is_scheduling_conflict
-        self.assertTrue(scheduling("target mode revision 4"))
-        self.assertTrue(scheduling("group mode revision 1, current 2"))
-        self.assertFalse(scheduling("group mode revision 2, current 2"))
-        self.assertFalse(scheduling("group mode revision 3, current 2"))
-        self.assertFalse(scheduling("current mode revision 3, message 2"))
-        self.assertFalse(scheduling("prefix target mode revision 4"))
-        self.assertFalse(scheduling(None))
+        self._assert_reported({
+            "type": "error", "code": "MODE_CONFLICT", "kind": "failure",
+            "message": "A leave_linkage message named an older or repeated mode revision.",
+            "details": "current mode revision 3, message 2"})
+        self._assert_reported({
+            "type": "error", "code": "MODE_CONFLICT", "kind": "failure",
+            "message": "A failed transition named a mode revision this session never entered.",
+            "details": "message mode revision 5, current 3"})
 
     def test_a_message_from_a_newer_mode_is_still_a_conflict(self):
         self.enter_linkage()
@@ -802,7 +804,7 @@ class LinkagePanelTests(unittest.TestCase):
         current = self.controller._linkage.mode_revision()
 
         with self.bindings:
-            self.controller._on_runtime_reply(
+            self.session.route(
                 camera_time(mode_revision=current + 1))
             self.flush()
 
@@ -818,7 +820,7 @@ class LinkagePanelTests(unittest.TestCase):
 
     def _route(self, reply):
         with self.bindings:
-            handled = self.controller._on_runtime_reply(reply)
+            handled = self.session.route(reply)
             self.flush()
         return handled
 
@@ -863,22 +865,6 @@ class LinkagePanelTests(unittest.TestCase):
         # A later Maya entry continues the connection's revision.
         self.enter_linkage()
         self.assertEqual(3, self.controller._linkage.mode_revision())
-
-    def test_a_stale_reference_ends_the_entry_and_says_why(self):
-        self.enter_linkage()
-        self.show_error.reset_mock()
-        self.host.stale = "the reference was placed for another anchor"
-        self._route(self._mode_state(1))
-
-        self.assertFalse(self.controller._linkage.is_active)
-        self.assertEqual(mtou_config.REALTIME_MODE, self.controller._mode)
-        self.assertEqual(1, len(self.host.restored))
-        self.assertEqual(1, self.session.resumed)
-        self.assertEqual("REFERENCE_STALE", self.show_error.call_args[0][0]["code"])
-        self.assertEqual(
-            ("realtime", "failed"),
-            (self.session.messages[-1]["mode"],
-             self.session.messages[-1]["transition"]))
 
     def test_unreal_refusing_maya_entry_rolls_the_panel_back(self):
         self.enter_linkage()
@@ -939,7 +925,7 @@ class LinkagePanelTests(unittest.TestCase):
 
     def test_a_deferred_statement_of_an_ended_connection_is_dropped(self):
         with self.bindings:
-            self.controller._on_runtime_reply(self._mode_state(1))
+            self.session.route(self._mode_state(1))
         # The connection ends and a new one (session 8) is ready before the
         # main thread runs the deferred statement.
         replacement = FakeStreamingSession(session_id=8)
@@ -958,42 +944,26 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(mtou_config.LINKAGE_MODE, self.controller._mode)
         self.assertEqual([], self.host.restored)
 
-    def test_dispatcher_leaves_errors_to_the_session_before_linkage(self):
-        # Without linkage an Unreal error still ends the realtime connection.
-        handled = self._route({"type": "error", "code": "INVALID_MESSAGE",
-                               "message": "bad frame"})
-        self.assertFalse(handled)
+    def test_an_error_is_reported_the_same_way_before_and_during_linkage(self):
+        # Unreal refusing one message keeps the connection in every mode; the
+        # report is also the reason if Unreal closes the connection next.
+        error = {"type": "error", "code": "INVALID_MESSAGE",
+                 "message": "bad frame", "details": "frame 3"}
+        self.assertTrue(self._route(dict(error)))
+        self.assertEqual("INVALID_MESSAGE", self.show_error.call_args[0][0]["code"])
+        self.assertEqual(["INVALID_MESSAGE"],
+                         [reason["code"] for reason in self.session.reasons])
         self.enter_linkage()
-        handled = self._route({"type": "error", "code": "MODE_CONFLICT",
-                               "message": "stale"})
-        self.assertTrue(handled)
-
-    def test_runtime_reply_stores_a_reference_offer_and_refreshes_its_window(self):
-        self.enter_linkage()
-        window = mock.Mock()
-        self.controller._reference_window = window
-        offer = {
-            "type": "reference_offer", "session_id": 7, "transfer_id": "tx-1",
-            "directory": "handoff/tx-1", "manifest_digest": "ab12",
-            "scope": {"level": "L_Main", "sublevels": ["A", "B"]},
-            "space_revision": 1, "counts": {"objects": 12, "triangles": 340,
-                                            "bytes": 2048},
-        }
-
-        with self.bindings:
-            self.controller._on_runtime_reply(offer)
-        self.flush()
-
-        stored = self.controller.reference_offer()
-        self.assertEqual("tx-1", stored["transfer_id"])
-        self.assertEqual("ab12", stored["manifest_digest"])
-        window.refresh.assert_called_once_with()
+        self.show_error.reset_mock()
+        self.assertTrue(self._route(dict(error)))
+        self.assertEqual("INVALID_MESSAGE", self.show_error.call_args[0][0]["code"])
+        self.assertEqual(2, len(self.session.reasons))
 
     def test_runtime_reply_reports_an_error_reply_without_dropping_the_session(self):
         self.enter_linkage()
 
         with self.bindings:
-            self.controller._on_runtime_reply({
+            self.session.route({
                 "type": "error", "code": "PAIRING_REQUIRED",
                 "message": "target is not paired", "details": "no target"})
         self.flush()
@@ -1006,9 +976,9 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
 
         with self.bindings:
-            self.controller._on_runtime_reply(camera_time(eval_serial=5))
+            self.session.route(camera_time(eval_serial=5))
             # An older target than the one already waiting is refused.
-            self.controller._on_runtime_reply(camera_time(eval_serial=4))
+            self.session.route(camera_time(eval_serial=4))
         self.flush()
 
         self.show_error.assert_not_called()
@@ -1025,7 +995,7 @@ class LinkagePanelTests(unittest.TestCase):
 
         with self.bindings:
             # A message for another session fails the identity check.
-            self.controller._on_runtime_reply(applied_message(session_id=99))
+            self.session.route(applied_message(session_id=99))
         self.flush()
 
         self.show_error.assert_called()
@@ -1041,11 +1011,9 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertFalse(linkage.is_active)
         self.assertEqual([{"time": 42.0, "camera": "persp"}], self.host.restored)
         self.assertEqual(1, self.session.resumed)
-        # The dispatcher stays installed for the session's lifetime: Unreal
-        # answers a leave with a mode statement and may push a reference offer
-        # while Maya is merely streaming realtime, and neither may end the
-        # connection the user is still using.
-        self.assertEqual([self.controller._on_runtime_reply], self.session.listeners)
+        # Unreal answers a leave with a mode statement; statements keep
+        # reaching the panel and do not end the connection.
+        self.assertTrue(self.session.route(self._mode_state(2, mode="realtime")))
         self.assertEqual(mtou_config.REALTIME_MODE, self.controller._mode)
         self.assertEqual(1, len(self.removed_callbacks))
         left = [message for message in self.session.messages
@@ -1094,8 +1062,6 @@ class LinkagePanelTests(unittest.TestCase):
 
     def test_disconnect_stops_the_pump_and_restores_every_resource(self):
         self.enter_linkage()
-        with self.bindings:
-            self.controller.open_reference_window()
 
         with self.bindings:
             self.controller.disconnect()
@@ -1103,32 +1069,89 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertIsNone(self.controller._linkage)
         self.assertEqual([{"time": 42.0, "camera": "persp"}], self.host.restored)
         self.assertEqual([1], self.removed_callbacks)
-        self.fake_cmds.deleteUI.assert_any_call(
-            mtou_reference_window.REFERENCE_WINDOW_NAME)
-        self.assertIsNone(self.controller._reference_window)
         self.assertIn("camera: persp" if self.host.restore_residual else "无",
                       self.controller.linkage_status()["labels"]["recovery"])
 
-    def test_scene_change_releases_linkage_and_its_windows(self):
+    def test_scene_change_releases_linkage(self):
         self.enter_linkage()
-        self.controller._reference_window = mock.Mock()
 
         with self.bindings:
             self.controller._on_scene_change()
 
         self.assertIsNone(self.controller._linkage)
         self.assertEqual(1, len(self.removed_callbacks))
-        self.assertIsNone(self.controller._reference_window)
 
-    def test_maya_exit_releases_linkage_and_its_windows(self):
+    def scene_replacement_harness(self):
+        """Build the panel with Maya's scene messages; return them by name."""
+        registered = {}
+
+        class _SceneMessage(object):
+            kMayaExiting, kBeforeNew, kBeforeOpen = "exiting", "before_new", "before_open"
+
+            @staticmethod
+            def addCallback(message, callback):
+                registered[message] = callback
+                return len(registered) + 100
+
+        self.fake_om.MSceneMessage = _SceneMessage
+        self.build_ui()
+        return registered
+
+    def after_open_notices(self):
+        return [call[1]["event"][1] for call in self.fake_cmds.scriptJob.call_args_list
+                if call[1].get("event", [None])[0] in ("SceneOpened", "NewSceneOpened")]
+
+    def test_a_late_scene_notice_keeps_the_role_set_in_the_new_scene(self):
+        callbacks = self.scene_replacement_harness()
         self.enter_linkage()
-        self.controller._reference_window = mock.Mock()
+
+        with self.bindings:
+            callbacks["before_open"]()
+        self.assertIsNone(self.controller._linkage)
+        self.assertIsNone(self.controller._scene)
+        # The artist sets the role in the opened scene and connects before
+        # Maya's idle queue delivers anything about the open.
+        new_scene, new_session = FakeCharacterScene(), FakeStreamingSession()
+        self.controller._scene, self.controller._session = new_scene, new_session
+        with self.bindings:
+            for notice in self.after_open_notices():
+                notice()
+
+        self.assertIs(new_scene, self.controller._scene)
+        self.assertIs(new_session, self.controller._session)
+        self.assertFalse(getattr(new_scene, "closed", False))
+
+    def test_a_new_scene_still_releases_linkage_before_it_replaces_the_old(self):
+        callbacks = self.scene_replacement_harness()
+        self.enter_linkage()
+
+        with self.bindings:
+            callbacks["before_new"]()
+
+        self.assertIsNone(self.controller._linkage)
+        self.assertIsNone(self.controller._scene)
+        self.assertEqual(1, len(self.removed_callbacks))
+
+    def test_without_scene_messages_the_after_open_notice_releases_the_role(self):
+        self.build_ui()  # the fake OpenMaya has no MSceneMessage
+        self.enter_linkage()
+        notices = self.after_open_notices()
+
+        with self.bindings:
+            for notice in notices:
+                notice()
+
+        self.assertEqual(2, len(notices))
+        self.assertIsNone(self.controller._linkage)
+        self.assertIsNone(self.controller._scene)
+
+    def test_maya_exit_releases_linkage(self):
+        self.enter_linkage()
 
         with self.bindings:
             self.controller._on_maya_exiting()
 
         self.assertIsNone(self.controller._linkage)
-        self.assertIsNone(self.controller._reference_window)
 
     def test_a_target_after_leaving_is_dropped_without_a_diagnostic(self):
         self.enter_linkage()
@@ -1138,24 +1161,25 @@ class LinkagePanelTests(unittest.TestCase):
 
         with self.bindings:
             # Unreal may still be answering the transition it already saw.
-            self.controller._on_runtime_reply(camera_time(eval_serial=9))
+            self.session.route(camera_time(eval_serial=9))
         self.flush()
 
         self.assertEqual(reported, len(self.show_error.call_args_list))
         self.assertFalse(self.controller._linkage_active())
 
-    def test_storing_an_offer_without_its_window_is_safe(self):
-        with self.bindings:
-            self.controller.offer_reference({
-                "transfer_id": "tx-2", "directory": "handoff/tx-2",
-                "manifest_digest": "9f9f", "space_revision": 1})
-        self.flush()
-
-        self.assertIsNone(self.controller._reference_window)
-        self.assertEqual("tx-2", self.controller.reference_offer()["transfer_id"])
-
     def test_cached_mode_is_refused_while_linkage_holds_the_session(self):
         self.enter_linkage()
+        cached = mock.Mock()
+
+        def enter():
+            # Cached Playback takes its lease from the connection's time control.
+            try:
+                self.session.time_control.acquire(mtou_config.CACHED_MODE, cached)
+            except mtou_timecontrol.TimeControlRefused as refusal:
+                raise mtou_cache.CachedPlaybackError(refusal.code, refusal.message)
+
+        cached.enter.side_effect = enter
+        self.controller._cached_playback = cached
 
         with self.bindings:
             self.controller._on_mode_changed(mtou_config.CACHED_MODE)
@@ -1165,255 +1189,8 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertTrue(self.controller._linkage.is_active)
 
 
-class ReferenceActionTests(unittest.TestCase):
-    """The scene-reference actions validate before they touch the scene."""
-
-    def setUp(self):
-        self.timers = []
-        self.removed_callbacks = []
-        self.deferred = []
-        self.host = FakeLinkageHost()
-        self.session = FakeStreamingSession()
-        self.reference = FakeReferenceModule()
-        self.controller = mtou_controller.Controller()
-        self.controller._session = self.session
-        self.controller._scene = FakeCharacterScene()
-        self.fake_cmds = self._fake_cmds()
-        self.fake_om = self._fake_om()
-        self.bindings = _Bindings(self.fake_cmds, self.fake_om)
-        harness = self
-        module_patch = mock.patch.object(
-            mtou_controller.Controller, "_reference_module_or_report",
-            lambda controller: harness.reference)
-        module_patch.start()
-        self.addCleanup(module_patch.stop)
-        error_patch = mock.patch.object(
-            mtou_controller.Controller, "_show_error")
-        error_patch.start()
-        self.addCleanup(error_patch.stop)
-
-    def _fake_cmds(self):
-        fake = mock.MagicMock()
-        fake.control.return_value = True
-        fake.currentUnit.return_value = "film"
-        fake.confirmDialog.return_value = "确定"
-
-        def window(*args, **kwargs):
-            if kwargs.get("exists"):
-                return False
-            return args[0] if args else kwargs.get("name")
-
-        fake.window.side_effect = window
-        fake.evalDeferred.side_effect = lambda action, *a, **k: self.deferred.append(action)
-        return fake
-
-    def _fake_om(self):
-        class _Timer(object):
-            @staticmethod
-            def addTimerCallback(interval, callback):
-                self.timers.append((interval, callback))
-                return len(self.timers)
-
-        class _Message(object):
-            @staticmethod
-            def removeCallback(callback_id):
-                self.removed_callbacks.append(callback_id)
-
-        return type("FakeOpenMaya", (), {
-            "MTimerMessage": _Timer,
-            "MMessage": _Message,
-        })
-
-    def offer(self):
-        self.controller.offer_reference({
-            "type": "reference_offer", "session_id": 7, "transfer_id": "tx-9",
-            "directory": "handoff/tx-9", "manifest_digest": "cd34",
-            "scope": {"level": "L_Main", "sublevels": []}, "space_revision": 1,
-            "counts": {"objects": 4, "triangles": 900, "bytes": 4096}})
-        self.flush()
-
-    def flush(self):
-        while self.deferred:
-            self.deferred.pop(0)()
-
-    def test_reference_actions_are_safe_without_an_offer(self):
-        with self.bindings:
-            self.controller.import_reference()
-
-        self.assertEqual([], self.reference.calls)
-        self.assertTrue(self.fake_cmds.warning.called)
-        self.assertIsNone(self.controller.reference_offer())
-        self.assertEqual({"action": None, "report": {}, "transfer_id": None,
-                          "time": None},
-                         self.controller.reference_report())
-        self.assertEqual("暂无交接", self.controller.reference_state()[0])
-
-    def test_reference_budgets_are_the_frozen_ones(self):
-        budget = self.controller.reference_budget()
-
-        self.assertEqual(mtou_config.MAX_REFERENCE_BYTES, budget["bytes"])
-        self.assertEqual(mtou_config.MAX_REFERENCE_OBJECTS, budget["objects"])
-        self.assertEqual(mtou_config.MAX_REFERENCE_TRIANGLES, budget["triangles"])
-
-    def test_import_validates_before_touching_the_scene(self):
-        self.offer()
-        self.reference.inspect_error = stale_reference()
-
-        with self.bindings:
-            self.controller.import_reference()
-
-        self.assertEqual(["inspect"], [name for name, *_ in self.reference.calls])
-        self.assertEqual("REFERENCE_STALE",
-                         self.controller._last_diagnostic["code"])
-        # The refusal is the window's last result, so its state asks for a
-        # new export; nothing was imported.
-        report = self.controller.reference_report()
-        self.assertFalse(report["report"]["accepted"])
-        self.assertEqual("REFERENCE_STALE", report["report"]["code"])
-        self.assertEqual("tx-9", report["transfer_id"])
-        self.assertEqual("已过期，请在 UE 重新导出",
-                         self.controller.reference_state()[0])
-
-    def test_import_passes_the_frozen_budgets_to_validation(self):
-        self.offer()
-        self.reference.import_report = {
-            "accepted": True, "detail": "ok", "counts": {"objects": 4,
-            "triangles": 900, "bytes": 4096}, "container": {"name": "MtoU_UE_SceneRef"},
-            "discarded": False, "rolled_back": False, "residual": {}}
-
-        with self.bindings:
-            self.controller.import_reference()
-
-        names = [name for name, *_ in self.reference.calls]
-        self.assertEqual(["inspect", "import_handoff"], names)
-        budgets = [budget for name, _, budget in self.reference.calls]
-        self.assertEqual(self.controller.reference_budget(), budgets[0])
-        self.assertEqual(self.controller.reference_budget(), budgets[1])
-        reported = self.controller.reference_report()
-        self.assertEqual("import", reported["action"])
-        self.assertTrue(reported["report"]["accepted"])
-        results = [message for message in self.session.messages
-                   if message["type"] == "reference_result"]
-        self.assertEqual(1, len(results))
-        self.assertEqual("tx-9", results[0]["transfer_id"])
-        self.assertTrue(results[0]["accepted"])
-        self.assertEqual(4, results[0]["counts"]["objects"])
-
-    def test_reference_actions_hold_live_sampling_while_they_run(self):
-        # The FBX import and the container swap can let Maya run this tool's
-        # timers; a pose read from the half-built scene would end the session.
-        self.offer()
-        held = []
-        self.session.held = 0
-
-        @contextlib.contextmanager
-        def holding_samples():
-            self.session.held += 1
-            try:
-                yield
-            finally:
-                self.session.held -= 1
-
-        self.session.holding_samples = holding_samples
-        self.reference.import_report = {
-            "accepted": True, "detail": "ok", "counts": {"objects": 4,
-            "triangles": 900, "bytes": 4096}, "container": {"name": "MtoU_UE_SceneRef"},
-            "discarded": False, "rolled_back": False, "residual": {}}
-        for name in ("inspect", "import_handoff", "remove", "recover"):
-            original = getattr(self.reference, name)
-
-            def recorded(*args, _name=name, _original=original):
-                held.append((_name, self.session.held, self.controller._reference_busy))
-                return _original(*args)
-
-            setattr(self.reference, name, recorded)
-
-        with self.bindings:
-            self.controller.import_reference()
-            self.controller.remove_reference()
-            self.controller.recover_reference()
-
-        self.assertEqual([("inspect", 1, 1), ("import_handoff", 1, 1), ("remove", 1, 1),
-                          ("recover", 1, 1)], held)
-        self.assertEqual(0, self.session.held)
-        self.assertEqual(0, self.controller._reference_busy)
-
-    def test_an_import_without_an_anchor_is_reported_in_the_status_line(self):
-        text = self.controller._reference_outcome_text({
-            "accepted": True, "counts": {"objects": 4},
-            "anchor": {"source": "absent"}})
-        self.assertIn("锚点", text)
-        self.assertNotIn("锚点", self.controller._reference_outcome_text({
-            "accepted": True, "counts": {"objects": 4},
-            "anchor": {"source": "manifest"}}))
-
-    def test_a_rolled_back_import_is_reported(self):
-        self.offer()
-        self.controller._status_text = "statusText"
-        self.controller._set_text = mock.Mock()
-        self.reference.import_report = {
-            "accepted": False, "detail": "staged swap failed",
-            "counts": {"objects": 0, "triangles": 0, "bytes": 0},
-            "container": {"name": "MtoU_UE_SceneRef"}, "discarded": True,
-            "rolled_back": True, "residual": {"staging": ["tx-9_staging"]}}
-
-        with self.bindings:
-            self.controller.import_reference()
-
-        report = self.controller.reference_report()["report"]
-        self.assertTrue(report["rolled_back"])
-        self.assertTrue(report["discarded"])
-        lines = mtou_reference_window.reference_report_lines(
-            self.controller.reference_report())
-        self.assertTrue(any("回滚：是" in line for line in lines))
-        result = mtou_reference_window.reference_result_text(
-            self.controller.reference_report())
-        self.assertTrue(result.startswith("导入失败：staged swap failed"))
-        self.assertIn("已回滚，原参考保留。", result)
-        self.assertIn("tx-9_staging", result)
-        results = [message for message in self.session.messages
-                   if message["type"] == "reference_result"]
-        self.assertFalse(results[-1]["accepted"])
-        self.assertTrue(any("回滚" in call[0][1]
-                            for call in self.controller._set_text.call_args_list
-                            if call[0][0] == "statusText"))
-
-    def test_remove_and_recover_call_the_tool_owned_container(self):
-        with self.bindings:
-            self.controller.remove_reference()
-        self.assertEqual("remove", self.controller.reference_report()["action"])
-        self.assertTrue(self.controller.reference_report()["report"]["removed"])
-
-        with self.bindings:
-            self.controller.recover_reference()
-
-        names = [name for name, *_ in self.reference.calls]
-        self.assertEqual(["container", "remove", "container", "recover"], names)
-        self.assertEqual("recover", self.controller.reference_report()["action"])
-        removed = [message for message in self.session.messages
-                   if message["type"] == "reference_removed"]
-        self.assertEqual(1, len(removed))
-        self.assertEqual("removed", removed[0]["detail"])
-
-    def test_reference_window_controls_carry_their_reasons(self):
-        controls = self.controller.reference_window_controls()
-        self.assertFalse(controls["import"][0])
-        self.assertIn("导出", controls["import"][1])
-
-        self.offer()
-        controls = self.controller.reference_window_controls()
-        self.assertTrue(controls["import"][0])
-        self.assertTrue(controls["remove"][0])
-        self.assertTrue(controls["recover"][0])
-
-        self.session._ready = False
-        controls = self.controller.reference_window_controls()
-        self.assertFalse(controls["import"][0])
-        self.assertIn("连接", controls["import"][1])
-
-
-class DetailWindowTests(unittest.TestCase):
-    """The sub-windows reuse one instance and never own the session."""
+class PanelThemeTests(unittest.TestCase):
+    """Closing the panel and exiting Maya release the panel theme."""
 
     def setUp(self):
         self.timers = []
@@ -1423,6 +1200,9 @@ class DetailWindowTests(unittest.TestCase):
         self.session = FakeStreamingSession()
         self.controller = mtou_controller.Controller()
         self.controller._session = self.session
+        self.session.statement_handler = (
+            lambda reply: self.controller._on_session_statement(
+                {"session": self.session}, reply))
         self.controller._scene = FakeCharacterScene()
         self.fake_cmds = self._fake_cmds()
         self.fake_om = self._fake_om()
@@ -1458,136 +1238,6 @@ class DetailWindowTests(unittest.TestCase):
 
         return type("FakeOpenMaya", (), {"MMessage": _Message})
 
-    def created_windows(self, name):
-        """The create calls for one window, not its existence checks."""
-        return [call for call in self.fake_cmds.window.call_args_list
-                if call[0] and call[0][0] == name
-                and not call[1].get("exists") and not call[1].get("query")]
-
-    def test_repeated_open_reuses_one_reference_window(self):
-        with self.bindings:
-            first = self.controller.open_reference_window()
-            second = self.controller.open_reference_window()
-
-        self.assertIs(first, second)
-        self.assertEqual(1, len(self.created_windows(
-            mtou_reference_window.REFERENCE_WINDOW_NAME)))
-
-    def close_natively(self, window):
-        """The title-bar close: Maya notifies the window, then deletes it."""
-        window._on_closed()
-        self.windows.discard(mtou_reference_window.REFERENCE_WINDOW_NAME)
-
-    def test_native_close_forgets_the_window_without_deleting_it_again(self):
-        with self.bindings:
-            window = self.controller.open_reference_window()
-            window._on_closed()
-
-        # Maya is still running the close event: deleting the window from
-        # inside it made Maya read the destroyed window.
-        self.fake_cmds.deleteUI.assert_not_called()
-        self.assertIsNone(self.controller._reference_window)
-        # The session survives a detail window's close.
-        self.assertIs(self.session, self.controller._session)
-        self.windows.discard(mtou_reference_window.REFERENCE_WINDOW_NAME)
-        with self.bindings:
-            reopened = self.controller.open_reference_window()
-        self.assertIsNot(window, reopened)
-        self.assertIs(reopened, self.controller._reference_window)
-
-    def test_repeated_native_close_and_reopen_keeps_one_live_window(self):
-        windows = []
-        with self.bindings:
-            for _ in range(20):
-                window = self.controller.open_reference_window()
-                self.assertIs(window, self.controller.open_reference_window())
-                windows.append(window)
-                self.close_natively(window)
-
-        self.assertEqual(20, len(set(map(id, windows))))
-        self.assertEqual(20, len(self.created_windows(
-            mtou_reference_window.REFERENCE_WINDOW_NAME)))
-        self.fake_cmds.deleteUI.assert_not_called()
-        self.assertIsNone(self.controller._reference_window)
-
-    def test_requested_close_deletes_the_window_once(self):
-        with self.bindings:
-            window = self.controller.open_reference_window()
-            self.controller.close_reference_window()
-            # Maya's close notification for the deletion it just did.
-            window._on_closed()
-            self.controller.close_reference_window()
-            window.close()
-
-        self.fake_cmds.deleteUI.assert_called_once_with(
-            mtou_reference_window.REFERENCE_WINDOW_NAME)
-        self.assertIsNone(self.controller._reference_window)
-        self.assertIs(self.session, self.controller._session)
-
-    def test_close_button_closes_through_the_controller(self):
-        with self.bindings:
-            window = self.controller.open_reference_window()
-            command = [call[1]["command"] for call in self.fake_cmds.button.call_args_list
-                       if call[1].get("label") == "关闭窗口"][0]
-            command()
-            self.assertFalse(window.exists())
-
-        self.fake_cmds.deleteUI.assert_called_once_with(
-            mtou_reference_window.REFERENCE_WINDOW_NAME)
-        self.assertIsNone(self.controller._reference_window)
-
-    def test_a_window_maya_deleted_unannounced_is_rebuilt(self):
-        with self.bindings:
-            stale = self.controller.open_reference_window()
-            self.windows.discard(mtou_reference_window.REFERENCE_WINDOW_NAME)
-            reopened = self.controller.open_reference_window()
-            self.assertTrue(reopened.exists())
-
-        self.assertIsNot(stale, reopened)
-
-    def test_an_old_window_never_closes_or_renders_its_successor(self):
-        with self.bindings:
-            old = self.controller.open_reference_window()
-            self.close_natively(old)
-            current = self.controller.open_reference_window()
-            rendered = len(self.fake_cmds.text.call_args_list)
-            old.refresh()
-            old.close()
-            old._on_closed()
-            self.assertTrue(current.exists())
-
-        self.assertEqual(rendered, len(self.fake_cmds.text.call_args_list))
-        self.fake_cmds.deleteUI.assert_not_called()
-        self.assertIs(current, self.controller._reference_window)
-
-    def test_reference_window_close_keeps_the_handoff_session_and_linkage(self):
-        linkage = mock.Mock(is_active=True)
-        self.controller._linkage = linkage
-        report = {"action": "import", "transfer_id": "tx-3", "time": 0.0,
-                  "report": {"accepted": True, "counts": {"objects": 4}}}
-        self.controller._reference_report = report
-        with self.bindings:
-            self.controller.offer_reference({
-                "transfer_id": "tx-3", "directory": "handoff/tx-3",
-                "manifest_digest": "ef56", "space_revision": 1})
-            self.flush()
-            window = self.controller.open_reference_window()
-            self.close_natively(window)
-            reopened = self.controller.open_reference_window()
-
-        self.assertEqual("tx-3", self.controller.reference_offer()["transfer_id"])
-        self.assertIs(report, self.controller._reference_report)
-        self.assertEqual(report, self.controller.reference_report())
-        self.assertIs(self.session, self.controller._session)
-        self.assertIs(linkage, self.controller._linkage)
-        linkage.close.assert_not_called()
-        self.assertIn("已导入 4 个对象。", [
-            call[1].get("label") for call in self.fake_cmds.text.call_args_list])
-        self.assertIs(reopened, self.controller._reference_window)
-        state = "状态：{0}".format(self.controller.reference_state()[0])
-        self.assertEqual(2, sum(1 for call in self.fake_cmds.text.call_args_list
-                                if call[1].get("label") == state))
-
     def test_panel_close_and_maya_exit_release_the_panel_theme(self):
         released = []
         with mock.patch.object(mtou_controller, "release_panel_theme",
@@ -1608,82 +1258,6 @@ class DetailWindowTests(unittest.TestCase):
 
         self.assertEqual([["card"], []], released)
         self.assertEqual([], self.controller._card_decorations)
-
-    def flush(self):
-        while self.deferred:
-            self.deferred.pop(0)()
-
-    def test_windows_render_the_controller_state(self):
-        with self.bindings:
-            self.controller.open_reference_window()
-            self.controller.offer_reference({
-                "transfer_id": "tx-4", "directory": "handoff/tx-4",
-                "manifest_digest": "ab78",
-                "scope": {"level": "L_Main", "sublevels": ["A"]},
-                "space_revision": 2,
-                "counts": {"objects": 5, "triangles": 60, "bytes": 128}})
-            self.flush()
-
-        labels = [call[1].get("label")
-                  for call in self.fake_cmds.text.call_args_list
-                  if call[1].get("label")]
-        self.assertIn("来源关卡：L_Main", labels)
-        self.assertIn("子关卡：A", labels)
-        self.assertIn("规模：5 个对象，60 三角面", labels)
-        # The offer names space revision 2 while the session is at 1.
-        self.assertIn("状态：已过期，请在 UE 重新导出", labels)
-        # Handoff identity, digest, space revision and budgets are diagnostics.
-        for internal in ("交接：", "摘要：", "空间版本：", "计数：", "字节上限"):
-            self.assertFalse(any(internal in label for label in labels), internal)
-        diagnostics = self.controller._reference_diagnostic_text()
-        for expected in ("交接 ID：tx-4", "摘要：ab78", "空间版本：2",
-                         "计数：对象 5｜三角面 60｜字节 128", "冻结上限：字节 "):
-            self.assertIn(expected, diagnostics)
-
-    def test_reference_window_states_and_one_sentence_results(self):
-        with self.bindings:
-            self.controller.offer_reference({
-                "transfer_id": "tx-5", "directory": "handoff/tx-5",
-                "manifest_digest": "cd90",
-                "scope": {"level": "/Game/Maps/L_Main",
-                          "sublevels": ["/Game/Maps/L_Main_Props"],
-                          "unloaded_sublevels": ["/Game/Maps/L_Main_FX"]},
-                "space_revision": 1,
-                "counts": {"objects": 152, "triangles": 1203344, "bytes": 4096}})
-            self.flush()
-        offer = self.controller.reference_offer()
-        level, sublevels, tooltip = mtou_reference_window.reference_source_lines(offer)
-        self.assertEqual("来源关卡：L_Main", level)
-        self.assertEqual("子关卡：L_Main_Props（1 个未加载，未包含）", sublevels)
-        self.assertIn("/Game/Maps/L_Main_Props", tooltip)
-        self.assertEqual("规模：152 个对象，约 120 万三角面",
-                         mtou_reference_window.reference_scale_text(offer["counts"]))
-        self.assertEqual("可导入", self.controller.reference_state()[0])
-
-        self.controller._reference_report = self.controller._reference_outcome(
-            "import", {"accepted": True, "counts": {"objects": 152},
-                       "discarded": False, "rolled_back": False, "residual": {}})
-        self.assertTrue(self.controller.reference_state()[0].startswith("已导入（"))
-        self.assertEqual("已导入 152 个对象。",
-                         mtou_reference_window.reference_result_text(
-                             self.controller.reference_report()))
-        # A newer handoff for the same scope can be imported again.
-        self.controller._reference_offer["transfer_id"] = "tx-6"
-        self.assertEqual("可导入", self.controller.reference_state()[0])
-        # A handoff from another common space needs a new export.
-        self.session.space_revision = 2
-        self.assertEqual("已过期，请在 UE 重新导出",
-                         self.controller.reference_state()[0])
-
-        removed = mtou_reference_window.reference_result_text(
-            {"action": "remove", "report": {"removed": True, "nodes_removed": 3,
-                                            "residual": {}}})
-        self.assertEqual("已移除参考（3 个节点）。", removed)
-        anchorless = mtou_reference_window.reference_result_text(
-            {"action": "import", "report": {"accepted": True,
-                                            "counts": {"objects": 2},
-                                            "anchor": {"source": "absent"}}})
-        self.assertIn("重新导出", anchorless)
 
 
 if __name__ == "__main__":

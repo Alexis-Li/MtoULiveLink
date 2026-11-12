@@ -10,7 +10,12 @@ SCRIPTS = pathlib.Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+import test_mtou_camera as camera_fixtures  # noqa: E402
+from mtou_livelink import camera as mtou_camera  # noqa: E402
+from mtou_livelink import config as mtou_config  # noqa: E402
 from mtou_livelink import link_host as mtou_link_host  # noqa: E402
+from mtou_livelink import linkage as mtou_linkage  # noqa: E402
+from mtou_livelink import timecontrol as mtou_timecontrol  # noqa: E402
 
 
 class FakeScene(object):
@@ -129,16 +134,16 @@ class LinkageHostTests(unittest.TestCase):
         captured = host.capture_state()
         self.assertEqual(7.0, captured["time"])
         self.assertEqual({"look_through": "persp"}, captured["camera"])
-        self.assertEqual(1920, captured["gate"]["width"])
+        self.assertNotIn("gate", captured)
         self.assertEqual(1, camera.captured)
 
         state["time"] = 20.0
-        state["width"] = 1280
         residual = host.restore_state(captured)
         self.assertEqual([], residual)
         self.assertEqual(7.0, state["time"])
-        self.assertEqual(1920, state["width"])
         self.assertEqual([{"look_through": "persp"}], camera.restored)
+        # The resolution gate belongs to the camera adapter alone.
+        commands.setAttr.assert_not_called()
 
     def test_restore_reports_a_resource_it_cannot_put_back(self):
         host, camera, commands, state, patchers = build()
@@ -162,12 +167,12 @@ class LinkageHostTests(unittest.TestCase):
         captured = host.capture_state()
         camera.restore_state = mock.Mock(return_value=[
             "camera MtoU_LinkCamera: Cannot delete locked node"])
-        state["width"] = 640
+        state["time"] = 20.0
         residual = host.restore_state(captured)
         self.assertEqual(
             ["camera: camera MtoU_LinkCamera: Cannot delete locked node"], residual)
         # The other resources are still restored.
-        self.assertEqual(1920, state["width"])
+        self.assertEqual(1.0, state["time"])
 
     def test_restore_writes_nothing_once_the_scene_was_replaced(self):
         host, camera, commands, state, patchers = build(time_value=7.0)
@@ -291,6 +296,113 @@ class LinkageHostTests(unittest.TestCase):
             loader.assert_not_called()
             host._camera_adapter()
             loader.assert_called_once_with()
+
+
+class GateCmds(camera_fixtures.FakeCmds):
+    """The camera tests' fake Maya, plus the playback queries the host makes."""
+
+    def play(self, query=False, state=None):
+        return False
+
+    def playbackOptions(self, query=False, minTime=False, maxTime=False):
+        return 1.0 if minTime else 120.0
+
+
+class LinkageSessionStub(object):
+    def __init__(self):
+        self.messages = []
+        self.time_control = mtou_timecontrol.TimeControl()
+
+    def submit_linkage(self, message):
+        self.messages.append(message)
+        return True
+
+    def is_ready(self):
+        return True
+
+
+class ResolutionGateExitTests(unittest.TestCase):
+    """The camera adapter alone captures and restores the resolution gate.
+
+    A real ``MayaLinkageHost`` and ``LinkCamera`` over one fake Maya, driven
+    through the real ``LinkageSession`` exits.
+    """
+
+    START_GATE = (1024, 768, 1.1, 1024 * 1.1 / 768)
+
+    def setUp(self):
+        self.cmds = GateCmds(start_gate=self.START_GATE)
+        patcher = mock.patch.multiple(
+            mtou_camera, cmds=self.cmds, om=camera_fixtures.FakeOpenMaya(self.cmds))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for patcher in (mock.patch.object(mtou_link_host, "cmds", self.cmds),
+                        mock.patch.object(mtou_link_host, "require_maya",
+                                          return_value=None)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.host = mtou_link_host.MayaLinkageHost(
+            FakeScene(), ["character"], 24.0, camera=mtou_camera.LinkCamera())
+        self.clock = {"now": 0.0}
+        self.linkage = mtou_linkage.LinkageSession(
+            self.host, LinkageSessionStub(), clock=lambda: self.clock["now"])
+        self.linkage.set_session_id(5)
+
+    def enter_and_apply(self):
+        self.linkage.enter(1)
+        self.host.apply_target(target(5.0), camera_fixtures.camera_payload(),
+                               camera_fixtures.gate_payload())
+        self.assertEqual([1920, 1080], self.cmds.gate[:2])
+
+    def gate_writes(self, since):
+        return [write[1] for write in self.cmds.writes[since:]
+                if write[0] == "setAttr"
+                and write[1] in mtou_camera.RESOLUTION_PLUGS]
+
+    def leave_realtime(self):
+        return self.linkage.leave("realtime", 2)
+
+    def leave_end(self):
+        return self.linkage.leave("end", 2)
+
+    def expire_unconfirmed(self):
+        self.clock["now"] = mtou_config.LINKAGE_MODE_CONFIRMATION_SECONDS + 0.1
+        return self.linkage.expire_unconfirmed()
+
+    def disconnect(self):
+        return self.linkage.close()
+
+    def test_every_exit_restores_the_gate_once(self):
+        exits = (("返回实时", self.leave_realtime), ("结束预览", self.leave_end),
+                 ("确认超时", self.expire_unconfirmed), ("断线", self.disconnect))
+        for label, leave in exits:
+            with self.subTest(label):
+                self.setUp()
+                self.enter_and_apply()
+                before = len(self.cmds.writes)
+                self.assertEqual((), leave())
+                self.assertEqual(list(self.START_GATE), self.cmds.gate)
+                # One write per changed plug: no second pass over the gate.
+                self.assertEqual(sorted(mtou_camera.RESOLUTION_PLUGS),
+                                 sorted(self.gate_writes(before)))
+
+    def test_a_locked_plug_that_still_holds_its_value_is_not_a_residual(self):
+        self.linkage.enter(1)
+        self.cmds.locked.add("defaultResolution.width")
+        with self.assertRaises(mtou_camera.CameraSyncRefused):
+            self.host.apply_target(target(5.0), camera_fixtures.camera_payload(),
+                                   camera_fixtures.gate_payload())
+        self.assertEqual((), self.leave_end())
+        self.assertEqual(list(self.START_GATE), self.cmds.gate)
+        self.assertEqual((), tuple(self.linkage.recovery_records()))
+
+    def test_a_locked_plug_that_was_changed_is_reported_and_the_rest_restored(self):
+        self.enter_and_apply()
+        self.cmds.locked.add("defaultResolution.width")
+        residual = self.leave_end()
+        self.assertEqual(1, len(residual))
+        self.assertIn("defaultResolution.width", residual[0])
+        self.assertEqual([1920, 768, 1.1, 1024 * 1.1 / 768], self.cmds.gate)
 
 
 if __name__ == "__main__":

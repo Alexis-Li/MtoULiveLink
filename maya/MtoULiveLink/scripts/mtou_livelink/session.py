@@ -3,8 +3,6 @@
 # Licensed under the GPL with additional terms; see NOTICE.
 """Real-time streaming session, sender worker and negotiation events."""
 
-import collections
-import contextlib
 import errno
 import json
 import queue
@@ -15,8 +13,12 @@ import time
 
 from . import config, mayaapi
 from .config import (
+    CACHED_MODE,
     CHARACTER_OBJECT_ID,
     DEFAULT_PLAYBACK_CAP,
+    ERROR_CLOSE_WINDOW_SECONDS,
+    LINKAGE_MODE,
+    REALTIME_MODE,
     SECONDARY_OBJECT_ID,
     WORKFLOW_ANIMATION,
     WORKFLOWS,
@@ -24,11 +26,14 @@ from .config import (
 from .diagnostics import (
     DIAGNOSTICS,
     blendshape_warning_from_reply,
+    error_reply_diagnostic,
     filter_bone_driven_differences,
     make_diagnostic,
+    version_mismatch_diagnostic,
 )
 from .mayaapi import cmds, om
 from .protocol import (
+    ProtocolVersionMismatch,
     encode_message,
     exact_int,
     make_frame_message,
@@ -40,6 +45,7 @@ from .protocol import (
 )
 from .scene import CharacterSceneError
 from .space import validate_frame_rate
+from .timecontrol import TimeControl
 from .timeline import maya_is_playing, normalize_playback_cap, playback_cap_fps
 
 
@@ -58,26 +64,63 @@ class LatestFrame(object):
             return value
 
 
-# Control statements both hosts may send outside a mode the Maya panel is
-# currently driving; they are recorded instead of ending the connection.
-CONTROL_REPLY_TYPES = (
-    "mode_state",
-    "reference_offer",
-    "reference_result",
-    "reference_removed",
-    "camera_time",
-    "applied",
-    "object_removed",
-)
+# Where each Unreal message goes after the handshake, fixed for the life of the
+# connection. Statements reach the session's statement handler in every mode;
+# results reach the holder of the time-control state they belong to and are
+# dropped while nobody holds it. An ``error`` is routed by its identity (see
+# StreamingSession._route_error); any other type ends the connection.
+STATEMENTS = "statements"
+REPLY_ROUTES = {
+    "mode_state": STATEMENTS,
+    "object_removed": STATEMENTS,
+    "camera_time": LINKAGE_MODE,
+    "applied": LINKAGE_MODE,
+    "cache_ready": CACHED_MODE,
+    "cache_playing": CACHED_MODE,
+    "cache_progress": CACHED_MODE,
+    "cache_complete": CACHED_MODE,
+    "cache_paused": CACHED_MODE,
+    "cache_resumed": CACHED_MODE,
+    "cache_seeked": CACHED_MODE,
+    "cache_looped": CACHED_MODE,
+    "cache_loop_changed": CACHED_MODE,
+    "cache_stopped": CACHED_MODE,
+    "cache_cleared": CACHED_MODE,
+}
 
-# Statements Unreal may send the moment the set is ready, before the panel's
-# main thread installs its listener: they are held and handed to the listener
-# once it exists. Targets and receipts only matter inside linkage.
-HELD_REPLY_TYPES = (
-    "mode_state",
-    "reference_offer",
-    "object_removed",
-)
+
+def route_reply(reply, time_control, on_statement=None, note_reason=None):
+    """Deliver one post-ready Unreal message by REPLY_ROUTES (sender thread).
+
+    An error with an upload or play identity belongs to Cached Playback. Any
+    other error goes to ``on_statement`` to be reported, except the ``CACHE_``
+    codes the protocol ignores without an identity, and ``note_reason`` keeps
+    it unless ``on_statement`` returned False (routine scheduling). Whether the
+    connection ends is Unreal's decision: when it closes the socket right
+    after the noted error, that error is the reason. Returns False for a
+    message the connection does not accept.
+    """
+    kind = reply.get("type")
+    if kind == "error":
+        if (exact_int(reply.get("upload_id")) is not None
+                or exact_int(reply.get("play_id")) is not None):
+            time_control.deliver(CACHED_MODE, reply)
+        elif not str(reply.get("code") or "").startswith("CACHE_"):
+            reported = on_statement(reply) if on_statement is not None else None
+            if reported is not False and note_reason is not None:
+                note_reason(error_reply_diagnostic(reply))
+        return True
+    route = REPLY_ROUTES.get(kind)
+    if route is None:
+        return False
+    if kind == "cache_cleared":
+        time_control.cache_cleared(exact_int(reply.get("clear_id")))
+    if route == STATEMENTS:
+        if on_statement is not None:
+            on_statement(reply)
+    else:
+        time_control.deliver(route, reply)
+    return True
 
 # A second object's negotiation differences are listed with this prefix, so
 # the warning dialog tells them apart from the primary character's.
@@ -96,8 +139,21 @@ def merge_object_warnings(warnings):
     return merged
 
 
+def invalid_reply_diagnostic(error):
+    """The diagnostic of a reply the protocol refuses.
+
+    A reply of another protocol version is a version mismatch, which names the
+    version it declared; every other refusal is an invalid message.
+    """
+    if isinstance(error, ProtocolVersionMismatch):
+        return version_mismatch_diagnostic(
+            protocol_version=error.peer_protocol_version,
+            message=str(error), details=str(error))
+    return make_diagnostic("INVALID_MESSAGE", str(error), details=str(error))
+
+
 class SenderWorker(threading.Thread):
-    def __init__(self, init_message, hello_message=None):
+    def __init__(self, init_message, hello_message=None, on_reply=None):
         threading.Thread.__init__(self, name="MtoULiveLinkSender")
         self.daemon = True
         # One init per object of the set, primary first; a single dict is the
@@ -117,8 +173,6 @@ class SenderWorker(threading.Thread):
             initial += encode_message(message)
         self._initial_packet = initial
         self._hello_reply = None
-        self._last_control_reply = None
-        self._held_replies = collections.deque(maxlen=config.MAX_CONTROL_QUEUE)
         self._latest = LatestFrame()
         # Unbounded by design: the cached upload streams hundreds of frames
         # through the same ordered path. Linkage controls keep their own bound
@@ -138,7 +192,13 @@ class SenderWorker(threading.Thread):
                          "bone_name_remaps": [],
                          "has_warning": False}
         self._diagnostic = None
-        self._reply_listener = None
+        # Routes every post-ready Unreal message on this thread; False for a
+        # message the connection does not accept, which ends it.
+        self._on_reply = on_reply
+        # The Unreal error received last, with the time it arrived: the
+        # reason shown when Unreal closes the connection right after it.
+        self._reason = None
+        self._reason_at = None
 
     def submit(self, frame_message):
         with self._lock:
@@ -215,10 +275,21 @@ class SenderWorker(threading.Thread):
             return (self._state, self._detail, dict(self._warning),
                     dict(self._diagnostic) if self._diagnostic else None)
 
-    def set_reply_listener(self, listener):
-        """Route post-ready Unreal replies to listener(reply) on the sender thread."""
+    def note_reason(self, diagnostic):
+        """Keep ``diagnostic`` as the reason if Unreal closes the connection next."""
         with self._lock:
-            self._reply_listener = listener
+            self._reason = dict(diagnostic)
+            self._reason_at = time.monotonic()
+
+    def _close_reason(self):
+        """The noted error when Unreal closed right after it, else None."""
+        with self._lock:
+            reason, noted_at = self._reason, self._reason_at
+        if reason is None or noted_at is None:
+            return None
+        if time.monotonic() - noted_at > ERROR_CLOSE_WINDOW_SECONDS:
+            return None
+        return reason
 
     def _set_status(self, state, detail, warning=None, diagnostic=None):
         with self._lock:
@@ -354,10 +425,7 @@ class SenderWorker(threading.Thread):
             if reply is None:
                 return None
             if reply.get("type") == "error":
-                diagnostic = make_diagnostic(
-                    reply.get("code") or "INTERNAL_ERROR",
-                    reply.get("message") or "Unreal rejected the connection",
-                    details=reply.get("details") or reply.get("message") or "")
+                diagnostic = error_reply_diagnostic(reply)
                 self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
                 return None
             if reply.get("type") != "ready":
@@ -393,41 +461,6 @@ class SenderWorker(threading.Thread):
         with self._lock:
             return dict(self._hello_reply) if self._hello_reply else None
 
-    def _take_held(self):
-        """``(listener, held)``: the listener and, once it exists, the held replies.
-
-        Called with ``_lock`` held; the held replies leave the queue with it.
-        """
-        listener = self._reply_listener
-        if listener is None or not self._held_replies:
-            return listener, []
-        held = list(self._held_replies)
-        self._held_replies.clear()
-        return listener, held
-
-    @staticmethod
-    def _deliver(listener, reply):
-        """Hand one reply to ``listener``; False when it leaves it to the session.
-
-        A listener returns False for a reply it leaves to the session's own
-        handling; one that raises has still consumed it.
-        """
-        try:
-            return listener(reply) is not False
-        except Exception as exc:
-            if cmds is not None:
-                try:
-                    cmds.warning(
-                        "MtoU_LiveLink cached reply listener failed: {0}".format(exc))
-                except Exception:
-                    pass
-            return True
-
-    def last_control_reply(self):
-        """The last control statement received without a registered listener."""
-        with self._lock:
-            return dict(self._last_control_reply) if self._last_control_reply else None
-
     def run(self):
         connected = False
         try:
@@ -444,12 +477,6 @@ class SenderWorker(threading.Thread):
             self._set_status("ready", "Connected", warning=warning)
             sock.settimeout(0.25)
             while not self._stop_event.is_set():
-                with self._lock:
-                    listener, held = self._take_held()
-                # Statements that arrived before the listener existed reach it
-                # first, in arrival order, ahead of anything read after them.
-                for reply in held:
-                    self._deliver(listener, reply)
                 with self._lock:
                     ordered_mode = self._ordered_mode
                     packet = None
@@ -478,37 +505,14 @@ class SenderWorker(threading.Thread):
                     try:
                         reply = validate_reply(recv_message(sock))
                     except (ValueError, UnicodeError) as exc:
-                        diagnostic = make_diagnostic(
-                            "INVALID_MESSAGE", str(exc), details=str(exc))
+                        diagnostic = invalid_reply_diagnostic(exc)
                         self._set_status(
                             "error", diagnostic["summary"], diagnostic=diagnostic)
                         return
                     with self._lock:
-                        # A listener installed since the top of this loop takes
-                        # the held statements before this newer reply.
-                        listener, held = self._take_held()
-                        if listener is None and reply.get("type") in HELD_REPLY_TYPES:
-                            self._held_replies.append(dict(reply))
-                    for earlier in held:
-                        self._deliver(listener, earlier)
-                    if listener is not None and self._deliver(listener, reply):
-                        continue
-                    if reply.get("type") == "error":
-                        diagnostic = make_diagnostic(
-                            reply.get("code") or "STREAM_INTERRUPTED",
-                            reply.get("message") or "Unreal closed the connection",
-                            details=reply.get("details")
-                            or reply.get("message") or "")
-                        self._set_status(
-                            "error", diagnostic["summary"], diagnostic=diagnostic)
-                        return
-                    if reply.get("type") in CONTROL_REPLY_TYPES:
-                        # A control statement can cross a mode boundary: the
-                        # leave answer, an unsolicited reference offer or a
-                        # late camera/time target must never end the session
-                        # that the user is still using.
-                        with self._lock:
-                            self._last_control_reply = dict(reply)
+                        # Only the message Unreal sent last explains its close.
+                        self._reason = None
+                    if self._on_reply is not None and self._on_reply(reply):
                         continue
                     diagnostic = make_diagnostic(
                         "INVALID_MESSAGE",
@@ -517,11 +521,15 @@ class SenderWorker(threading.Thread):
                     return
         except Exception as exc:
             if not self._stop_event.is_set():
+                reason = self._close_reason()
                 if isinstance(exc, (ValueError, UnicodeError, json.JSONDecodeError)):
-                    code = "INVALID_MESSAGE"
+                    diagnostic = invalid_reply_diagnostic(exc)
+                elif connected and reason is not None:
+                    # Unreal closed the connection after the error it reported.
+                    diagnostic = reason
                 else:
                     code = "STREAM_INTERRUPTED" if connected else "UNREAL_NOT_REACHABLE"
-                diagnostic = make_diagnostic(code, str(exc), details=str(exc))
+                    diagnostic = make_diagnostic(code, str(exc), details=str(exc))
                 self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
         finally:
             with self._lock:
@@ -599,7 +607,7 @@ class StreamingSession(object):
                  playback_state=None, workflow=WORKFLOW_ANIMATION,
                  blendshapes_enabled=True, object_id=CHARACTER_OBJECT_ID,
                  set_revision=1, space_revision=1, scene_units=None,
-                 maya_version=None, secondary_scene=None):
+                 maya_version=None, secondary_scene=None, on_statement=None):
         if workflow not in WORKFLOWS:
             raise StreamingSessionError(
                 "INVALID_MESSAGE",
@@ -623,6 +631,11 @@ class StreamingSession(object):
         self._playback_state = playback_state or maya_is_playing
         self._is_playing = self._read_playback_state()
         self._on_event = on_event
+        # Unreal's connection-level statements, on the sender thread: mode
+        # statements, object removals and errors that belong to no cache
+        # operation. Returns False for an error that is routine work, not a
+        # reason the connection could end for.
+        self._on_statement = on_statement
         self._workflow = workflow
         self._blendshapes_enabled = bool(blendshapes_enabled)
         self._object_id = str(object_id)
@@ -643,8 +656,11 @@ class StreamingSession(object):
         self._cleanup_pending = False
         self._cleaned = False
         self._cleanup_error = None
-        self._sampling_paused = False
-        self._samples_held = 0
+        # Who drives time on this connection; Cached Playback and linkage
+        # take leases from it, which pause live sampling while they hold one.
+        self._time_control = TimeControl(
+            pause=self._pause_sampling, resume=self._resume_sampling,
+            on_change=self._on_time_control_changed)
 
     @property
     def object_id(self):
@@ -661,18 +677,13 @@ class StreamingSession(object):
     def secondary_scene(self):
         return self._secondary_scene
 
-    @contextlib.contextmanager
-    def holding_samples(self):
-        """Skip live samples for the duration; the connection is still watched.
+    @property
+    def time_control(self):
+        return self._time_control
 
-        A scene-reference import runs long Maya commands that can let this
-        session's timer fire while the scene is only half built.
-        """
-        self._samples_held += 1
-        try:
-            yield
-        finally:
-            self._samples_held -= 1
+    @property
+    def _sampling_paused(self):
+        return self._time_control.state != REALTIME_MODE
 
     @property
     def removal_pending(self):
@@ -712,6 +723,11 @@ class StreamingSession(object):
         return self._blendshapes_enabled
 
     @property
+    def stopped(self):
+        """True once Maya itself ended the session (disconnect, scene change)."""
+        return self._outcome == "stopped"
+
+    @property
     def is_ready(self):
         if self._outcome is not None or self._worker is None:
             return False
@@ -725,7 +741,7 @@ class StreamingSession(object):
               playback_state=None, workflow=WORKFLOW_ANIMATION,
               blendshapes_enabled=True, object_id=CHARACTER_OBJECT_ID,
               set_revision=1, space_revision=1, scene_units=None,
-              maya_version=None, secondary_scene=None):
+              maya_version=None, secondary_scene=None, on_statement=None):
         try:
             fps = validate_frame_rate(fps)
             snapshot = scene.snapshot()
@@ -744,7 +760,8 @@ class StreamingSession(object):
                     error.code, "副对象：" + error.message, error.details)
         session = cls(scene, fps, on_event, playback_cap, playback_state,
                       workflow, blendshapes_enabled, object_id, set_revision,
-                      space_revision, scene_units, maya_version, secondary_scene)
+                      space_revision, scene_units, maya_version, secondary_scene,
+                      on_statement)
         try:
             session._start(snapshot, secondary_snapshot)
         except Exception as exc:
@@ -782,7 +799,8 @@ class StreamingSession(object):
         hello_message = make_hello_message(
             self._maya_version or "unknown",
             self._scene_units[0], self._scene_units[1], self._scene_fps)
-        self._worker = SenderWorker(init_messages, hello_message)
+        self._worker = SenderWorker(
+            init_messages, hello_message, on_reply=self._route_reply)
         self._revision = snapshot.revision
         self._worker.start()
         self._worker_started = True
@@ -836,46 +854,66 @@ class StreamingSession(object):
         self._last_sample_time = None
         return True
 
-    def pause_for_cached(self, reply_listener=None):
-        """Suspend live sampling for Cached Playback."""
-        self._pause_sampling(
-            reply_listener, "CACHED_PLAYBACK_NOT_READY",
-            "Cached Playback requires a ready streaming session.")
+    def _pause_sampling(self):
+        """Time-control hook: stop live sampling and deliver in order.
 
-    def begin_linkage(self, reply_listener=None):
-        """Suspend live sampling so the linkage pump owns the pose instead."""
-        self._pause_sampling(
-            reply_listener, "STREAM_INTERRUPTED",
-            "镜头联动需要已连接的 Unreal 会话。")
-
-    def _pause_sampling(self, reply_listener=None, code="CACHED_PLAYBACK_NOT_READY",
-                        message="Cached Playback requires a ready streaming session."):
-        """Suspend live sampling, switch to ordered delivery, and route
-        Unreal's post-ready replies to ``reply_listener`` atomically, so no
-        submission can precede listener installation."""
-        if self._outcome is not None or self._worker is None or not self.is_ready:
-            raise StreamingSessionError(code, message)
-        if reply_listener is not None:
-            self._worker.set_reply_listener(reply_listener)
-        if self._sampling_paused:
-            return
-        self._sampling_paused = True
-        self._timer_generation += 1
-        timer_id, self._timer_id = self._timer_id, None
-        if timer_id is not None:
-            self._remove_callback(timer_id)
-        self._worker.begin_ordered()
+        The timer stays: while paused it only watches the connection, so a
+        connection Unreal ends still reaches the terminal event with its reason.
+        """
+        if self._worker is not None:
+            self._worker.begin_ordered()
         self._last_sample_time = None
 
-    def set_cached_reply_listener(self, listener):
-        """Route Unreal's post-ready replies to the cached playback session."""
+    def _resume_sampling(self):
+        """Time-control hook: queued ordered messages, then live samples."""
         if self._worker is not None:
-            self._worker.set_reply_listener(listener)
+            # Lossless: what the lease holder queued precedes the live frames.
+            self._worker.end_ordered(discard_pending=False)
+        if self._outcome is not None or self._worker is None:
+            return
+        # A rate or cap changed while paused reaches the timer only now.
+        if not self._replace_timer(self._effective_rate()):
+            return
+        self._sample_and_submit(force=True)
+
+    def _route_reply(self, reply):
+        return route_reply(reply, self._time_control, self._deliver_statement,
+                           self._note_reason)
+
+    def _note_reason(self, diagnostic):
+        worker = self._worker
+        if worker is not None:
+            worker.note_reason(diagnostic)
+
+    def _deliver_statement(self, reply):
+        handler = self._on_statement
+        if handler is None:
+            return None
+        try:
+            return handler(reply)
+        except Exception as exc:  # never end the sender thread
+            if cmds is not None:
+                try:
+                    cmds.warning(
+                        "MtoU_LiveLink statement handler failed: {0}".format(exc))
+                except Exception:
+                    pass
+            return None
+
+    def _on_time_control_changed(self):
+        """Tell the panel, on Maya's main thread, that the time control changed."""
+        def notify():
+            self._emit(StreamingSessionEvent("time_control"))
+
+        if cmds is None:
+            notify()
+            return
+        mayaapi.run_deferred(notify, cmds.evalDeferred)
 
     def cached_delivery_drained(self):
         """True once every ordered cached message has reached the socket.
 
-        Meaningful between pause_for_cached() and resume_from_cached().
+        Meaningful while Cached Playback holds its time-control lease.
         An empty backlog proves wire delivery, never Unreal-side parsing;
         only an identity-matched cache_ready outcome confirms acceptance.
         Terminal or unstarted sessions are vacuously drained so a drain
@@ -950,29 +988,6 @@ class StreamingSession(object):
             self._sample_and_submit(force=True)
         return removed
 
-    def end_cached_replay(self, discard_pending=False):
-        if self._worker is None:
-            return
-        self._worker.end_ordered(discard_pending=discard_pending)
-
-    def resume_from_cached(self):
-        self._resume_sampling()
-
-    def resume_after_linkage(self):
-        """Return the live sampling path after linkage leaves the mode."""
-        self._resume_sampling()
-
-    def _resume_sampling(self):
-        if not self._sampling_paused:
-            return
-        self.end_cached_replay()
-        self._sampling_paused = False
-        if self._outcome is not None or self._worker is None:
-            return
-        self._timer_id = self._add_timer(self._effective_rate())
-        self._last_sample_time = None
-        self._sample_and_submit(force=True)
-
     def change_rate(self, fps):
         if self._outcome is not None:
             return
@@ -1010,7 +1025,11 @@ class StreamingSession(object):
         self.stop()
 
     def _on_timer(self, generation, *unused):
-        if generation != self._timer_generation or self._sampling_paused:
+        if generation != self._timer_generation:
+            return
+        if self._sampling_paused:
+            # A lease holder drives time; the timer only watches the connection.
+            self.poll_connection()
             return
         self._update_playback_state()
         self._sample_and_submit()
@@ -1060,12 +1079,12 @@ class StreamingSession(object):
         return True
 
     def poll_connection(self):
-        """Notice a worker that failed or disconnected while sampling is paused.
+        """Notice a worker that failed or disconnected; True while it is usable.
 
-        Live sampling notices a dead connection on its own timer, but linkage
-        pauses that timer; its pump calls this instead, so a connection Unreal
-        ended still reaches the terminal event that restores Maya. Returns True
-        while the connection is usable.
+        The session's timer calls this while sampling is paused. Cached
+        Playback calls it when it finds the connection unusable, and a linkage
+        driver without Maya's idle loop (mayapy) calls it explicitly, so the
+        terminal event carries the worker's own reason.
         """
         if self._outcome is not None or self._worker is None:
             return False
@@ -1101,8 +1120,6 @@ class StreamingSession(object):
             self._emit(StreamingSessionEvent("ready", warning=warning))
         if self._removal_pending is not None:
             # The old set is closed; the new one starts with Unreal's answer.
-            return
-        if self._samples_held:
             return
         now = time.time()
         sample_interval = 1.0 / self._effective_rate()
@@ -1182,8 +1199,9 @@ class StreamingSession(object):
         if self._cleaned:
             return
         self._timer_generation += 1
-        self.end_cached_replay(discard_pending=True)
-        self._sampling_paused = False
+        self._time_control.terminate()
+        if self._worker is not None:
+            self._worker.end_ordered(discard_pending=True)
         callback_ids, self._callback_ids = self._callback_ids, []
         timer_id, self._timer_id = self._timer_id, None
         for callback_id in callback_ids:

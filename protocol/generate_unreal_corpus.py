@@ -20,13 +20,15 @@ OUTPUT_PATH = (
 )
 # Every wire operation protocol/README.md defines: negotiation, realtime frames,
 # the cache upload and its outcomes, the linkage pairing, the exclusive
-# time-control state, the complete pose group, the application acknowledgement,
-# the scene-reference handoff and the removal of the second object of a set.
+# time-control state, the complete pose group, the application acknowledgement
+# and the removal of the second object of a set.
+# ``unknown_type`` is a message whose ``type`` the protocol does not define: a
+# retired type belongs here.
 OPERATIONS = {
     "framing", "init", "frame", "ready", "error",
     "cache_enter",
-    "cache_begin", "cache_frame", "cache_end", "cache_play",
-    "cache_stop", "cache_clear",
+    "cache_begin", "cache_frame", "cache_end",
+    "cache_clear",
     "cache_ready", "cache_playing", "cache_progress", "cache_complete",
     "cache_paused", "cache_resumed", "cache_seeked", "cache_looped",
     "cache_loop_changed",
@@ -36,10 +38,9 @@ OPERATIONS = {
     "camera_time",
     "group",
     "applied",
-    "reference_offer", "reference_result", "reference_removed",
-    "reference_query",
     "remove_object", "object_removed",
     "resource_limit",
+    "unknown_type",
 }
 HOSTS = {"maya", "unreal"}
 # The frozen budgets of protocol/README.md. A resource case names one of these keys and compares
@@ -49,9 +50,6 @@ LIMIT_KEYS = (
     "max_message_bytes",
     "max_linkage_group_bytes",
     "max_control_queue",
-    "max_reference_bytes",
-    "max_reference_objects",
-    "max_reference_triangles",
     "max_cache_payload_bytes",
     "max_cache_frame_count",
     "max_set_objects",
@@ -66,21 +64,24 @@ ERROR_CODES = {
     "MODE_CONFLICT", "CACHE_NOT_CLEARED",
     "SET_REVISION_STALE", "SPACE_REVISION_STALE", "EVAL_STALE",
     "RESOURCE_LIMIT",
-    "REFERENCE_STALE", "REFERENCE_DIGEST_MISMATCH", "REFERENCE_IMAGE_DATA",
-    "REFERENCE_OVER_BUDGET", "CONTAINER_NOT_OWNED", "RECOVERY_REFUSED",
+    "RECOVERY_REFUSED",
     "LINKAGE_NOT_ACTIVE",
     "CACHE_METADATA_INVALID", "CACHE_PAYLOAD_TOO_LARGE",
     "CACHE_FRAME_INDEX_INVALID", "CACHE_FRAME_CONTENTS_INVALID",
     "CACHE_NOT_READY", "CACHE_REVISION_MISMATCH", "CACHE_INVALID_STATE",
 }
 # Message types a linkage case may declare the pre-state of. Each one carries
-# the identity a v11 adapter must match before it answers.
+# the identity an adapter must match before it answers.
 LINKAGE_OPERATIONS = {
-    "camera_time", "applied", "mode_state", "reference_offer", "leave_linkage",
+    "camera_time", "applied", "mode_state", "leave_linkage",
     "remove_object",
 }
 # Stable object ids of a set: the primary character and the second object.
 OBJECT_IDS = {"character", "secondary"}
+# ``expected.kind`` of a rejected case Unreal answers with an ``error``: the
+# ``error.kind`` that reply carries.
+ERROR_KINDS = {"scheduling", "failure"}
+PROTOCOL_VERSION = 12
 
 
 def load_corpus(path: Path = CORPUS_PATH) -> dict:
@@ -100,8 +101,8 @@ def validate_corpus(corpus: object) -> list[str]:
         return ["corpus must be a JSON object"]
     if corpus.get("schema_version") != 1:
         errors.append("schema_version must equal 1")
-    if corpus.get("protocol_version") != 11:
-        errors.append("protocol_version must equal 11")
+    if corpus.get("protocol_version") != PROTOCOL_VERSION:
+        errors.append("protocol_version must equal {0}".format(PROTOCOL_VERSION))
     cases = corpus.get("cases")
     if not isinstance(cases, list) or not cases:
         return errors + ["cases must be a non-empty array"]
@@ -153,10 +154,14 @@ def validate_corpus(corpus: object) -> list[str]:
         if not isinstance(expected.get("close"), bool):
             errors.append(prefix + " expected.close must be boolean")
         if not expected.get("accepted") and expected.get("error_code") not in ERROR_CODES:
-            errors.append(prefix + " rejected case needs a stable v11 error_code")
+            errors.append(prefix + " rejected case needs a stable error_code")
+        if "kind" in expected and expected["kind"] not in ERROR_KINDS:
+            errors.append(prefix + " expected.kind must be 'scheduling' or 'failure'")
         keywords = expected.get("keywords", [])
         if not isinstance(keywords, list) or any(not isinstance(value, str) for value in keywords):
             errors.append(prefix + " expected.keywords must be a string array")
+        if "peer_versions" in expected:
+            errors.extend(validate_peer_versions(prefix, case))
         negotiated = case.get("negotiated_revision")
         if negotiated is not None and (
                 isinstance(negotiated, bool) or not isinstance(negotiated, int)):
@@ -170,6 +175,48 @@ def validate_corpus(corpus: object) -> list[str]:
             errors.extend(validate_linkage_state(prefix, case))
         if operation == "resource_limit":
             errors.extend(validate_resource_case(prefix, case, limits))
+    return errors
+
+
+def validate_peer_versions(prefix: str, case: dict) -> list[str]:
+    """``expected.peer_versions`` is what Maya shows of the peer's release.
+
+    Only Maya judges it, and only on a message that carries or implies the
+    peer's release: the ``error`` that refuses a protocol version, or the
+    ``hello_ack`` Maya refuses for another protocol version. A case no runner
+    judges is rejected instead of passing unchecked.
+    """
+    expected = case["expected"]
+    versions = expected["peer_versions"]
+    errors = []
+    if case.get("operation") == "error":
+        payload = case.get("payload")
+        judged = (
+            expected.get("accepted") is True
+            and isinstance(payload, dict)
+            and payload.get("code") == "PROTOCOL_VERSION_MISMATCH")
+    elif case.get("operation") == "hello_ack":
+        judged = (expected.get("accepted") is False
+                  and expected.get("error_code") == "PROTOCOL_VERSION_MISMATCH")
+    else:
+        judged = False
+    if not judged or case.get("applies_to") != ["maya"]:
+        errors.append(
+            prefix + " expected.peer_versions is judged only for a Maya case"
+            " that names a refused protocol version (an accepted"
+            " PROTOCOL_VERSION_MISMATCH error or a refused hello_ack)")
+    if not isinstance(versions, dict) or set(versions) != {
+            "plugin_version", "protocol_version"}:
+        return errors + [
+            prefix + " expected.peer_versions must hold plugin_version and"
+            " protocol_version"]
+    plugin_version = versions["plugin_version"]
+    if plugin_version is not None and not isinstance(plugin_version, str):
+        errors.append(prefix + " peer_versions.plugin_version must be a string or null")
+    protocol_version = versions["protocol_version"]
+    if protocol_version is not None and (
+            isinstance(protocol_version, bool) or not isinstance(protocol_version, int)):
+        errors.append(prefix + " peer_versions.protocol_version must be an integer or null")
     return errors
 
 

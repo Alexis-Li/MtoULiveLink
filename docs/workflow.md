@@ -16,8 +16,12 @@ new changelog entries use this repository's tracker.
 | Change | State before implementing | Record and decision |
 | --- | --- | --- |
 | Local fix or small feature; interfaces and state ownership unchanged | Real call chain, change location, directly affected behavior and how it will be verified | A short note in the task; no separate document |
-| Cross-module feature, or a change to a public interface or to state/resource ownership | Reused capabilities, module responsibilities, data/state flow, failure recovery, compatibility and behavior that must be preserved | The existing issue or design record; one review of the key design before implementing |
+| Cross-module feature, or a change to a public interface or to state/resource ownership | Reused capabilities, module responsibilities, data/state flow, failure recovery, compatibility and behavior that must be preserved; how each acceptance criterion will be shown at the lowest test level that exercises it, and any driver scenario, fixture field or test hook to add so an agent can run it unattended | The existing issue or design record; one review of the key design before implementing |
 | The approach depends on an unproven host capability | The open question that decides the approach | Settle it with a minimal prototype or experiment before building further |
+
+A design whose behavior can be checked only by a person at the hosts is
+reworked until a test can observe it, or the acceptance names that check as
+manual with its reason.
 
 Make ordinary implementation choices without asking. Changing agreed product
 semantics or an important trade-off is the user's decision. Cite an existing
@@ -46,7 +50,8 @@ affects the approach, start implementing.
 
 - At the start, state briefly what behavior must be shown and the smallest
   check that shows it. Keep the project's required checks; add more only for
-  uncovered acceptance, an actual failure or evidenced regression risk.
+  uncovered acceptance, an actual failure or evidenced regression risk. The
+  opt-in host tests and their procedures are in [testing.md](testing.md).
 - Do not add tests or defensive branches (retries, compatibility layers,
   settings, fallbacks) for cases with no real trigger. Keep targeted checks for
   reachable paths that could delete assets or damage a project.
@@ -68,22 +73,30 @@ The PR owns the implementation diff, review findings and check results.
    its agreed prototype scope.
 2. **Choose the delivery boundary.** Small wording, typo, link and formatting
    fixes, and small edits to rules, workflows, templates or `CHANGELOG.md`, go
-   directly on the current working branch when they change no code, tests,
-   tools, CI, packaging, version or product decision. They need no separate
-   branch, PR, development report or review report. They reach `main` with
-   their branch; the current branch is `main` only when no development branch
-   is in progress. Run applicable checks and use normal commits without
-   rewriting shared history. Use a PR if size or impact is uncertain.
+   directly on the integration branch in progress when they change no code,
+   tests, tools, CI, packaging, version or product decision; with no
+   integration branch in progress they go on `main`. They never go on a PR
+   branch, and they need no separate branch, PR, development report or review
+   report. They reach `main` with the integration branch. Run applicable
+   checks and use normal commits without rewriting shared history. Use a PR if
+   size or impact is uncertain.
    All other work, including development tasks, code changes and significant
-   changes, goes through a PR. Branch from the intended integration branch
-   with `feature/<topic>` for new features, tools or documentation, or
-   `fix/<topic>` for corrections; use a short kebab-case topic. Inspect local
+   changes, goes through a PR. Branch from the integration branch in progress
+   (from `main` only when none is) and target the PR at it, with
+   `feature/<topic>` for new features, tools or documentation, or
+   `fix/<topic>` for corrections; use a short kebab-case topic. A PR branch
+   holds only its PR's change. Inspect local
    changes before switching branches. Serial work can reuse a checkout;
    concurrent writers need isolated checkouts and clear file ownership.
 3. **Deliver a reviewable change.** Record full starting and ending SHAs,
    target branch, resulting behavior, checks actually run and remaining gaps
-   in the PR description, and link it from the issue.
-4. **Review the actual change.** Read requirements and the complete diff at
+   in the PR description, and link it from the issue. Delivery ends with the
+   PR reported as **待审核**; whoever implemented the change stops there.
+4. **Review the actual change.** The review is independent of the
+   implementation: whoever wrote or fixed the change does not review it,
+   recheck its fixes or publish a review conclusion for it. Without an
+   independent review the PR stays **待审核**. Read requirements and the
+   complete diff at
    the named commits, inspect affected callers, and check acceptance,
    compatibility, failure paths and unrelated changes. Verify delivery claims
    against code and evidence. Publish the review on the PR with its full base
@@ -134,13 +147,14 @@ implemented, reviewed, integrated, host-verified or released.
   evidence and completion condition; severity and blocking are separate judgments.
 - Allocate `R-001` style finding IDs across the issue after reading existing
   findings. Keep each ID through fixes and re-review. A claimed fix remains
-  **已修复，待复验** until reviewed. Classify open work as **已确认缺陷**,
+  **已修复，待复验** until an independent review rechecks it. Classify open work as **已确认缺陷**,
   **待验证风险**, **验收缺口** or **后续候选**; candidates become blockers only
   through agreed scope changes. Include the completion condition and next actor.
 
-GitHub does not allow a PR author to approve their own PR. If publication uses
-that account, record the review as a comment with baseline, scope, conclusion
-and evidence; it is not a GitHub approval event.
+GitHub does not allow a PR author to approve their own PR. When the review is
+published from the author's account, record it as a comment with baseline,
+scope, conclusion and evidence; it is not a GitHub approval event. Publishing
+from that account does not make the review independent.
 See [GitHub's review rules](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews).
 
 Use `Refs #<issue>` in PR descriptions and close explicitly after acceptance
@@ -277,6 +291,9 @@ issue. These actions include the following unless explicitly narrowed:
    the other comments by exact ID. Remove task-owned scratch once needed evidence
    has reached its owner, including helpers, drafts, payloads and results.
    Validate resolved paths before deletion and preserve shared or uncertain files.
+   Opt-in acceptance fixtures in `<fixtures>` are shared inputs: keep them, and
+   make sure their placeholder templates in `docs/acceptance-fixtures/`
+   ([testing.md](testing.md#acceptance-fixtures)) are current.
 5. **Verify.** Paginate comments to confirm that one status comment remains;
    check evidence links, publication state and scratch after the last helper run.
    Report any incomplete cleanup with its reason and next action. Close without
@@ -300,3 +317,20 @@ published references. Issue closure and a product release are separate actions.
 Local checks and repository instructions guide publication. Server enforcement
 depends on GitHub settings; current CI does not validate acceptance claims or
 authorize merges.
+
+## Release
+
+- The product version (Maya `__version__`, Unreal `VersionName` and
+  `Version`; currently 1.0.0) changes only in the release change, which sets
+  it to the version being released for both components together. Other PRs
+  leave it alone.
+- The protocol version both hosts negotiate changes with the wire contract;
+  the PR that changes it adds an `Upgrade notes` entry under `Unreleased`
+  instead of bumping the product version.
+- The release change sets the version with
+  `python tools/version.py <version> --apply`. `python tools/package.py --apply`
+  writes `MtoULiveLink-<version>.zip` (Maya) and
+  `MtoULiveLink-<version>-UE<engine>.zip` (Unreal) to `releases/`; verify an
+  installation from those archives before publishing.
+- Release tags use `v<version>`. A collection updates its pin only to a
+  published, reviewed commit; it does not track the moving tip.

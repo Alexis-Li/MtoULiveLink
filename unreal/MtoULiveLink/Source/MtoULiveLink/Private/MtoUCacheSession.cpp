@@ -574,7 +574,7 @@ bool FMtoUCacheSession::HandlePlay(
     {
         OutErrorCode = TEXT("CACHE_NOT_READY");
         OutDetails = FString::Printf(
-            TEXT("cache_play arrived while the cache state is %s."), ToString(State));
+            TEXT("Playback was requested while the cache state is %s."), ToString(State));
         return false;
     }
     // Every attempt opens its own whole-cache segment; only this fresh

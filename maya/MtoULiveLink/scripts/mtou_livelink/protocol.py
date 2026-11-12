@@ -11,16 +11,19 @@ from .config import (
     CHARACTER_OBJECT_ID,
     CONTROL_MAYA,
     CONTROL_UNREAL,
+    ERROR_KINDS,
     LINKAGE_MODE,
     MAX_CACHE_FRAME_COUNT,
     MAX_CACHE_PAYLOAD_BYTES,
     MAX_MESSAGE_BYTES,
     MAX_SET_OBJECTS,
+    MODE_CONTROL,
     MODES,
     PROTOCOL_VERSION,
     SECONDARY_OBJECT_ID,
     WORKFLOW_ANIMATION,
     WORKFLOWS,
+    __version__,
 )
 
 
@@ -155,15 +158,19 @@ def make_cache_begin_message(revision, start_frame, end_frame, fps, payload_size
 
 DEFAULT_CAPABILITIES = {
     "linkage": True,
-    "reference": True,
     "cache": True,
     "model": True,
 }
 
 
 def make_hello_message(maya_version, linear_unit, unit_scale, fps,
-                       capabilities=None):
-    """First message of a connection: version, scene units and capabilities."""
+                       capabilities=None, plugin_version=__version__):
+    """First message of a connection: version, scene units and capabilities.
+
+    ``plugin_version`` is the release of the Maya component that is loaded; it
+    only lets the peer name both releases when it refuses a protocol version.
+    ``None`` leaves the field out.
+    """
     scale = finite_float(unit_scale)
     if scale is None or scale <= 0.0:
         raise ValueError("scene unit scale must be a positive finite number")
@@ -174,7 +181,7 @@ def make_hello_message(maya_version, linear_unit, unit_scale, fps,
     if capabilities:
         for name, value in capabilities.items():
             declared[str(name)] = bool(value)
-    return {
+    message = {
         "type": "hello",
         "version": PROTOCOL_VERSION,
         "host": "maya",
@@ -186,17 +193,36 @@ def make_hello_message(maya_version, linear_unit, unit_scale, fps,
         },
         "capabilities": declared,
     }
+    if plugin_version is not None:
+        message["plugin_version"] = str(plugin_version)
+    return message
+
+
+def validate_mode_control(mode, control):
+    """A statement names a wire mode and the one controller that mode has.
+
+    ``linkage`` is controlled by ``unreal`` and ``realtime`` by ``maya``; any
+    other mode (``cached`` included) or pairing is not a statement either host
+    can follow.
+    """
+    if mode not in MODES:
+        raise ValueError("mode must be one of {0}".format(", ".join(MODES)))
+    if control not in (CONTROL_MAYA, CONTROL_UNREAL):
+        raise ValueError("control must be 'maya' or 'unreal'")
+    if MODE_CONTROL[mode] != control:
+        raise ValueError("mode '{0}' is controlled by '{1}', not '{2}'".format(
+            mode, MODE_CONTROL[mode], control))
 
 
 def make_mode_message(session_id, mode_revision, mode, control, transition,
                       detail=""):
     """Maya's authority statement for one time-control state."""
-    if mode not in MODES:
-        raise ValueError("mode must be one of {0}".format(", ".join(MODES)))
-    if control not in (CONTROL_MAYA, CONTROL_UNREAL):
-        raise ValueError("control must be 'maya' or 'unreal'")
+    validate_mode_control(mode, control)
     if transition not in ("ready", "failed"):
         raise ValueError("mode transition must be 'ready' or 'failed'")
+    if mode == LINKAGE_MODE and transition != "ready":
+        raise ValueError(
+            "a linkage statement is 'ready'; a failed transition is a realtime statement")
     return {
         "type": "mode",
         "session_id": _positive_int(session_id, "session id"),
@@ -268,57 +294,6 @@ def make_remove_object_message(session_id, object_id, set_revision, detail=""):
     }
 
 
-def make_reference_result_message(session_id, transfer_id, accepted, detail,
-                                  counts=None, container=None, code=None):
-    counts = counts or {}
-    message = {
-        "type": "reference_result",
-        "session_id": _positive_int(session_id, "session id"),
-        "transfer_id": str(transfer_id),
-        "accepted": bool(accepted),
-        "detail": str(detail),
-        "counts": {
-            "objects": _positive_int(counts.get("objects", 0), "object count", allow_zero=True),
-            "triangles": _positive_int(
-                counts.get("triangles", 0), "triangle count", allow_zero=True),
-            "bytes": _positive_int(counts.get("bytes", 0), "byte count", allow_zero=True),
-        },
-    }
-    if container:
-        message["container"] = str(container)
-    if code:
-        # The stable refusal code, so the other host reports the actual reason
-        # instead of guessing one.
-        message["code"] = str(code)
-    return message
-
-
-def make_reference_removed_message(session_id, detail=""):
-    return {
-        "type": "reference_removed",
-        "session_id": _positive_int(session_id, "session id"),
-        "detail": str(detail),
-    }
-
-
-def make_reference_query_message(session_id, transfer_id, scope):
-    if not isinstance(scope, dict) or "level" not in scope:
-        raise ValueError("reference scope requires a level package name")
-    sublevels = scope.get("sublevels", [])
-    if not isinstance(sublevels, list) or any(
-            not isinstance(value, str) for value in sublevels):
-        raise ValueError("reference scope sublevels must be strings")
-    return {
-        "type": "reference_query",
-        "session_id": _positive_int(session_id, "session id"),
-        "transfer_id": str(transfer_id),
-        "scope": {
-            "level": str(scope["level"]),
-            "sublevels": [str(value) for value in sublevels],
-        },
-    }
-
-
 def _positive_int(value, label, allow_zero=False):
     number = exact_int(value)
     minimum = 0 if allow_zero else 1
@@ -340,17 +315,6 @@ def make_cache_frame_message(index, transforms, curves):
 
 def make_cache_end_message():
     return {"type": "cache_end"}
-
-
-def make_cache_play_message(play_id):
-    play_id = int(play_id)
-    if play_id < 1:
-        raise ValueError("cache play id must be a positive integer")
-    return {"type": "cache_play", "play_id": play_id}
-
-
-def make_cache_stop_message():
-    return {"type": "cache_stop"}
 
 
 def make_cache_clear_message(clear_id):
@@ -425,8 +389,8 @@ def finite_float(value):
 def validate_anchor(anchor):
     """A linkage ``mode_state`` names the target's placement.
 
-    The shape is the handoff manifest's ``world.anchor``: ``location_cm[3]``
-    and ``rotation_deg{roll, pitch, yaw}``, all finite.
+    The shape is ``location_cm[3]`` and ``rotation_deg{roll, pitch, yaw}``,
+    all finite.
     """
     if not isinstance(anchor, dict):
         raise ValueError("a linkage mode_state must name its anchor")
@@ -444,6 +408,25 @@ def validate_anchor(anchor):
 
 # List fields whose entries are objects rather than names.
 STRING_LIST_EXCEPTIONS = ("components", "targets")
+
+# The code of an ``error`` that refuses a protocol version. It alone carries the
+# refusing release (``protocol_version`` and ``plugin_version``).
+PROTOCOL_VERSION_MISMATCH = "PROTOCOL_VERSION_MISMATCH"
+
+
+class ProtocolVersionMismatch(ValueError):
+    """A reply of another protocol version, refused by Maya itself.
+
+    ``peer_protocol_version`` is the version the peer declared: always an
+    integer, because a version that is missing or not an integer is an
+    ordinary malformed reply.
+    """
+
+    def __init__(self, peer_protocol_version):
+        self.peer_protocol_version = peer_protocol_version
+        super(ProtocolVersionMismatch, self).__init__(
+            "protocol reply field 'version' is {0}; it must equal the current"
+            " protocol version {1}".format(peer_protocol_version, PROTOCOL_VERSION))
 
 
 def validate_reply(reply):
@@ -538,20 +521,6 @@ def validate_reply(reply):
             "components": list,
             "reason": str,
         },
-        "reference_offer": {
-            "session_id": (int, float),
-            "transfer_id": str,
-            "directory": str,
-            "manifest_digest": str,
-            "scope": dict,
-            "space_revision": (int, float),
-            "counts": dict,
-        },
-        "reference_query": {
-            "session_id": (int, float),
-            "transfer_id": str,
-            "scope": dict,
-        },
     }
     # ``source_frame`` is present only once the attempt has applied a pose; a
     # pause or resume before the first frame omits it instead of inventing a
@@ -562,11 +531,18 @@ def validate_reply(reply):
         "camera_time": {"cut": dict},
         "applied": {"display_frame": (int, float)},
         "hello_ack": {"detail": str},
+        # ``kind`` may be absent (a peer of another version answers
+        # PROTOCOL_VERSION_MISMATCH without one) and then reads as a failure;
+        # ``eval_id`` and ``sample_serial`` identify the group an error refused.
+        "error": {"kind": str, "eval_id": str, "sample_serial": (int, float)},
     }
     fields = required.get(reply_type)
     if reply_type == "hello_ack" and exact_int(reply.get("version")) != PROTOCOL_VERSION:
         # A peer of another version answers with another shape; the version is
         # the reason, whatever else differs.
+        peer_version = exact_int(reply.get("version"))
+        if peer_version is not None:
+            raise ProtocolVersionMismatch(peer_version)
         raise ValueError(
             "protocol reply field 'version' must equal the current protocol version")
     if fields is None:
@@ -616,13 +592,26 @@ def validate_reply(reply):
         space = reply["space"]
         if not isinstance(space.get("anchor"), dict):
             raise ValueError("hello_ack space field 'anchor' must be an object")
-    if reply_type in ("mode_state",) and reply["mode"] not in MODES:
+    if reply_type == "error" and "kind" in reply and reply["kind"] not in ERROR_KINDS:
         raise ValueError(
-            "protocol reply field 'mode' must be one of {0}".format(", ".join(MODES)))
-    if reply_type in ("mode_state",) and reply["control"] not in (CONTROL_MAYA, CONTROL_UNREAL):
-        raise ValueError("protocol reply field 'control' must be 'maya' or 'unreal'")
-    if reply_type == "mode_state" and reply["mode"] == LINKAGE_MODE:
-        validate_anchor(reply.get("anchor"))
+            "protocol reply field 'kind' must be one of {0}".format(
+                ", ".join(ERROR_KINDS)))
+    if reply_type == "error" and reply["code"] == PROTOCOL_VERSION_MISMATCH:
+        # The refusing release, shown to the user. Either field may be absent
+        # (a peer of another version names none), but not of another type.
+        if "protocol_version" in reply and exact_int(reply["protocol_version"]) is None:
+            raise ValueError(
+                "protocol reply field 'protocol_version' must be an integer")
+        if "plugin_version" in reply and not isinstance(reply["plugin_version"], str):
+            raise ValueError(
+                "protocol reply field 'plugin_version' has the wrong JSON type")
+    if reply_type == "mode_state":
+        try:
+            validate_mode_control(reply["mode"], reply["control"])
+        except ValueError as exc:
+            raise ValueError("protocol reply mode_state: {0}".format(exc))
+        if reply["mode"] == LINKAGE_MODE:
+            validate_anchor(reply.get("anchor"))
     if reply_type == "applied" and not reply["applied"]:
         if not reply["reason"]:
             raise ValueError(

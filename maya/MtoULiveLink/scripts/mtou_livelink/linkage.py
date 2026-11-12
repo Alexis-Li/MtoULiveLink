@@ -8,7 +8,7 @@ touches Maya directly: the host adapter passed to it applies the time and
 camera, samples the objects and restores the captured state, so the state
 machine and its scheduling stay testable without a host.
 
-Scheduling follows the frozen v11 contract (protocol/README.md): one target is
+Scheduling follows the frozen contract (protocol/README.md): one target is
 being applied and one newer target may wait; an advancing desired target never
 cancels the work in flight, because Unreal shows that complete result and marks
 it as lagging instead of losing the only sample that was going to arrive.
@@ -19,7 +19,6 @@ second object is being removed no group is sent, so Unreal never receives a
 group of a set it is closing.
 """
 
-import re
 import threading
 import time
 
@@ -43,32 +42,7 @@ from .protocol import (
     make_mode_message,
     validate_reply,
 )
-
-# Unreal refuses a pose group a mode change overtook with MODE_CONFLICT and
-# names the group's revision in ``details`` (MtoULinkageSession's staged-group
-# gate). The code alone also covers real conflicts, so only these two forms are
-# scheduling: a group that arrived during the transition, and a group of an
-# older revision. A paired upgrade guarantees both hosts share these strings,
-# as ``note_refused`` already relies on for EVAL_STALE.
-_GROUP_DURING_TRANSITION = re.compile(r"^target mode revision -?\d+$")
-_GROUP_REVISION = re.compile(r"^group mode revision (-?\d+), current (-?\d+)$")
-
-
-STALE_REFERENCE_MESSAGE = "场景参考是为目标的另一摆放导出的，不能用于当前镜头联动"
-
-
-def message_anchor(message):
-    """The placement a linkage ``mode_state`` names (validated by the protocol)."""
-    return message["anchor"]
-
-
-def is_scheduling_conflict(details):
-    """True when a MODE_CONFLICT answers a group that a mode change overtook."""
-    text = str(details or "").strip()
-    if _GROUP_DURING_TRANSITION.match(text):
-        return True
-    match = _GROUP_REVISION.match(text)
-    return bool(match) and int(match.group(1)) < int(match.group(2))
+from .timecontrol import TimeControlRefused
 
 
 class LinkageError(RuntimeError):
@@ -212,10 +186,13 @@ class LinkageSession(object):
 
     def __init__(self, host, session, on_event=None, object_id=CHARACTER_OBJECT_ID,
                  space_revision=1, set_revision=1, clock=time.monotonic,
-                 mode_revision=0, object_ids=None):
+                 mode_revision=0, object_ids=None, on_reply_error=None):
         self._host = host
         self._session = session
         self._on_event = on_event
+        # Told, on the sender thread, of a target or receipt this session
+        # refused or could not read; it never touches Maya there.
+        self._on_reply_error = on_reply_error
         self._object_id = object_id
         # Every object of the current set, primary first; a group carries all.
         self._object_ids = tuple(object_ids or (object_id,))
@@ -261,6 +238,8 @@ class LinkageSession(object):
         # took over.
         self._awaiting_confirmation = False
         self._entered_at = None
+        # The connection's time-control lease while linkage drives time.
+        self._lease = None
 
     # ------------------------------------------------------------------ state
     @property
@@ -380,15 +359,13 @@ class LinkageSession(object):
         return applied.get("applied") is True
 
     # ------------------------------------------------------------- transitions
-    def enter(self, mode_revision, remote=False, anchor=None):
+    def enter(self, mode_revision, remote=False):
         """Take linkage control: capture Maya state and announce the new mode.
 
         ``remote`` marks a transition Unreal started: Maya's ``mode`` message is
         then the answer Unreal waits for (Unreal echoes it with ``mode_state``),
         and a refusal is announced as a failed transition so Unreal hands its
-        borrowed writers back at once. ``anchor`` is the placement that
-        ``mode_state`` named; a scene reference placed for another one refuses
-        the entry before Maya changes anything.
+        borrowed writers back at once.
         """
         revision = exact_int(mode_revision)
         if revision is None or revision < 1:
@@ -404,20 +381,25 @@ class LinkageSession(object):
                     "MODE_CONFLICT",
                     "mode revision {0} is not newer than {1}".format(
                         revision, self._mode_revision))
-        problem = self._host.stale_reference(anchor) if anchor is not None else None
-        if problem:
+        try:
+            # The connection delivers targets and receipts to the lease holder.
+            lease = self._session.time_control.acquire(
+                LINKAGE_MODE, self, receive=self.receive)
+        except TimeControlRefused as refusal:
+            # Cached Playback still holds the connection: nothing changed.
             if remote:
-                self._announce_failed(revision, problem)
+                self._announce_failed(revision, refusal.message)
             self._emit(LinkageEvent(
                 "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
-                mode_revision=self._mode_revision, detail=problem,
-                diagnostic=self._diagnostic("REFERENCE_STALE", problem)))
-            raise LinkageError("REFERENCE_STALE", STALE_REFERENCE_MESSAGE, problem)
+                mode_revision=self._mode_revision, detail=refusal.message,
+                diagnostic=self._diagnostic(refusal.code, refusal.message)))
+            raise LinkageError(refusal.code, refusal.message, refusal.details)
         try:
             state = self._host.capture_state()
         except Exception as exc:  # host refusal keeps the previous mode
             # The revision only advances once the host accepted the transition,
             # so a refused entry cannot make the next attempt look stale.
+            lease.release()
             self._record_recovery("capture", exc)
             if remote:
                 self._announce_failed(revision, exc)
@@ -427,6 +409,7 @@ class LinkageSession(object):
                 diagnostic=self._diagnostic("LINKAGE_FAILED", exc)))
             raise
         with self._lock:
+            self._lease = lease
             self._mode_revision = revision
             self._state = state
             self._mode = LINKAGE_MODE
@@ -500,10 +483,18 @@ class LinkageSession(object):
                 else "已结束预览并恢复原状态")
         self._session.submit_linkage(make_leave_linkage_message(
             self._session_id, revision, target, "; ".join(residual)))
+        self._release_lease()
         self._emit(LinkageEvent(
             "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
             mode_revision=revision, detail=self._detail))
         return tuple(residual)
+
+    def _release_lease(self):
+        """Hand time back to realtime; only the lease this session took."""
+        with self._lock:
+            lease, self._lease = self._lease, None
+        if lease is not None:
+            lease.release()
 
     def _restore(self, state):
         if state is None:
@@ -518,6 +509,19 @@ class LinkageSession(object):
         return list(residual)
 
     # ---------------------------------------------------------------- inbound
+    def receive(self, reply):
+        """One linkage result routed to this lease holder (sender thread)."""
+        try:
+            kind = reply.get("type")
+            if kind == "camera_time":
+                self.offer_target(reply)
+            elif kind == "applied":
+                self.note_applied(reply)
+        except Exception as error:  # never end the sender thread
+            listener = self._on_reply_error
+            if listener is not None:
+                listener(error)
+
     def offer_target(self, message):
         """Accept one `camera_time` target (worker thread); never blocks on Maya."""
         with self._lock:
@@ -599,8 +603,6 @@ class LinkageSession(object):
           and calls :meth:`enter` with ``remote=True``;
         - ``"left"``: Unreal left linkage, refused or failed the transition and
           Maya restored itself (any residual is in the recovery records);
-        - ``"refused"``: Unreal confirmed a placement the scene reference was
-          not exported for; Maya failed the transition and restored itself;
         - ``"noted"``: nothing to do (an echo, or a stale statement).
         """
         validate_reply(message)
@@ -619,10 +621,8 @@ class LinkageSession(object):
                         message.get("session_id"), self._session_id))
             active = self._mode == LINKAGE_MODE
             current = self._mode_revision
-            confirming = False
             if mode == LINKAGE_MODE:
                 if active and revision == current:
-                    confirming = self._awaiting_confirmation
                     self._awaiting_confirmation = False
                     self._detail = detail or self._detail
                     outcome = "confirmed"
@@ -650,11 +650,6 @@ class LinkageSession(object):
                 outcome = "noted"
         if outcome == "left":
             return self._follow_remote_exit(revision, current, detail)
-        if confirming:
-            problem = self._host.stale_reference(message_anchor(message))
-            if problem:
-                self._fail_entered(revision, problem, "REFERENCE_STALE")
-                return "refused"
         if outcome != "enter":
             self._emit(LinkageEvent(
                 "mode", mode=self.mode(), control=self._control,
@@ -681,6 +676,7 @@ class LinkageSession(object):
             if revision <= current:
                 self._entered = False
         residual = self._restore(state)
+        self._release_lease()
         with self._lock:
             if revision > current:
                 summary = "Unreal 已结束镜头联动，Maya 已恢复并保持暂停"
@@ -736,6 +732,7 @@ class LinkageSession(object):
             self._control = CONTROL_MAYA
         residual = self._restore(state)
         self._announce_failed(revision, reason)
+        self._release_lease()
         with self._lock:
             self._detail = reason + "，Maya 已恢复原状态"
             if residual:
@@ -757,30 +754,24 @@ class LinkageSession(object):
         except Exception as exc:  # the transport may already be gone
             self._record_recovery("announce", exc)
 
-    def note_refused(self, detail=""):
-        """Count one answer Unreal refused because its target was cancelled.
+    def note_refused(self, detail="", eval_id=None, sample_serial=None):
+        """Count one answer Unreal refused as scheduling (``error.kind``).
 
-        When the refusal names the issued sample, that sample will never be
-        applied, so the issued slot is free for the newer target Unreal sent.
+        ``detail`` is only displayed. When ``eval_id`` and ``sample_serial``
+        name the issued sample, that sample will never be applied, so the
+        issued slot is free for the newer target Unreal sent; a refusal that
+        names another sample, or none, leaves the slot alone.
         """
         with self._lock:
             self._refused_count += 1
-            if self._issued is not None and detail \
-                    and "group eval {0},".format(self._issued.eval_id) in detail:
+            issued = self._issued
+            if (issued is not None and eval_id is not None
+                    and sample_serial is not None
+                    and issued.eval_id == eval_id
+                    and sample_serial == self._issued_sample_serial):
                 self._issued = None
             if detail:
                 self._detail = "已丢弃过期结果：{0}".format(detail)
-
-    def note_reference_offer(self, message):
-        """Accept the handoff descriptor the panel will offer to the user."""
-        validate_reply(message)
-        with self._lock:
-            self._check_identity_locked(message)
-        self._emit(LinkageEvent(
-            "reference", mode=self._mode, control=self._control,
-            mode_revision=self._mode_revision,
-            detail=str(message.get("transfer_id") or "")))
-        return True
 
     def _check_identity_locked(self, message):
         session_id = exact_int(message.get("session_id"))
@@ -936,6 +927,7 @@ class LinkageSession(object):
             self._mode = REALTIME_MODE
             self._control = CONTROL_MAYA
         residual = self._restore(state)
+        self._release_lease()
         self._detail = "已断开连接并恢复预览接管"
         return tuple(residual)
 

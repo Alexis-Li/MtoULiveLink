@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import pathlib
+import re
 import select
 import socket
 import struct
@@ -51,6 +52,9 @@ from mtou_livelink import (
 )
 from mtou_livelink import (
     timeline as mtou_timeline,
+)
+from mtou_livelink import (
+    timecontrol as mtou_timecontrol,
 )
 
 # Every module that binds a Maya or late-bound global; `patch_global` patches
@@ -101,6 +105,15 @@ class _GlobalPatcher(object):
     def __exit__(self, *exc_info):
         self.stop()
         return False
+
+
+def cached_session(**fields):
+    """A session double whose time control Cached Playback already holds."""
+    control = mtou_timecontrol.TimeControl()
+    lease = control.acquire(mtou_config.CACHED_MODE, object())
+    session = mock.Mock(**fields)
+    session.time_control = control
+    return session, lease
 
 
 def patch_global(name, value=mock.DEFAULT, **kwargs):
@@ -276,6 +289,33 @@ class PlaybackSchedulingTests(unittest.TestCase):
 
             stale_callback(0.0, 0.0, None)
             self.assertEqual(2, scene.sample.call_count)
+            session.stop()
+
+    def test_a_rate_changed_while_a_lease_holds_time_applies_on_release(self):
+        state = {"playing": False}
+        intervals = []
+        callbacks = []
+        worker = mock.Mock()
+        worker.status.return_value = (
+            "ready", "Connected", {
+                "missing_in_unreal": [], "missing_in_maya": [],
+                "bone_name_remaps": [], "has_warning": False,
+            }, None)
+        fake_om, scene, playback_state = self._runtime(
+            state, intervals, callbacks, worker)
+
+        with patch_global("om", fake_om), \
+             patch_global("SenderWorker", return_value=worker), \
+             mock.patch.object(time, "time", return_value=100.0):
+            session = mtou_session.StreamingSession.start(
+                scene, 30.0, playback_state=playback_state)
+            lease = session.time_control.acquire(mtou_config.CACHED_MODE, object())
+            session.change_rate(24.0)
+            # While the lease holds time the timer only watches the connection.
+            self.assertEqual([1.0 / 30.0], intervals)
+
+            lease.release()
+            self.assertEqual([1.0 / 30.0, 1.0 / 24.0], intervals)
             session.stop()
 
     def test_follow_scene_and_numeric_caps_never_exceed_scene_rate(self):
@@ -628,7 +668,7 @@ class StreamingSessionTests(unittest.TestCase):
         registered = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 self.init_message = init_message
                 self.hello_message = hello_message
                 self.started = False
@@ -656,8 +696,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         class FakeSceneMessage(object):
             kBeforeNew = 1
@@ -708,7 +746,7 @@ class StreamingSessionTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
                 self.submitted = []
@@ -738,8 +776,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
             def stop(self):
                 pass
@@ -779,89 +815,6 @@ class StreamingSessionTests(unittest.TestCase):
         self.assertEqual(["ready", "stopped"], [event.kind for event in events])
         self.assertEqual(2, scene.sample.call_count)
         self.assertEqual(2, len(FakeWorker.instance.submitted))
-
-    def test_held_sampling_skips_ticks_until_released(self):
-        # A scene-reference import holds live sampling: Maya may run the
-        # timer inside the import, while the scene is only half built.
-        events = []
-        timer_callbacks = []
-
-        class FakeWorker(object):
-            instance = None
-
-            def __init__(self, init_message, hello_message=None):
-                del init_message
-                self.hello_message = hello_message
-                self.submitted = []
-                self.__class__.instance = self
-
-            def start(self):
-                pass
-
-            def status(self):
-                return ("ready", "Connected", {
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "has_warning": False,
-                }, None)
-
-            def submit(self, frame):
-                self.submitted.append(frame)
-
-            def begin_ordered(self):
-                pass
-
-            def submit_ordered(self, frame):
-                self.submitted.append(frame)
-
-            def ordered_pending(self):
-                return 0
-
-            def end_ordered(self, discard_pending=True):
-                pass
-
-            def set_reply_listener(self, listener):
-                pass
-
-            def stop(self):
-                pass
-
-            def join(self, timeout):
-                del timeout
-
-        fake_om = type("FakeOpenMaya", (), {
-            "MSceneMessage": type("FakeSceneMessage", (), {
-                "kBeforeNew": 1, "kBeforeOpen": 2, "kMayaExiting": 3,
-                "addCallback": staticmethod(lambda message, callback: 10 + message),
-            }),
-            "MEventMessage": type("FakeEventMessage", (), {
-                "addEventCallback": staticmethod(lambda event, callback: 30),
-            }),
-            "MTimerMessage": type("FakeTimerMessage", (), {
-                "addTimerCallback": staticmethod(
-                    lambda interval, callback: timer_callbacks.append(callback) or 20),
-            }),
-            "MMessage": type("FakeMessage", (), {
-                "removeCallback": staticmethod(lambda callback_id: None),
-            }),
-        })
-        scene = mock.Mock()
-        scene.snapshot.return_value = character_snapshot(
-            7, "|root", "Clothes01", [("root", -1)], ["Smile"])
-        scene.sample.return_value = mtou_scene.CharacterFrame(7, [[1, 2, 3]], [0.25])
-
-        with patch_global("om", fake_om), \
-             patch_global("SenderWorker", FakeWorker), \
-             mock.patch.object(time, "time", side_effect=[100.0, 100.05]):
-            session = mtou_session.StreamingSession.start(scene, 24.0, events.append)
-            with session.holding_samples():
-                timer_callbacks[0](0.0, 0.0, None)
-                held_samples = scene.sample.call_count
-            timer_callbacks[0](0.0, 0.0, None)
-            session.stop()
-
-        self.assertEqual(0, held_samples)
-        self.assertEqual(1, scene.sample.call_count)
-        self.assertEqual(1, len(FakeWorker.instance.submitted))
 
     def test_time_changed_event_streams_without_idle_timer_and_caps_burst(self):
         time_callbacks = []
@@ -922,7 +875,7 @@ class StreamingSessionTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
                 self.stop_count = 0
@@ -954,8 +907,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om = type("FakeOpenMaya", (), {
             "MSceneMessage": type("FakeSceneMessage", (), {
@@ -1004,7 +955,7 @@ class StreamingSessionTests(unittest.TestCase):
         timer_callbacks = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1035,8 +986,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om = type("FakeOpenMaya", (), {
             "MSceneMessage": type("FakeSceneMessage", (), {
@@ -1082,7 +1031,7 @@ class StreamingSessionTests(unittest.TestCase):
         removed = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1107,8 +1056,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om = type("FakeOpenMaya", (), {
             "MSceneMessage": type("FakeSceneMessage", (), {
@@ -1198,7 +1145,7 @@ class StreamingSessionTests(unittest.TestCase):
         timers = []
 
         class DisconnectedWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1226,8 +1173,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om, fake_cmds, scene = self._runtime(timers, deferred)
         with patch_global("om", fake_om), \
@@ -1250,7 +1195,7 @@ class StreamingSessionTests(unittest.TestCase):
         state = {"value": "ready"}
 
         class Worker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 del init_message
                 self.hello_message = hello_message
 
@@ -1281,8 +1226,6 @@ class StreamingSessionTests(unittest.TestCase):
             def end_ordered(self, discard_pending=True):
                 pass
 
-            def set_reply_listener(self, listener):
-                pass
 
         fake_om, fake_cmds, scene = self._runtime(timers, deferred)
         scene.sample.return_value = mtou_scene.CharacterFrame(7, [[1, 2, 3]], [])
@@ -1291,14 +1234,15 @@ class StreamingSessionTests(unittest.TestCase):
              patch_global("SenderWorker", Worker):
             session = mtou_session.StreamingSession.start(scene, 24.0, events.append)
             timers[0](0.0, 0.0, None)
-            session.begin_linkage()
+            session.time_control.acquire(mtou_config.LINKAGE_MODE, object())
             self.assertTrue(session.poll_connection())
             state["value"] = "disconnected"
             self.assertFalse(session.poll_connection())
             for action in list(deferred):
                 action()
 
-        self.assertEqual(["ready", "failed"], [event.kind for event in events])
+        self.assertEqual(["ready", "failed"], [event.kind for event in events
+                                               if event.kind != "time_control"])
         self.assertEqual("STREAM_INTERRUPTED", events[-1].diagnostic["code"])
 
     def test_timer_start_failure_rolls_back_worker_and_callbacks(self):
@@ -1687,28 +1631,27 @@ class SenderLifecycleTests(unittest.TestCase):
         self.assertEqual("Connected", detail)
         self.assertIsNone(diagnostic)
 
-    def test_runtime_structured_error_is_preserved(self):
-        worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
-        runtime_error = mtou_protocol.encode_message({
-            "type": "error",
-            "code": "INVALID_MESSAGE",
-            "message": "bad frame",
-            "details": "transform count mismatch",
+    @staticmethod
+    def _ready_then(*messages):
+        """A socket that answers the handshake with ready, then ``messages``."""
+        packet = mtou_protocol.encode_message({
+            "type": "ready", "revision": 7,
+            "missing_in_unreal": [], "missing_in_maya": [],
+            "bone_name_remaps": [], "workflow": "animation",
+            "target_morph_count": 0, "accepted_morph_count": 0,
         })
+        for message in messages:
+            packet += mtou_protocol.encode_message(message)
 
-        class RuntimeErrorSocket(object):
+        class ScriptedSocket(object):
             def __init__(self):
-                self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "workflow": "animation",
-                    "target_morph_count": 0, "accepted_morph_count": 0,
-                }) + runtime_error
+                self.reply = packet
 
             def settimeout(self, timeout):
                 pass
 
             def recv(self, size):
+                # An empty read is Unreal closing the connection.
                 chunk, self.reply = self.reply[:size], self.reply[size:]
                 return chunk
 
@@ -1718,177 +1661,162 @@ class SenderLifecycleTests(unittest.TestCase):
             def close(self):
                 pass
 
-        fake_socket = RuntimeErrorSocket()
+        return ScriptedSocket()
+
+    def _run_until_read(self, worker, fake_socket):
+        """Run the sender loop until every scripted message was read."""
+        def selectable(unused_rlist, unused_wlist, unused_xlist, unused_timeout):
+            if fake_socket.reply:
+                return ([fake_socket], [], [])
+            worker.stop()
+            return ([], [], [])
+
+        with mock.patch.object(worker, "_connect", return_value=fake_socket), \
+             mock.patch.object(worker, "_send_initial", return_value=True), \
+             mock.patch.object(select, "select", side_effect=selectable):
+            worker.run()
+
+    def test_an_error_unreal_closes_the_connection_after_is_its_reason(self):
+        control = mtou_timecontrol.TimeControl()
+        reported = []
+
+        def route(reply):
+            return mtou_session.route_reply(
+                reply, control, reported.append, worker.note_reason)
+
+        worker = mtou_session.SenderWorker({"type": "init", "revision": 7},
+                                           on_reply=route)
+        fake_socket = self._ready_then({
+            "type": "error", "code": "INVALID_MESSAGE", "message": "bad frame",
+            "details": "transform count mismatch"})
         with mock.patch.object(worker, "_connect", return_value=fake_socket), \
              mock.patch.object(worker, "_send_initial", return_value=True), \
              mock.patch.object(select, "select", return_value=([fake_socket], [], [])):
             worker.run()
 
         state, _, _, diagnostic = worker.status()
+        self.assertEqual(["error"], [reply["type"] for reply in reported])
         self.assertEqual("error", state)
         self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
+        self.assertEqual("bad frame", diagnostic["message"])
         self.assertEqual("transform count mismatch", diagnostic["details"])
 
-    def test_reply_listener_receives_cache_replies_and_keeps_connection(self):
-        worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
+    def test_routed_replies_keep_the_connection(self):
         received = []
-        worker.set_reply_listener(received.append)
-        cache_ready = mtou_protocol.encode_message({
-            "type": "cache_ready", "upload_id": 1, "revision": 7,
-            "frame_count": 321})
+        worker = mtou_session.SenderWorker(
+            {"type": "init", "revision": 7},
+            on_reply=lambda reply: received.append(reply) is None)
+        cache_ready = {"type": "cache_ready", "upload_id": 1, "revision": 7,
+                       "frame_count": 321}
+        fake_socket = self._ready_then(cache_ready)
+        fake_socket.recv = (lambda size, recv=fake_socket.recv:
+                            recv(size) or b"\x00")
 
-        class ListenerSocket(object):
-            def __init__(self):
-                self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "workflow": "animation",
-                    "target_morph_count": 0, "accepted_morph_count": 0,
-                }) + cache_ready
+        self._run_until_read(worker, fake_socket)
 
-            def settimeout(self, timeout):
-                pass
-
-            def recv(self, size):
-                chunk, self.reply = self.reply[:size], self.reply[size:]
-                return chunk or b"\x00"
-
-            def sendall(self, packet):
-                pass
-
-            def close(self):
-                pass
-
-        fake_socket = ListenerSocket()
-
-        def selectable(unused_rlist, unused_wlist, unused_xlist, unused_timeout):
-            if fake_socket.reply:
-                return ([fake_socket], [], [])
-            worker.stop()
-            return ([], [], [])
-
-        with mock.patch.object(worker, "_connect", return_value=fake_socket), \
-             mock.patch.object(worker, "_send_initial", return_value=True), \
-             mock.patch.object(select, "select", side_effect=selectable):
-            worker.run()
-
-        self.assertEqual(
-            [{"type": "cache_ready", "upload_id": 1, "revision": 7,
-              "frame_count": 321}], received)
+        self.assertEqual([cache_ready], received)
         self.assertEqual("disconnected", worker.status()[0])
 
-    def test_a_statement_before_the_listener_reaches_it_once_installed(self):
-        # Unreal may start linkage the moment the set is ready, before Maya's
-        # main thread installs the panel's listener; the statement must not
-        # be lost.
-        worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
-        received = []
-        mode_state = {"type": "mode_state", "session_id": 1, "mode_revision": 1,
-                      "mode": "linkage", "control": "unreal", "detail": "",
-                      "anchor": {"location_cm": [0.0, 0.0, 0.0],
-                                 "rotation_deg": {"roll": 0.0, "pitch": 0.0,
-                                                  "yaw": 0.0}}}
+    def test_a_message_the_connection_does_not_accept_ends_it(self):
+        worker = mtou_session.SenderWorker({"type": "init", "revision": 7},
+                                           on_reply=lambda reply: False)
+        fake_socket = self._ready_then({
+            "type": "cache_ready", "upload_id": 1, "revision": 7, "frame_count": 1})
 
-        class EarlySocket(object):
-            def __init__(self):
-                self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "workflow": "animation",
-                    "target_morph_count": 0, "accepted_morph_count": 0,
-                }) + mtou_protocol.encode_message(mode_state)
+        self._run_until_read(worker, fake_socket)
 
-            def settimeout(self, timeout):
-                pass
+        state, _, _, diagnostic = worker.status()
+        self.assertEqual("error", state)
+        self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
 
-            def recv(self, size):
-                chunk, self.reply = self.reply[:size], self.reply[size:]
-                return chunk or b"\x00"
-
-            def sendall(self, packet):
-                pass
-
-            def close(self):
-                pass
-
-        fake_socket = EarlySocket()
-        calls = []
-
-        def selectable(unused_rlist, unused_wlist, unused_xlist, unused_timeout):
-            if fake_socket.reply:
-                return ([fake_socket], [], [])
-            calls.append(None)
-            if len(calls) == 1:
-                # The main thread installs the listener only now.
-                worker.set_reply_listener(received.append)
-            else:
-                worker.stop()
-            return ([], [], [])
-
-        with mock.patch.object(worker, "_connect", return_value=fake_socket), \
-             mock.patch.object(worker, "_send_initial", return_value=True), \
-             mock.patch.object(select, "select", side_effect=selectable):
-            worker.run()
-
-        self.assertEqual([mode_state], received)
-        self.assertEqual("disconnected", worker.status()[0])
-
-    def test_held_statements_precede_a_reply_read_once_the_listener_exists(self):
-        # The listener appears between the top of a loop and its read: the
-        # statement held before it still reaches the listener first.
-        worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
-        received = []
+    def test_replies_naming_an_undefined_value_end_the_connection(self):
         anchor = {"location_cm": [0.0, 0.0, 0.0],
                   "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
-        held = {"type": "mode_state", "session_id": 1, "mode_revision": 1,
-                "mode": "linkage", "control": "unreal", "detail": "",
-                "anchor": anchor}
-        newer = {"type": "mode_state", "session_id": 1, "mode_revision": 2,
-                 "mode": "realtime", "control": "maya", "detail": ""}
+        undefined = {
+            "error kind": {"type": "error", "code": "EVAL_STALE", "message": "m",
+                           "details": "d", "kind": "fatal"},
+            "error kind type": {"type": "error", "code": "EVAL_STALE",
+                                "message": "m", "details": "d", "kind": 7},
+            "error eval_id type": {"type": "error", "code": "EVAL_STALE",
+                                   "message": "m", "details": "d",
+                                   "kind": "scheduling", "eval_id": 3},
+            "error sample_serial type": {
+                "type": "error", "code": "EVAL_STALE", "message": "m",
+                "details": "d", "kind": "scheduling", "sample_serial": "1"},
+            "cached mode_state": {
+                "type": "mode_state", "session_id": 1, "mode_revision": 2,
+                "mode": "cached", "control": "maya", "detail": ""},
+            "realtime under unreal": {
+                "type": "mode_state", "session_id": 1, "mode_revision": 2,
+                "mode": "realtime", "control": "unreal", "detail": ""},
+            "linkage under maya": {
+                "type": "mode_state", "session_id": 1, "mode_revision": 2,
+                "mode": "linkage", "control": "maya", "detail": "",
+                "anchor": anchor},
+            "retired reference_query": {
+                "type": "reference_query", "session_id": 1,
+                "transfer_id": "tx-1", "scope": {"level": "L_Main"}},
+        }
+        for name, message in undefined.items():
+            with self.subTest(name=name):
+                received = []
+                worker = mtou_session.SenderWorker(
+                    {"type": "init", "revision": 7},
+                    on_reply=lambda reply, received=received:
+                        received.append(reply) is None)
+                self._run_until_read(worker, self._ready_then(message))
+                state, _, _, diagnostic = worker.status()
+                self.assertEqual([], received)
+                self.assertEqual("error", state)
+                self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
 
-        class InterleavedSocket(object):
-            def __init__(self):
-                self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
-                    "missing_in_unreal": [], "missing_in_maya": [],
-                    "bone_name_remaps": [], "workflow": "animation",
-                    "target_morph_count": 0, "accepted_morph_count": 0,
-                }) + mtou_protocol.encode_message(held)
+    def test_errors_with_and_without_a_kind_reach_the_handler(self):
+        errors = [
+            {"type": "error", "code": "EVAL_STALE", "message": "m", "details": "d"},
+            {"type": "error", "code": "EVAL_STALE", "message": "m", "details": "d",
+             "kind": "failure"},
+            {"type": "error", "code": "EVAL_STALE", "message": "m", "details": "d",
+             "kind": "scheduling", "eval_id": "seq@1", "sample_serial": 2},
+        ]
+        received = []
+        worker = mtou_session.SenderWorker(
+            {"type": "init", "revision": 7},
+            on_reply=lambda reply: received.append(reply) is None)
+        fake_socket = self._ready_then(*errors)
+        fake_socket.recv = (lambda size, recv=fake_socket.recv:
+                            recv(size) or b"\x00")
+        self._run_until_read(worker, fake_socket)
+        self.assertEqual(errors, received)
 
-            def settimeout(self, timeout):
-                pass
+    def test_statements_right_after_ready_reach_the_handler_in_order(self):
+        # Unreal may start linkage and confirm a removal the moment the set is
+        # ready; the handler exists before the sender starts.
+        anchor = {"location_cm": [0.0, 0.0, 0.0],
+                  "rotation_deg": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0}}
+        statements = [
+            {"type": "mode_state", "session_id": 1, "mode_revision": 1,
+             "mode": "linkage", "control": "unreal", "detail": "", "anchor": anchor},
+            {"type": "object_removed", "session_id": 1, "object_id": "secondary",
+             "set_revision": 2, "restored": True, "detail": ""},
+        ]
+        for state in (mtou_config.REALTIME_MODE, mtou_config.CACHED_MODE,
+                      mtou_config.LINKAGE_MODE):
+            with self.subTest(state=state):
+                control = mtou_timecontrol.TimeControl()
+                if state != mtou_config.REALTIME_MODE:
+                    control.acquire(state, object(), receive=self.fail)
+                received = []
+                worker = mtou_session.SenderWorker(
+                    {"type": "init", "revision": 7},
+                    on_reply=lambda reply, control=control, received=received:
+                    mtou_session.route_reply(reply, control, received.append))
+                fake_socket = self._ready_then(*statements)
+                fake_socket.recv = (lambda size, recv=fake_socket.recv:
+                                    recv(size) or b"\x00")
 
-            def recv(self, size):
-                chunk, self.reply = self.reply[:size], self.reply[size:]
-                return chunk or b"\x00"
+                self._run_until_read(worker, fake_socket)
 
-            def sendall(self, packet):
-                pass
-
-            def close(self):
-                pass
-
-        fake_socket = InterleavedSocket()
-        calls = []
-
-        def selectable(unused_rlist, unused_wlist, unused_xlist, unused_timeout):
-            if fake_socket.reply:
-                return ([fake_socket], [], [])
-            calls.append(None)
-            if len(calls) == 1:
-                # Installed after this loop's top, with a newer reply waiting.
-                worker.set_reply_listener(received.append)
-                fake_socket.reply = mtou_protocol.encode_message(newer)
-                return ([fake_socket], [], [])
-            worker.stop()
-            return ([], [], [])
-
-        with mock.patch.object(worker, "_connect", return_value=fake_socket), \
-             mock.patch.object(worker, "_send_initial", return_value=True), \
-             mock.patch.object(select, "select", side_effect=selectable):
-            worker.run()
-
-        self.assertEqual([held, newer], received)
+                self.assertEqual(statements, received)
 
     def test_ordered_controls_survive_the_switch_back_to_latest_mode(self):
         worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
@@ -2215,6 +2143,225 @@ class SenderLifecycleTests(unittest.TestCase):
 
 
 
+class _ScriptedPeerSocket(object):
+    """A peer that answers with scripted replies and records what Maya sends."""
+
+    def __init__(self, replies):
+        self._incoming = b"".join(
+            mtou_protocol.encode_message(reply) for reply in replies)
+        self.sent = b""
+        self.send_all_calls = []
+        self.closed = False
+
+    def settimeout(self, timeout):
+        pass
+
+    def recv(self, size):
+        chunk, self._incoming = self._incoming[:size], self._incoming[size:]
+        return chunk
+
+    def send(self, data):
+        self.sent += bytes(data)
+        return len(data)
+
+    def sendall(self, packet):
+        self.send_all_calls.append(bytes(packet))
+
+    def close(self):
+        self.closed = True
+
+
+class VersionMismatchHandshakeTests(unittest.TestCase):
+    """A peer refuses the protocol version during the handshake: what Maya
+    shows of both releases, and that the refusal stays a refusal."""
+
+    ADVICE = "请从同一发行包重新安装两端组件，重启 Maya 和 UE 后连接。"
+    SUMMARY = "连接失败 · 插件协议版本不匹配"
+    UNKNOWN = "未知（对端未提供）"
+
+    def mismatch_error(self, **fields):
+        reply = {
+            "type": "error", "code": "PROTOCOL_VERSION_MISMATCH",
+            "message": "Unsupported protocol version.",
+            "details": "Unsupported protocol version.",
+        }
+        reply.update(fields)
+        return reply
+
+    def hello_ack(self, version):
+        return {
+            "type": "hello_ack", "version": version, "session_id": 4242,
+            "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
+            "targets": [],
+            "space": {"space_revision": 1,
+                      "anchor": {"translation": [0, 0, 0],
+                                 "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]}},
+        }
+
+    def handshake(self, *replies):
+        identity = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
+        init_message = mtou_protocol.make_init_message(
+            [["root", -1, identity]], [], 7)
+        hello_message = mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0)
+        worker = mtou_session.SenderWorker(init_message, hello_message)
+        peer = _ScriptedPeerSocket(replies)
+        states = []
+        set_status = worker._set_status
+
+        def record(state, *args, **kwargs):
+            states.append(state)
+            return set_status(state, *args, **kwargs)
+
+        def connect():
+            worker._socket = peer
+            return peer
+
+        with mock.patch.object(worker, "_connect", side_effect=connect), \
+             mock.patch.object(worker, "_set_status", side_effect=record):
+            worker.run()
+        # The refusal is final: the session never became ready, and nothing
+        # but the opening packet (hello, then init) went to the peer.
+        self.assertEqual(["error"], states)
+        self.assertEqual(worker._initial_packet, peer.sent)
+        self.assertEqual([], peer.send_all_calls)
+        self.assertTrue(peer.closed)
+        state, _, _, diagnostic = worker.status()
+        self.assertEqual("error", state)
+        return worker, peer, diagnostic
+
+    def maya_line(self):
+        return "Maya 端 · 插件 {0}，协议 {1}".format(
+            mtou_config.__version__, mtou_config.PROTOCOL_VERSION)
+
+    def test_the_greeting_names_the_loaded_plugin_version(self):
+        _, peer, _ = self.handshake(self.mismatch_error())
+
+        length = struct.unpack(">Q", peer.sent[:8])[0]
+        hello = json.loads(peer.sent[8:8 + length].decode("utf-8"))
+        self.assertEqual("hello", hello["type"])
+        self.assertEqual(mtou_config.__version__, hello["plugin_version"])
+        self.assertEqual(mtou_config.PROTOCOL_VERSION, hello["version"])
+
+    def test_both_releases_are_named_when_the_peer_provides_them(self):
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            kind="failure", protocol_version=13, plugin_version="1.1.0"))
+
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(self.SUMMARY, diagnostic["summary"])
+        self.assertEqual(
+            [self.maya_line(), "UE 端 · 插件 1.1.0，协议 13"],
+            list(diagnostic["version_lines"]))
+        self.assertEqual({
+            "maya": {"plugin_version": mtou_config.__version__,
+                     "protocol_version": mtou_config.PROTOCOL_VERSION},
+            "unreal": {"plugin_version": "1.1.0", "protocol_version": 13},
+        }, diagnostic["versions"])
+        self.assertEqual("\n\n".join([
+            self.SUMMARY,
+            self.maya_line() + "\nUE 端 · 插件 1.1.0，协议 13",
+            self.ADVICE,
+        ]), mtou_diagnostics.diagnostic_dialog_text(diagnostic))
+
+    def test_an_earlier_peer_without_release_fields_shows_unknown_not_its_text(self):
+        # The 1.0.0 release answers without kind or release fields; its text
+        # names its own protocol, which is not a field Maya reads.
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            message="Unsupported protocol version; expected 11.",
+            details="Unsupported protocol version; expected 11."))
+
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(
+            [self.maya_line(),
+             "UE 端 · 插件 {0}，协议 {0}".format(self.UNKNOWN)],
+            list(diagnostic["version_lines"]))
+        self.assertIsNone(diagnostic["versions"]["unreal"]["plugin_version"])
+        self.assertIsNone(diagnostic["versions"]["unreal"]["protocol_version"])
+        self.assertNotIn("11", diagnostic["version_lines"][1])
+        self.assertIn("expected 11", diagnostic["details"])
+
+    def test_a_peer_provides_only_one_of_the_two_items(self):
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            plugin_version="1.1.0"))
+        self.assertEqual(
+            "UE 端 · 插件 1.1.0，协议 {0}".format(self.UNKNOWN),
+            diagnostic["version_lines"][1])
+
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            protocol_version=13))
+        self.assertEqual(
+            "UE 端 · 插件 {0}，协议 13".format(self.UNKNOWN),
+            diagnostic["version_lines"][1])
+
+    def test_the_same_plugin_version_with_another_protocol_is_shown_and_refused(self):
+        _, _, diagnostic = self.handshake(self.mismatch_error(
+            kind="failure",
+            protocol_version=mtou_config.PROTOCOL_VERSION + 1,
+            plugin_version=mtou_config.__version__))
+
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(
+            [self.maya_line(),
+             "UE 端 · 插件 {0}，协议 {1}".format(
+                 mtou_config.__version__, mtou_config.PROTOCOL_VERSION + 1)],
+            list(diagnostic["version_lines"]))
+
+    def test_a_mistyped_release_field_is_an_invalid_message(self):
+        for field, value in (("plugin_version", 2), ("protocol_version", "13"),
+                             ("protocol_version", 13.5), ("protocol_version", True)):
+            with self.subTest(field=field, value=value):
+                _, _, diagnostic = self.handshake(
+                    self.mismatch_error(**{field: value}))
+                self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
+                self.assertNotIn("version_lines", diagnostic)
+                self.assertIn(field, diagnostic["details"])
+
+    def test_the_release_fields_belong_to_the_version_error_only(self):
+        # Another code carries no release; a field it happens to hold is an
+        # unknown field and is ignored.
+        _, _, diagnostic = self.handshake({
+            "type": "error", "code": "NO_BINDING_ACTOR",
+            "message": "No binding actor.", "details": "No binding actor.",
+            "plugin_version": 2, "protocol_version": "13"})
+
+        self.assertEqual("NO_BINDING_ACTOR", diagnostic["code"])
+        self.assertNotIn("version_lines", diagnostic)
+
+    def test_maya_refuses_a_hello_ack_of_another_protocol_as_a_mismatch(self):
+        worker, _, diagnostic = self.handshake(self.hello_ack(11))
+
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(self.SUMMARY, diagnostic["summary"])
+        # The protocol is the one the acknowledgement declared; the plugin
+        # version is not part of it.
+        self.assertEqual(
+            [self.maya_line(), "UE 端 · 插件 {0}，协议 11".format(self.UNKNOWN)],
+            list(diagnostic["version_lines"]))
+        self.assertIsNone(worker.hello_reply())
+
+    def test_a_hello_ack_without_an_integer_version_stays_an_invalid_message(self):
+        for version in ("11", 11.5, None, True):
+            with self.subTest(version=version):
+                reply = self.hello_ack(version)
+                if version is None:
+                    del reply["version"]
+                _, _, diagnostic = self.handshake(reply)
+                self.assertEqual("INVALID_MESSAGE", diagnostic["code"])
+                self.assertNotIn("version_lines", diagnostic)
+
+    def test_an_error_after_ready_is_reported_as_the_handshake_reports_it(self):
+        error = self.mismatch_error(
+            kind="failure", protocol_version=13, plugin_version="1.1.0")
+        noted = []
+
+        _, _, handshake = self.handshake(error)
+        mtou_session.route_reply(
+            error, mtou_timecontrol.TimeControl(),
+            on_statement=lambda reply: True, note_reason=noted.append)
+
+        # One builder serves both: the same reason, so a repeat is recognised.
+        self.assertEqual([handshake], noted)
+
+
 class PlaybackCacheTests(unittest.TestCase):
     def _frame(self, value):
         return {"type": "frame", "transforms": [[value] * 10], "curves": []}
@@ -2419,7 +2566,9 @@ class CachedPlaybackTests(unittest.TestCase):
         def __init__(self, revision=7):
             self.is_ready = True
             self.revision = revision
-            self.listener = None
+            self.polled = 0
+            # While a list, Unreal's messages wait here instead of arriving.
+            self.held = None
             self.submitted = []
             self.actions = []
             self.paused = 0
@@ -2428,14 +2577,19 @@ class CachedPlaybackTests(unittest.TestCase):
             self.drained = True
             self.upload_id = 0
             self.play_id = 0
+            self.time_control = mtou_timecontrol.TimeControl(
+                pause=self._pause, resume=self._resume)
 
-        def pause_for_cached(self, listener=None):
-            self.listener = listener
+        def _pause(self):
             self.paused += 1
 
-        def resume_from_cached(self):
+        def _resume(self):
             self.resumed += 1
             self.actions.append("resume")
+
+        def poll_connection(self):
+            self.polled += 1
+            return self.is_ready
 
         def submit_cached(self, message):
             self.submitted.append(message)
@@ -2444,10 +2598,9 @@ class CachedPlaybackTests(unittest.TestCase):
                 self.upload_id = message["upload_id"]
                 self.play_id = 0
             elif message["type"] == "cache_clear":
-                if self.listener is not None:
-                    self.emit({"type": "cache_cleared", "upload_id": self.upload_id,
-                               "play_id": self.play_id,
-                               "clear_id": message["clear_id"]})
+                self.emit({"type": "cache_cleared", "upload_id": self.upload_id,
+                           "play_id": self.play_id,
+                           "clear_id": message["clear_id"]})
                 self.upload_id = 0
                 self.play_id = 0
 
@@ -2459,11 +2612,16 @@ class CachedPlaybackTests(unittest.TestCase):
             self.is_ready = False
 
         def emit(self, message):
-            if self.listener is None:
-                raise AssertionError("Cached Playback did not attach a reply listener")
             if message["type"] == "cache_playing":
                 self.play_id = message["play_id"]
-            self.listener(message)
+            if self.held is not None:
+                self.held.append(message)
+                return
+            self.deliver(message)
+
+        def deliver(self, message):
+            # The connection routes it as the sender thread does.
+            mtou_session.route_reply(message, self.time_control)
 
     def setUp(self):
         self.temp = __import__("tempfile").TemporaryDirectory()
@@ -2685,21 +2843,19 @@ class CachedPlaybackTests(unittest.TestCase):
         self._capture_to_replay(cached, stream)
         before = len(self.timeline.set_frames)
         # Hold the clear acknowledgement while the old playback is active.
-        real_listener = stream.listener
-        queued = []
-        stream.listener = lambda reply: queued.append(reply)
+        queued = stream.held = []
         cached.capture(24.0, capture_range=(-1, 0))
         clear_id = stream.submitted[-2]["clear_id"]
         self.timer.fire()
         self.assertEqual(before, len(self.timeline.set_frames))
         self.assertEqual(clear_id, cached._awaiting_clear)
-        stream.listener = real_listener
-        real_listener({"type": "cache_cleared", "upload_id": 1,
-                       "play_id": 1, "clear_id": clear_id + 1})
+        stream.held = None
+        stream.deliver({"type": "cache_cleared", "upload_id": 1,
+                        "play_id": 1, "clear_id": clear_id + 1})
         self.timer.fire()
         self.assertEqual(before, len(self.timeline.set_frames))
         for reply in queued:
-            real_listener(reply)
+            stream.deliver(reply)
         self.timer.fire_until(lambda: len(self.timeline.set_frames) > before)
         self.assertEqual(-1, self.timeline.set_frames[before])
         self.assertNotIn("cache_play", self._types(stream))
@@ -2720,18 +2876,16 @@ class CachedPlaybackTests(unittest.TestCase):
         self.assertEqual(1, cached._play_id)
 
         before = len(self.timeline.set_frames)
-        real_listener = stream.listener
-        held = []
-        stream.listener = held.append
+        held = stream.held = []
         cached.capture(24.0, capture_range=(5, 5))
         self.assertEqual(2, cached._awaiting_clear)
-        real_listener({"type": "cache_cleared", "upload_id": 1,
-                       "play_id": 1, "clear_id": 1})
+        stream.deliver({"type": "cache_cleared", "upload_id": 1,
+                        "play_id": 1, "clear_id": 1})
         self.timer.fire()
         self.assertEqual(before, len(self.timeline.set_frames))
-        stream.listener = real_listener
+        stream.held = None
         for reply in held:
-            real_listener(reply)
+            stream.deliver(reply)
         self.timer.fire_until(lambda: len(self.timeline.set_frames) > before)
         self.assertEqual(5, self.timeline.set_frames[before])
         self.assertIsNone(cached._awaiting_clear)
@@ -2754,9 +2908,7 @@ class CachedPlaybackTests(unittest.TestCase):
         cached, stream = self._attached()
         self._capture_to_replay(cached, stream)
         before = len(self.timeline.set_frames)
-        real_listener = stream.listener
-        held = []
-        stream.listener = held.append
+        held = stream.held = []
         cached.capture(24.0, capture_range=(-1, 1))
         self.assertEqual(1, len(held))
         cached.cancel_capture()
@@ -2768,7 +2920,8 @@ class CachedPlaybackTests(unittest.TestCase):
         self.assertEqual(1, stream.resumed)
         self.assertEqual(1, len([message for message in stream.submitted
                                   if message["type"] == "cache_begin"]))
-        real_listener(held[0])
+        stream.held = None
+        stream.deliver(held[0])
         self.timer.fire()
         self.assertEqual(cached.REALTIME, cached.view.state)
         self.assertEqual(before + 1, len(self.timeline.set_frames))
@@ -3272,7 +3425,7 @@ class CachedPlaybackTests(unittest.TestCase):
 
         self.assertEqual(mtou_cache.CachedPlayback.DETACHED, cached.view.state)
         self.assertIsNotNone(retention)
-        self.assertEqual(1, stream.stopped)
+        self.assertEqual(1, stream.polled)
 
     def test_incompatible_retention_and_partial_capture_are_discarded(self):
         cached, stream = self._attached()
@@ -3407,7 +3560,7 @@ class CachedPlaybackTests(unittest.TestCase):
         self.assertEqual(1, scene.sample.call_count)
         self.assertEqual(42, self.timeline.current)
         self.assertEqual([], list(pathlib.Path(self.temp.name).iterdir()))
-        self.assertEqual(1, stream.stopped)
+        self.assertEqual(1, stream.polled)
         self.assertEqual(0, stream.resumed)
 
     def test_cached_idle_observes_transport_termination_without_user_action(self):
@@ -3422,7 +3575,7 @@ class CachedPlaybackTests(unittest.TestCase):
         detached = [view for view in changes
                     if view.state == mtou_cache.CachedPlayback.DETACHED]
         self.assertEqual("STREAM_INTERRUPTED", detached[-1].diagnostic["code"])
-        self.assertEqual(1, stream.stopped)
+        self.assertEqual(1, stream.polled)
 
     def test_completed_and_stopped_states_keep_observing_the_connection(self):
         cached, stream = self._attached()
@@ -3438,7 +3591,7 @@ class CachedPlaybackTests(unittest.TestCase):
         stream.is_ready = False
         self.timer.fire()
         self.assertEqual(mtou_cache.CachedPlayback.DETACHED, cached.view.state)
-        self.assertEqual(1, stream.stopped)
+        self.assertEqual(1, stream.polled)
 
     def test_stopped_cached_state_observes_transport_termination(self):
         cached, stream = self._attached()
@@ -3660,8 +3813,8 @@ class CacheUploadTests(unittest.TestCase):
             now[0] = armed + 0.5
             outcome = upload.advance()
             self.assertFalse(outcome.processed)
-            self.assertEqual(mtou_cache.CacheUpload.TRANSPORT, outcome.action)
-            self.assertEqual("STREAM_INTERRUPTED", outcome.detail["code"])
+            self.assertEqual(mtou_cache.CacheUpload.FAILED, outcome.action)
+            self.assertEqual("CACHED_UPLOAD_TIMEOUT", outcome.detail["code"])
 
     def test_open_failure_is_corrupt(self):
         class BadCache(self._FakeCache):
@@ -3838,6 +3991,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller = mtou_controller.Controller()
         controller._playback_cap_menu = "capMenu"
         controller._session = mock.Mock()
+        controller._session.time_control = mtou_timecontrol.TimeControl()
 
         with patch_global("cmds", fake_cmds):
             controller._on_playback_cap_changed("30 fps")
@@ -3929,10 +4083,8 @@ class ControllerLifecycleTests(unittest.TestCase):
         fake_cmds = mock.MagicMock()
         fake_cmds.control.return_value = True
         controller = mtou_controller.Controller()
-        session = mock.Mock()
-        session.is_ready = True
+        session, lease = cached_session(is_ready=True)
         controller._session = session
-        controller._mode = mtou_config.CACHED_MODE
         controller._cache_text = "cacheText"
         controller._light = "light"
         controller._status_text = "statusText"
@@ -3940,6 +4092,7 @@ class ControllerLifecycleTests(unittest.TestCase):
             # A recoverable capture failure that already resumed Real-time
             # Preview publishes a REALTIME view with the truthful diagnostic;
             # the controller completes the same transition in the UI.
+            lease.release()
             controller._on_cached_playback_view(mtou_cache.CachedPlaybackView(
                 mtou_cache.CachedPlayback.REALTIME,
                 diagnostic=mtou_diagnostics.make_diagnostic("CACHED_PLAYBACK_CANCELLED")))
@@ -3983,7 +4136,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         fake_cmds = mock.MagicMock()
         fake_cmds.control.return_value = True
         controller = mtou_controller.Controller()
-        controller._mode = mtou_config.CACHED_MODE
+        controller._session = cached_session(is_ready=True)[0]
         controller._status_text = "statusText"
         with patch_global("cmds", fake_cmds):
             for view, expected in views:
@@ -3997,8 +4150,13 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_switching_cached_mode_pauses_and_resumes_the_same_connection(self):
         class ReadySession(object):
             is_ready = True
+            time_control = mtou_timecontrol.TimeControl()
 
         cached = mock.Mock()
+        leases = []
+        cached.enter.side_effect = lambda: leases.append(
+            ReadySession.time_control.acquire(mtou_config.CACHED_MODE, cached))
+        cached.leave.side_effect = lambda: leases.pop().release()
         controller = mtou_controller.Controller()
         controller._session = ReadySession()
         controller._cached_playback = cached
@@ -4017,7 +4175,7 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_controller_forwards_capture_and_uses_view_capabilities(self):
         cached = mock.Mock()
         controller = mtou_controller.Controller()
-        controller._mode = mtou_config.CACHED_MODE
+        controller._session = cached_session(is_ready=True)[0]
         controller._cached_playback = cached
         controller._ensure_cached_playback = mock.Mock(return_value=cached)
         controller._refresh_fps = mock.Mock(return_value=24.0)
@@ -4032,7 +4190,6 @@ class ControllerLifecycleTests(unittest.TestCase):
 
         controller._set_enabled = mock.Mock()
         controller._set_tooltip = mock.Mock()
-        controller._mode = mtou_config.CACHED_MODE
         controller._capture_button = "capture"
         controller._upload_button = "upload"
         controller._cancel_capture_button = "cancel"
@@ -4114,6 +4271,65 @@ class ControllerLifecycleTests(unittest.TestCase):
         self.assertNotIn("arm -> arm_1", text)
         self.assertNotIn("|Group|Geometry|body", text)
 
+    def test_version_mismatch_is_shown_as_summary_versions_and_advice(self):
+        # The session copies a diagnostic into its event, which turns the
+        # version lines into a tuple; the panel renders it all the same.
+        diagnostic = mtou_diagnostics.error_reply_diagnostic({
+            "type": "error", "code": "PROTOCOL_VERSION_MISMATCH",
+            "message": "Unsupported protocol version; expected 13.",
+            "details": "Unsupported protocol version; expected 13.",
+            "kind": "failure", "protocol_version": 13, "plugin_version": "1.1.0"})
+        event = mtou_session.StreamingSessionEvent("failed", diagnostic=diagnostic)
+        self.assertIsInstance(event.diagnostic["version_lines"], tuple)
+        snapshot = character_snapshot(
+            1, "|root", "Clothes01", [("root", -1)], [], mesh_paths=["|body"])
+        scene = mock.Mock()
+        scene.snapshot.return_value = snapshot
+        fake_cmds = mock.MagicMock()
+        fake_cmds.control.return_value = True
+        fake_cmds.confirmDialog.return_value = "确定"
+        controller = mtou_controller.Controller()
+        session = object()
+        controller._session = session
+        controller._scene = scene
+        controller._set_connected = mock.Mock()
+
+        with patch_global("cmds", fake_cmds):
+            controller._on_streaming_session_event(session, event)
+
+        # The status bar shows the summary alone.
+        controller._set_connected.assert_called_once_with(
+            False, "连接失败 · 插件协议版本不匹配")
+        # The dialog: summary, both releases, then what to do.
+        dialog = fake_cmds.confirmDialog.call_args[1]
+        self.assertEqual("MtoU 连接问题", dialog["title"])
+        self.assertEqual("\n\n".join([
+            "连接失败 · 插件协议版本不匹配",
+            "Maya 端 · 插件 {0}，协议 {1}\nUE 端 · 插件 1.1.0，协议 13".format(
+                mtou_config.__version__, mtou_config.PROTOCOL_VERSION),
+            "请从同一发行包重新安装两端组件，重启 Maya 和 UE 后连接。",
+        ]), dialog["message"])
+        # 诊断详情 adds the releases and keeps the peer's own text.
+        with mock.patch.object(controller, "_refresh_fps", return_value=30.0):
+            text = controller._diagnostic_text()
+        self.assertIn("Error code: PROTOCOL_VERSION_MISMATCH", text)
+        self.assertIn(
+            "版本：\nMaya 端 · 插件 {0}，协议 {1}\nUE 端 · 插件 1.1.0，协议 13".format(
+                mtou_config.__version__, mtou_config.PROTOCOL_VERSION), text)
+        self.assertIn("expected 13", text)
+
+    def test_dialog_without_version_lines_is_summary_and_advice(self):
+        fake_cmds = mock.MagicMock()
+        fake_cmds.confirmDialog.return_value = "确定"
+        controller = mtou_controller.Controller()
+
+        with patch_global("cmds", fake_cmds):
+            controller._show_error(mtou_diagnostics.make_diagnostic("UNREAL_NOT_REACHABLE"))
+
+        summary, advice = mtou_diagnostics.DIAGNOSTICS["UNREAL_NOT_REACHABLE"]
+        self.assertEqual(
+            summary + "\n\n" + advice, fake_cmds.confirmDialog.call_args[1]["message"])
+
     def test_diagnostic_window_wraps_text_and_fills_resized_window(self):
         fake_cmds = mock.MagicMock()
         fake_cmds.window.side_effect = [False, "diagnosticWindow"]
@@ -4159,6 +4375,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller._set_connected = mock.Mock()
         fake_cmds = type("FakeCmds", (), {
             "currentUnit": staticmethod(lambda **kwargs: "film"),
+            "about": staticmethod(lambda **kwargs: "2024"),
         })
         with patch_global("cmds", fake_cmds), \
              patch_global("om", object()), \
@@ -4388,11 +4605,11 @@ class WorkflowTests(unittest.TestCase):
 
     def test_switching_workflow_disconnects_and_clears_cached_playback(self):
         controller = mtou_controller.Controller()
-        session = mock.Mock()
+        session, lease = cached_session()
         cached = mock.Mock()
+        cached.discard.side_effect = lease.release
         controller._session = session
         controller._cached_playback = cached
-        controller._mode = mtou_config.CACHED_MODE
         snapshot = character_snapshot(
             3, "|Group|root", "Clothes01", [("root", -1)], ["Smile"])
         scene = mock.Mock()
@@ -4468,6 +4685,7 @@ class WorkflowTests(unittest.TestCase):
         controller._show_error = mock.Mock()
         fake_cmds = type("FakeCmds", (), {
             "currentUnit": staticmethod(lambda **kwargs: "film"),
+            "about": mock.Mock(return_value="2024.2"),
         })
         with patch_global("cmds", fake_cmds), \
                 patch_global("om", object()), \
@@ -4479,6 +4697,9 @@ class WorkflowTests(unittest.TestCase):
             controller.connect()
 
         self.assertEqual(2, len(started))
+        self.assertEqual([mock.call(version=True)] * 2, fake_cmds.about.call_args_list)
+        self.assertEqual("2024.2", started[0]["maya_version"])
+        self.assertEqual("2024.2", started[1]["maya_version"])
         self.assertEqual(mtou_config.WORKFLOW_ANIMATION, started[0]["workflow"])
         self.assertTrue(started[0]["blendshapes_enabled"])
         self.assertEqual(mtou_config.WORKFLOW_MODEL, started[1]["workflow"])
@@ -4489,7 +4710,7 @@ class WorkflowTests(unittest.TestCase):
         worker = mock.Mock()
         worker.status.return_value = ("connecting", "Connecting", None, None)
 
-        def worker_factory(init_messages, hello_message=None):
+        def worker_factory(init_messages, hello_message=None, on_reply=None):
             # One init per object of the set; a one-character set sends one.
             self.assertEqual(1, len(init_messages))
             captured["init"] = init_messages[0]
@@ -4530,8 +4751,23 @@ class WorkflowTests(unittest.TestCase):
                 space_revision=2, scene_units=("m", 100.0),
                 maya_version="2025")
             session.stop()
+            session_init = captured["init"]
+            session_hello = captured["hello"]
 
-        init_message = captured["init"]
+            controller = mtou_controller.Controller()
+            controller._scene = scene
+            controller._set_connected = mock.Mock()
+            fake_cmds = mock.Mock()
+            fake_cmds.currentUnit.return_value = "film"
+            fake_cmds.about.return_value = "2024.2"
+            with patch_global("cmds", fake_cmds):
+                controller.connect()
+                self.assertIsNotNone(controller._session)
+                controller._session.stop()
+            fake_cmds.about.assert_called_once_with(version=True)
+            self.assertEqual("2024.2", captured["hello"]["maya_version"])
+
+        init_message = session_init
         self.assertEqual(mtou_config.PROTOCOL_VERSION, init_message["version"])
         self.assertEqual(mtou_config.WORKFLOW_MODEL, init_message["workflow"])
         self.assertFalse(init_message["blendshapes_enabled"])
@@ -4550,7 +4786,7 @@ class WorkflowTests(unittest.TestCase):
 
         # The greeting precedes the object description so a peer with a
         # different protocol version refuses before it reads an object.
-        hello_message = captured["hello"]
+        hello_message = session_hello
         self.assertEqual(mtou_config.PROTOCOL_VERSION, hello_message["version"])
         self.assertEqual("maya", hello_message["host"])
         self.assertEqual("2025", hello_message["maya_version"])
@@ -4629,6 +4865,7 @@ class _LinkageMessageStream(object):
 
     def __init__(self):
         self.ordered = []
+        self.time_control = mtou_timecontrol.TimeControl()
 
     def submit_linkage(self, message):
         self.ordered.append(message)
@@ -4671,21 +4908,12 @@ class ProtocolTests(unittest.TestCase):
             CORPUS["limits"]["max_cache_frame_count"],
             mtou_config.MAX_CACHE_FRAME_COUNT)
 
-    def test_maya_linkage_and_reference_limits_match_the_shared_corpus(self):
+    def test_maya_linkage_limits_match_the_shared_corpus(self):
         self.assertEqual(
             CORPUS["limits"]["max_control_queue"],
             mtou_config.MAX_CONTROL_QUEUE)
-        self.assertEqual(
-            CORPUS["limits"]["max_reference_bytes"],
-            mtou_config.MAX_REFERENCE_BYTES)
-        self.assertEqual(
-            CORPUS["limits"]["max_reference_objects"],
-            mtou_config.MAX_REFERENCE_OBJECTS)
-        self.assertEqual(
-            CORPUS["limits"]["max_reference_triangles"],
-            mtou_config.MAX_REFERENCE_TRIANGLES)
         # The scheduler budget is not a corpus limit; one target in flight plus
-        # one replaceable target is the v10 scheduling contract.
+        # one replaceable target is the frozen scheduling contract.
         self.assertEqual(2, mtou_config.MAX_PENDING_LINKAGE_TARGETS)
 
     def _assert_maya_conformance_case(self, case):
@@ -4751,9 +4979,17 @@ class ProtocolTests(unittest.TestCase):
                          "cache_looped", "cache_loop_changed"):
             if expected["accepted"]:
                 self.assertEqual(case["payload"], mtou_protocol.validate_reply(case["payload"]))
+                if "peer_versions" in expected:
+                    self._assert_refusing_release(
+                        case, mtou_diagnostics.error_reply_diagnostic(case["payload"]))
             else:
-                with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                with self.assertRaisesRegex(
+                        ValueError, "|".join(expected["keywords"])) as caught:
                     mtou_protocol.validate_reply(case["payload"])
+                # The code is the one the session reports for the refusal.
+                self.assertEqual(
+                    expected["error_code"],
+                    mtou_session.invalid_reply_diagnostic(caught.exception)["code"])
             return
         if operation == "cache_begin":
             payload = case["payload"]
@@ -4787,18 +5023,17 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(payload, actual)
             self.assertTrue(mtou_protocol.encode_message(actual))
             return
-        if operation == "cache_play":
-            payload = case["payload"]
-            actual = mtou_protocol.make_cache_play_message(payload["play_id"])
-            actual.update({key: value for key, value in payload.items()
-                           if key != "play_id"})
-            self.assertEqual(payload, actual)
-            self.assertTrue(mtou_protocol.encode_message(actual))
+        if operation == "unknown_type":
+            # A type the protocol does not define, whether it was never
+            # defined or retired, is refused whatever its fields are.
+            self.assertFalse(expected["accepted"])
+            self.assertTrue(expected["close"])
+            with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                mtou_protocol.validate_reply(case["payload"])
             return
-        if operation in ("cache_stop", "cache_clear", "cache_enter"):
+        if operation in ("cache_clear", "cache_enter"):
             payload = dict(case["payload"])
             builder = {
-                "cache_stop": mtou_protocol.make_cache_stop_message,
                 "cache_clear": mtou_protocol.make_cache_clear_message,
                 "cache_enter": mtou_protocol.make_cache_enter_message,
             }[operation]
@@ -4817,8 +5052,14 @@ class ProtocolTests(unittest.TestCase):
             if expected["accepted"]:
                 self.assertEqual(payload, mtou_protocol.validate_reply(payload))
                 return
-            with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+            with self.assertRaisesRegex(
+                    ValueError, "|".join(expected["keywords"])) as caught:
                 mtou_protocol.validate_reply(payload)
+            # The code is the one the session reports for the refusal.
+            diagnostic = mtou_session.invalid_reply_diagnostic(caught.exception)
+            self.assertEqual(expected["error_code"], diagnostic["code"])
+            if "peer_versions" in expected:
+                self._assert_refusing_release(case, diagnostic)
             return
         if operation == "mode":
             self._assert_mode_case(case)
@@ -4829,14 +5070,11 @@ class ProtocolTests(unittest.TestCase):
         if operation == "leave_linkage":
             self._assert_leave_linkage_case(case)
             return
-        if operation in ("camera_time", "applied", "reference_offer"):
+        if operation in ("camera_time", "applied"):
             self._assert_linkage_message_case(case)
             return
         if operation == "group":
             self._assert_group_case(case)
-            return
-        if operation in ("reference_result", "reference_removed", "reference_query"):
-            self._assert_reference_message_case(case)
             return
         if operation == "resource_limit":
             self._assert_resource_limit_case(case)
@@ -4853,6 +5091,29 @@ class ProtocolTests(unittest.TestCase):
                 mtou_protocol.validate_reply(payload)
             return
         self.fail("Unsupported Maya conformance operation: " + operation)
+
+    def _assert_refusing_release(self, case, diagnostic):
+        """Maya shows the peer's release as the case declares it, and nothing
+        the peer did not provide: the text of its ``details`` is not read."""
+        expected = case["expected"]["peer_versions"]
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", diagnostic["code"])
+        self.assertEqual(expected, diagnostic["versions"]["unreal"])
+
+        def shown(value):
+            return mtou_diagnostics.UNKNOWN_PEER_VALUE if value is None else str(value)
+
+        maya_line, unreal_line = diagnostic["version_lines"]
+        self.assertEqual("UE 端 · 插件 {0}，协议 {1}".format(
+            shown(expected["plugin_version"]), shown(expected["protocol_version"])),
+            unreal_line)
+        self.assertTrue(maya_line.startswith("Maya 端 · 插件 "))
+        details = case["payload"].get("details")
+        if details is not None:
+            self.assertEqual(details, diagnostic["details"])
+            if expected["protocol_version"] is None:
+                # A number in the peer's text is not a version Maya may show.
+                for number in re.findall(r"\d+", details):
+                    self.assertNotIn(number, unreal_line)
 
     def _assert_remove_object_case(self, case):
         """Maya's removal request names the second object and the new set."""
@@ -4880,9 +5141,13 @@ class ProtocolTests(unittest.TestCase):
         expected = case["expected"]
         scene = payload["scene"]
         if expected["accepted"]:
+            # The corpus holds no value that depends on the product version:
+            # the greeting carries the plugin version the case declares, and
+            # none when the case declares none.
             actual = mtou_protocol.make_hello_message(
                 payload["maya_version"], scene["linear_unit"],
-                scene["unit_scale_cm"], scene["fps"])
+                scene["unit_scale_cm"], scene["fps"],
+                plugin_version=payload.get("plugin_version"))
             self.assertEqual(payload, actual)
             self.assertEqual(1.0, mtou_space.centimeters_per_unit(scene["linear_unit"]))
             self.assertEqual(
@@ -4973,7 +5238,6 @@ class ProtocolTests(unittest.TestCase):
         answer = {
             "camera_time": lambda session: session.offer_target(payload),
             "applied": lambda session: session.note_applied(payload),
-            "reference_offer": lambda session: session.note_reference_offer(payload),
         }[case["operation"]]
         session, _ = self._linkage_session(case["linkage"])
         if expected["accepted"]:
@@ -5010,32 +5274,6 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
             build()
 
-    def _assert_reference_message_case(self, case):
-        payload = case["payload"]
-        expected = case["expected"]
-        if case["operation"] == "reference_result":
-            def build():
-                return mtou_protocol.make_reference_result_message(
-                    payload["session_id"], payload["transfer_id"],
-                    payload["accepted"], payload["detail"], payload["counts"],
-                    payload.get("container"))
-        elif case["operation"] == "reference_removed":
-            def build():
-                return mtou_protocol.make_reference_removed_message(
-                    payload["session_id"], payload["detail"])
-        else:
-            def build():
-                return mtou_protocol.make_reference_query_message(
-                    payload["session_id"], payload["transfer_id"],
-                    payload["scope"])
-        if expected["accepted"]:
-            actual = build()
-            self.assertEqual(payload, actual)
-            self.assertTrue(mtou_protocol.encode_message(actual))
-            return
-        with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
-            build()
-
     def _assert_resource_limit_case(self, case):
         """An oversized case names its budget and its measured size, so the
         frozen budget stays comparable without a multi-megabyte payload."""
@@ -5043,9 +5281,6 @@ class ProtocolTests(unittest.TestCase):
         budget = {
             "max_linkage_group_bytes": mtou_config.MAX_LINKAGE_GROUP_BYTES,
             "max_control_queue": mtou_config.MAX_CONTROL_QUEUE,
-            "max_reference_bytes": mtou_config.MAX_REFERENCE_BYTES,
-            "max_reference_objects": mtou_config.MAX_REFERENCE_OBJECTS,
-            "max_reference_triangles": mtou_config.MAX_REFERENCE_TRIANGLES,
         }[payload["budget"]]
         self.assertEqual(budget, payload["limit"])
         self.assertGreater(payload["measured"], budget)
@@ -5100,7 +5335,8 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(model_message["blendshapes_enabled"])
         with self.assertRaisesRegex(ValueError, "workflow"):
             mtou_protocol.make_init_message([["root", -1, identity]], [], 7, "preview", True)
-        for code in ("CACHED_UPLOAD_FAILED", "CACHED_PLAYBACK_PERFORMANCE"):
+        for code in ("CACHED_UPLOAD_FAILED", "CACHED_UPLOAD_TIMEOUT",
+                     "CACHED_UPLOAD_INTERRUPTED", "CACHED_PLAYBACK_PERFORMANCE"):
             cached_diagnostic = mtou_diagnostics.make_diagnostic(code)
             self.assertEqual(code, cached_diagnostic["code"])
             self.assertNotEqual(

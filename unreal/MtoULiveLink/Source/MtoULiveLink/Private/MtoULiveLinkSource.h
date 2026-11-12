@@ -8,6 +8,7 @@
 #include "ILiveLinkSource.h"
 #include "MtoUCacheCommandQueue.h"
 #include "MtoUCacheSession.h"
+#include "MtoULiveLinkActor.h"
 #include "MtoULinkageSession.h"
 #include "MtoULiveLinkProtocol.h"
 
@@ -17,39 +18,47 @@ class FRunnableThread;
 class ILiveLinkClient;
 class FSocket;
 
-TSharedPtr<class FMtoULiveLinkSource> MtoUSetActiveSource(
+/**
+ * Makes `Source` the one the Binding actors and the linkage boundary reach and
+ * returns the previous one. Exported so the Editor module's automation can
+ * make the source it builds the active one for the length of a test.
+ */
+MTOULIVELINK_API TSharedPtr<class FMtoULiveLinkSource> MtoUSetActiveSource(
     TSharedPtr<class FMtoULiveLinkSource> Source);
-FMtoUCachePlaybackView MtoUGetActorCachePlaybackView(const AMtoULiveLinkActor& Actor);
-bool MtoUStartActorCachedPlayback(const AMtoULiveLinkActor& Actor);
-bool MtoUStopActorCachedPlayback(const AMtoULiveLinkActor& Actor);
-bool MtoUPauseActorCachedPlayback(const AMtoULiveLinkActor& Actor);
-bool MtoUResumeActorCachedPlayback(const AMtoULiveLinkActor& Actor);
-bool MtoUSeekActorCachedPlayback(const AMtoULiveLinkActor& Actor, int32 SourceFrame);
-bool MtoUSetActorCachedLoop(const AMtoULiveLinkActor& Actor, bool bEnabled);
 
 /**
  * The one idempotent session-termination boundary shared by the Live Link
- * source and the Binding actor. Any active streaming session ends when its
- * Preview revision is invalidated or the Binding actor's lifetime ends, so a
- * new Preview revision can never receive frames negotiated for an older
- * Character snapshot. Requests made while no session is active are no-ops;
+ * source and the Binding actor. A Binding actor asks the active source to end
+ * the connection when its Preview revision is invalidated or its lifetime
+ * ends, so a new Preview revision can never receive frames negotiated for an
+ * older Character snapshot. The source decides which session the request
+ * ends: only the worker's current one, and once its object set is negotiated
+ * only when `Requester` takes part in it. Requests made while no session is
+ * current, or by an actor the negotiated session does not stream, are no-ops;
  * a new connection is always required to stream the newer revision.
  * An explicit Preview refresh ends its actor's session through the same
- * boundary before replacing the display (Issue #39).
+ * boundary before replacing the display (Issue #39). Game Thread only.
  */
-void MtoURequestStreamingSessionEnd();
+void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester);
 
-/** Current value of the idempotent termination counter for publish gating. */
-uint64 MtoUGetStreamingSessionEndCount();
 #if WITH_DEV_AUTOMATION_TESTS
 /**
  * Test-only deterministic hold on the worker's disconnect cleanup: while set,
  * the worker keeps serving the pre-refresh socket and session instead of
- * closing on the termination counter, so automation can prove the
- * Game Thread publish gate refuses old frames before any worker cleanup.
+ * closing on the end request, so automation can prove the Game Thread
+ * publish gate refuses old frames before any worker cleanup.
  * Production builds never see this; automation must always release it.
  */
 MTOULIVELINK_API void MtoUSetDeferStreamingSessionEndCleanup(bool bDefer);
+
+/**
+ * Test-only record of every end request a Binding actor makes, taken before
+ * the active source judges it. A test without a session uses it to prove which
+ * actor operations ask for one. Production builds never see this; automation
+ * must always clear it.
+ */
+MTOULIVELINK_API void MtoUSetStreamingSessionEndProbe(
+    TFunction<void(const AMtoULiveLinkActor& Requester)> Probe);
 
 /** Where a linkage group is when the apply probe sees it. */
 enum class EMtoULinkageApplyStage : uint8
@@ -73,13 +82,13 @@ MTOULIVELINK_API void MtoUSetLinkageApplyProbe(
 #endif
 
 /**
- * The world-unload seam of the same idempotent termination boundary: the
- * Editor world that owns the active session's Binding Actor is being cleaned
- * up. UWorld::DestroyWorld and world unloading never call Actor::Destroyed(),
- * so the synchronous FWorldDelegates::OnWorldCleanup broadcast is the
- * authoritative unload seam. A late BeginDestroy cannot use the identity-free
- * boundary because it could terminate a newer session; this hook runs in
- * order with the actual unload instead.
+ * The world-unload seam of the same termination boundary: the Editor world
+ * that owns the active session's Binding Actor is being cleaned up.
+ * UWorld::DestroyWorld and world unloading never call Actor::Destroyed(), so
+ * the synchronous FWorldDelegates::OnWorldCleanup broadcast is the
+ * authoritative unload seam. Every Binding actor of the world asks the
+ * boundary like any other requester; a late BeginDestroy cannot, because it
+ * could terminate a newer session.
  */
 void MtoUNotifyEditorWorldCleanup(UWorld* World, bool bSessionEnded, bool bCleanupResources);
 
@@ -99,8 +108,8 @@ struct FMtoUOutgoing
     // socket, the worker no longer expects that object's frame rows.
     FString RemovedObjectId;
     bool bCloseAfter = false;
-    // Control messages (greeting, mode, camera/time, applied evidence,
-    // reference offers and errors) count against the frozen per-direction
+    // Control messages (greeting, mode, camera/time, applied evidence and
+    // errors) count against the frozen per-direction
     // control queue; streamed cache outcomes do not.
     bool bControl = false;
 };
@@ -122,19 +131,14 @@ struct FMtoUPendingLinkageControl
     {
         Mode,
         LeaveLinkage,
-        RemoveObject,
-        ReferenceResult,
-        ReferenceRemoved,
-        ReferenceQuery
+        RemoveObject
     };
 
+    uint64 IntakeOrder = 0;
     EKind Kind = EKind::Mode;
     FMtoUModeMessage Mode;
     FMtoULeaveLinkageMessage LeaveLinkage;
     FMtoURemoveObjectMessage RemoveObject;
-    FMtoUReferenceResultMessage ReferenceResult;
-    FMtoUReferenceRemovedMessage ReferenceRemoved;
-    FMtoUReferenceQueryMessage ReferenceQuery;
 };
 
 struct FMtoUPendingPoseGroup
@@ -263,6 +267,11 @@ public:
 
     bool StartListener();
     void StopListener();
+    /**
+     * A Binding actor asks the connection to end (see
+     * `MtoURequestStreamingSessionEnd`); Game Thread only.
+     */
+    void RequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester);
     FMtoUCachePlaybackView GetActorCachePlaybackView(const AMtoULiveLinkActor& Actor) const;
     bool StartActorCachedPlayback(const AMtoULiveLinkActor& Actor);
     bool StopActorCachedPlayback(const AMtoULiveLinkActor& Actor);
@@ -289,6 +298,15 @@ public:
     }
     const FMtoULinkageSession& GetLinkageSession() const { return LinkageSession; }
     /**
+     * Who drives time on this connection, merged from the cache session and
+     * the linkage session; Game Thread only.
+     */
+    FMtoUTimeControlView GetTimeControlView() const;
+    // Editor entry processes received controls before validating the request.
+    bool RequestLinkageEnter(int32 ModeRevision, FString& OutError);
+    // The same entry, with the refusal's wire code (such as CACHE_NOT_CLEARED).
+    bool RequestLinkageEnter(int32 ModeRevision, FString& OutError, FString& OutCode);
+    /**
      * The actor the connected session streams one object into, or null when
      * the session did not negotiate that object. Takeover and publishing use
      * this one identity.
@@ -313,30 +331,37 @@ public:
 
 #if WITH_DEV_AUTOMATION_TESTS
     // Automation-only gauges for the explicit-refresh critical window
-    // (Issue #39): total queued cache commands and the transient cache
+    // (Issue #39): fully published queued cache commands and the transient cache
     // state, read without disturbing the session. Production never calls
     // these; they exist so the Editor integration test needs no wider
     // production-type exports.
     int32 GetPendingCacheCommandCount() const;
+    // Coordinate a complete mixed-control batch without advancing Update.
+    uint64 GetReceivedTimeControlOrder() const { return PublishedTimeControlOrder.Load(); }
     EMtoUCacheState GetCacheSessionState() const;
 #endif
 
 private:
 #if WITH_DEV_AUTOMATION_TESTS
     friend class FMtoUSessionIsolationTestAccess;
+    friend class FMtoUControlBudgetTestAccess;
+    friend class FMtoUSessionEndTestAccess;
     // Editor integration coverage for explicit refresh during a session.
     friend class FMtoURefreshEndsSessionTestAccess;
 #endif
     // Negotiates one object of the set; false when it refused the object and
     // the connection ends.
     bool HandleInitOnGameThread(FMtoUInitMessage&& Message);
-    void HandleCacheCommandsOnGameThread();
+    void TickCacheOnGameThread();
+    void HandleCacheCommandOnGameThread(const FMtoUCacheCommand& Command);
+    // Merges one completely published receive prefix of the two bounded queues.
+    // Returns consumed leave messages, counted until Update mirrors their result.
+    int32 DrainTimeControlsOnGameThread();
     // Linkage intake and pump. The greeting is answered before any object is
     // negotiated; control messages and staged groups are applied on the game
     // thread and only then reported back to Maya.
     void DrainLinkageHellosOnGameThread();
-    // Returns how many leave_linkage messages it took off the queue.
-    int32 DrainLinkageControlsOnGameThread();
+    void HandleLinkageControlOnGameThread(const FMtoUPendingLinkageControl& Control);
     void IntakeLinkageGroupsOnGameThread();
     // Resolves the published group, finishes a display restore, or publishes
     // the next staged group; runs after the editor was asked for the target.
@@ -346,6 +371,25 @@ private:
     // restored, its subject leaves the stream and the new set is confirmed.
     void RemoveSecondaryObjectOnGameThread(const FString& ObjectId, int32 SetRevision);
     void SendLinkageControlPacketOnGameThread(TArray<uint8> Packet, bool bControl);
+    // The two control budgets are shared between the worker and the game
+    // thread, so every change is one atomic step. A slot is taken before its
+    // message becomes visible to the consumer and returned exactly once by
+    // the consumer that takes the message, whether it acts on it or drops it;
+    // the count then never dips below the messages still queued.
+    //
+    // Reply direction (game thread produces, worker consumes). Takes a slot
+    // unless the frozen control queue is full.
+    bool TryAdmitOutgoingControl();
+    // Takes a slot beyond the limit: the refusal that ends a connection that
+    // overflowed needs a slot of its own to be delivered.
+    void AdmitOutgoingControl();
+    void ReleaseOutgoingControl();
+    // Intake direction (worker produces, game thread consumes). The worker is
+    // the only producer, so a check made before the slot is taken can only
+    // become more permissive: the consumer never adds.
+    bool CanAdmitLinkageControl() const;
+    void AdmitLinkageControl();
+    void ReleaseLinkageControl();
     bool ApplyPoseGroupOnGameThread(
         const FMtoUPoseGroupMessage& Group,
         TArray<FMtoUAppliedComponent>& OutComponents,
@@ -399,9 +443,25 @@ private:
         const TArray<double>& Curves,
         FLiveLinkFrameDataStruct& OutFrame,
         FString& OutError) const;
-    // Removes one object's subject and hands its displays back to their own
-    // Binding state, as a disconnect does for the whole set.
-    void ReleaseSessionObjectOnGameThread(FMtoUSessionObject& Object, const TCHAR* ActorStatus);
+    // The one place a streaming session ends on the Game Thread, whatever
+    // ended it: the worker's disconnect, a requested end, a failed restore, the
+    // source being removed (`bListenerStopped`) or the editor closing. A
+    // session id can be held by only some owners (the greeting phase only by
+    // the linkage session), so each owner clears what it holds; when neither
+    // holds the id, nothing happens. The intake queues are never emptied here:
+    // their drains drop what belongs to an ended session and return its
+    // budget, which keeps a newer connection's greeting.
+    void EndStreamingSessionOnGameThread(uint64 SessionId, bool bListenerStopped = false);
+    // The end request for one worker session: the target the worker closes and
+    // every later message, init and frame of it is refused. A session the
+    // worker no longer holds is left alone.
+    void RequestSessionEndOnGameThread(uint64 SessionId);
+    // Removes one object's subject (unless the Live Link client may already be
+    // gone) and hands its displays back to their own Binding state; the
+    // per-object part of the end contract, also used when only the second
+    // object leaves the set.
+    void ReleaseSessionObjectOnGameThread(
+        FMtoUSessionObject& Object, EMtoUConnectionState ActorState, bool bRemoveSubject = true);
     // A published group that will not be confirmed (cancelled, failed, mode
     // left) gives the subject back the last complete frame; the displays
     // follow once the subject holds it.
@@ -426,10 +486,10 @@ private:
     bool IsCurrentSession(uint64 SessionId) const;
     bool OwnsActorCache(const AMtoULiveLinkActor& Actor) const;
     // True only while the session still owns GameThread publication: the
-    // worker still considers it current and no explicit refresh has ended it
-    // since negotiation. A refresh increments the termination counter before
-    // replacing the display, so old queued frames and cached commands fail
-    // this gate synchronously without waiting for the worker to close.
+    // worker still considers it current and no end has been requested for it
+    // since negotiation. An end request records the session before the
+    // display is replaced, so old queued frames and cached commands fail this
+    // gate synchronously without waiting for the worker to close.
     bool IsSessionPublishableOnGameThread(uint64 SessionId) const;
     void SetStatus(const FString& InStatus);
 
@@ -447,6 +507,9 @@ private:
     TArray<FMtoUPendingInit> PendingInits;
     TOptional<FMtoUPendingFrame> PendingFrame;
     TQueue<uint64, EQueueMode::Spsc> DisconnectedSessions;
+    // The sessions the game thread asked the worker to close; the worker
+    // closes a connection only while its session is the named one.
+    TQueue<uint64, EQueueMode::Spsc> SessionEndRequests;
     TQueue<FMtoUOutgoing, EQueueMode::Spsc> OutgoingReplies;
     // Linkage intake: the greeting, the control messages and the staged pose
     // groups the worker parsed. The game thread drains every one of them, so
@@ -457,8 +520,9 @@ private:
     // Undelivered linkage control messages in the intake direction; a peer
     // that never lets the game thread drain is refused instead of backlogged.
     TAtomic<int32> QueuedLinkageControls{0};
-    // Undelivered control messages in the reply direction, decremented by the
-    // worker as each packet reaches the socket.
+    // Undelivered control messages in the reply direction, returned by the
+    // worker as it takes each reply: sent, or dropped because its session
+    // ended.
     TAtomic<int32> QueuedOutgoingControls{0};
     // Peaks of both control queues for the scheduling measurement.
     TAtomic<int32> OutgoingControlPeak{0};
@@ -474,16 +538,24 @@ private:
     // its exit, and those frames are dropped, not refused, until it applies.
     TAtomic<int32> WorkerLinkageLeavesPending{0};
     FMtoUCacheCommandQueue CacheCommands;
+    // One producer across both queues; publish only AFTER a complete enqueue.
+    // The game thread never consumes beyond the published prefix. Sequence
+    // gaps from cancelled uploads/sessions do not change the remaining order.
+    uint64 NextTimeControlOrder = 0;
+    TAtomic<uint64> PublishedTimeControlOrder{0};
+    // Editor entry can consume leaves before Update refreshes the worker mirror.
+    int32 LeavesTakenBeforeUpdate = 0;
 
     ILiveLinkClient* Client = nullptr;
     FGuid SourceGuid;
     uint64 GameThreadSession = 0;
-    // Termination-counter value observed when GameThreadSession was
-    // negotiated. An explicit refresh increments the counter before replacing
-    // the display, so any later publish for the older epoch fails closed even
-    // before the worker closes the socket.
-    uint64 GameThreadSessionEndEpoch = 0;
-    // v11 identity of the negotiated session: the declared object set, its
+    // The worker session an end request closed, until the worker's disconnect
+    // reaches EndStreamingSessionOnGameThread. Later messages, inits and
+    // frames of it fail closed even before the worker closes the socket.
+    // Worker session ids only grow, so an older id is excluded by
+    // IsCurrentSession and one field is enough.
+    uint64 EndedSession = 0;
+    // Identity of the negotiated session: the declared object set, its
     // revision and the common space both adapters must match.
     TArray<FString> SetObjects;
     int32 NegotiatedSetRevision = 0;

@@ -5,17 +5,16 @@
 MtoU_LiveLink 连接同一台电脑上的 Maya 与 Unreal Editor，让你在 Maya 中制作时，
 直接在 Unreal 中查看角色动画、BlendShape 和服装修改效果。支持实时预览与动画
 缓存播放，可在 Maya 中跟随 Level Sequence 的镜头与时间，在主角色旁加入一个
-骨骼副对象，并把 Unreal 关卡作为参考几何体导入 Maya，不会创建动画或预览资产。
+骨骼副对象，不会创建动画或预览资产。
 
 ## 兼容性
 
 - 64 位 Windows
 - Autodesk Maya 2024（当前工作流程）；继续支持 Maya 2022.4
 - 官方原版 Unreal Editor 5.7.4
-- Topia Engine 5.7.4（已验证插件编译与编辑器加载）
 - 仅用于编辑器，不支持 PIE（Play In Editor）。
 
-不保证兼容其他第三方修改版 Unreal Engine 5.7。Maya 与 Unreal 组件应使用同一版本。
+不保证兼容修改版或第三方 Unreal Engine 5.7。Maya 与 Unreal 组件应使用同一版本。
 
 ## 安装
 
@@ -42,7 +41,7 @@ MtoU_LiveLink 连接同一台电脑上的 Maya 与 Unreal Editor，让你在 May
 
 1. 将 `unreal/MtoULiveLink/`（或 Unreal 压缩包中的 `MtoULiveLink` 文件夹）复制到
    `<Project>/Plugins/MtoULiveLink/`。
-2. 编译 Unreal 项目。Topia Engine 用户请按下方说明操作。
+2. 编译 Unreal 项目。
 3. 启用 **Live Link** 和 **MtoU_LiveLink**，然后重启 Unreal Editor。
 
 **升级、回退与卸载**
@@ -57,32 +56,6 @@ Maya 与 Unreal 组件成对升级和回退：两端使用同一协议版本，�
   Unreal 插件构建并重新连接。
 - 卸载 Maya 组件：删除用户 Maya 目录 `modules` 中的 `MtoULiveLink.mod` 和
   `MtoULiveLink` 文件夹（如有），删除工具架上的 MtoU 按钮，然后重启 Maya。
-
-### Topia Engine 5.7.4
-
-**推荐：双击向导（Windows）**
-
-关闭 Unreal Editor，确认项目 `Plugins/MtoULiveLink` 已放入源码插件。
-双击仓库中的 `tools/build_mtou_topia_gui.cmd`，选择项目 `.uproject`，再选择公司引擎的
-`Engine/Binaries/Win64/UnrealEditor.exe`。核对显示的路径后点击“确定”，等待成功提示再打开项目。
-失败时将控制台中的错误及 `Build log` 路径交给技术同事。
-若提示缺少编译器或 SDK，请由技术同事配置，
-或提供与同一公司引擎版本匹配的已编译插件。
-编译完成后会替换目标插件的编译产物。
-如需单独复制向导，请将 `build_mtou_topia_gui.cmd`、`build_mtou_topia_gui.ps1` 和
-`build_mtou_topia.ps1` 放在同一文件夹中。
-
-**命令行方式**：关闭 Unreal Editor。将 `TOPIA_ENGINE_ROOT` 设为包含 `Engine` 的目录，
-将 `ATHENA_UPROJECT` 设为目标 `.uproject`，然后在仓库根目录运行以下命令：
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/build_mtou_topia.ps1 `
-  -EngineRoot $env:TOPIA_ENGINE_ROOT `
-  -ProjectFile $env:ATHENA_UPROJECT `
-  -Apply
-```
-
-去掉 `-Apply` 可先检查路径并预览安装内容。
 
 ## 准备角色
 
@@ -124,7 +97,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/build_mtou_topia
    细节面板默认展开 **MtoU · 运行状态**（分别显示预览与连接状态及下一步）、
    **角色组成**（主体和可展开的附加部件）和 **预览控制**（绑定资产、生成的网格、
    刷新、删除及缓存播放）。需要查看或选中完整诊断时，展开 **高级设置与诊断**；
-   **复制完整诊断** 会复制包括镜头联动与场景参考详情在内的全部内容，便于报告问题。
+   **复制完整诊断** 会复制包括镜头联动详情在内的全部内容，便于报告问题。
    没有诊断时日常界面不会显示空白日志。
    连接状态在首次连接前显示“未连接”，流式连接中显示“已连接”，会话结束后显示
    “连接已中断”；中断后需在 Maya 重新连接。
@@ -132,7 +105,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/build_mtou_topia
    顶部切换“动画”／“模型”，下方依次是连接控制（设置角色、连接、断开与连接
    状态）、场景信息（左列根骨骼、衣服、帧率；右列骨骼／BlendShape 数量与缓存；
    名称过长时会省略，悬停可看全文）、预览与播放（预览模式、传输上限，缓存按钮仅在
-   缓存播放模式下出现）、镜头联动（一行状态、联动按钮与场景参考窗口）、工具
+   缓存播放模式下出现）、镜头联动（一行状态与联动按钮）、工具
    （Display 和重名骨骼选择）、诊断（状态与诊断详情，其中 **复制完整诊断** 复制全部
    内容）。警告开关位于诊断卡片下方。
 4. 选择“动画”，点击“连接”，指示变绿。在 Maya 中摆姿、拖动时间轴或播放
@@ -187,7 +160,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/build_mtou_topia
 
 联动期间，改动相机、暂停、cut 或明确跳转都会取消旧目标；相机随时间连续运动不会
 取消已经在路上的回传。若目标的 writer 无法安全隔离，Unreal 会在写入前拒绝并说明
-原因，而不是暂停整个 Sequence。进入联动前必须先清除缓存播放。恢复失败只在发生时
+原因，而不是暂停整个 Sequence。缓存播放期间两端的 **进入联动** 都不可用：在 Maya
+点击 **实时**，Unreal 确认清除缓存后即可进入。恢复失败只在发生时
 显示（Maya 显示“恢复失败”，Unreal 显示“恢复未完成”）：在 Maya 的诊断详情或 Unreal
 的 **高级设置与诊断** 中查看未恢复的资源，按记录手动恢复（例如在 Maya 中解锁相机、
 重设时间范围，或在 Sequencer 中检查对应轨道），也可以重新打开关卡。关闭或切换
@@ -221,29 +195,6 @@ Binding Actor 不跟随 Maya。副对象 Actor 放在其他位置或在联动中
 副对象。若移除副对象时无法恢复它的轨道，连接会结束，两端都会说明需要手动恢复的
 内容。
 
-## Maya 中的场景参考
-
-Unreal 可以把显式选择的关卡范围导出为静态参考几何，让 Maya 看到同样的环境。
-参考只是显示辅助：任何预览工作流都不需要它，交接也从不包含图片数据。
-
-1. 在 Unreal 的 **场景参考** 中选择关卡与子关卡并执行导出。Unreal 会报告结果，
-   例如“已导出 152 个对象，可在 Maya 导入”，请求的子关卡未加载时也会说明。请先
-   配对目标（见镜头联动），参考才能与它对齐。
-2. 在 Maya 主面板的 **镜头联动** 卡片点击 **打开场景参考窗口**。窗口显示来源关卡与
-   子关卡、规模（例如“152 个对象，约 120 万三角面”），以及交接是“可导入”、
-   “已导入（时间）”还是“已过期，请在 UE 重新导出”。点击 **导入/更新参考**：Maya 会在
-   触碰场景之前校验交接与规模上限，导入到自己的容器，并用一句话说明结果；丢弃节点、
-   回滚与残留只在导入失败时列出。交接 ID、摘要、空间修订与上限在诊断详情中。
-3. **移除参考** 只删除该容器；**恢复上次更新** 会完成或丢弃被中断的更新。若你把自己的
-   对象放到了参考之下，或在其 `MtoU_UE_SceneRef` 命名空间中新建了对象，更新与移除都会
-   被拒绝并列出该对象：把它移出参考和该命名空间后再试。
-
-参考与角色、联动相机处于同一坐标系，因此会跟随被移动或旋转的目标。位置取自
-Unreal 导出时已配对目标所在的位置。目标被移动或旋转之后，以及早期版本导出的
-参考，需要重新导出并再次导入；若状态行提示清单未带锚点，参考会停在 Maya 原点，
-直到重新导出。已导入的参考属于另一个摆放时，镜头联动不会开始（场景参考属于旧的共同
-空间）：重新导出并导入，或点击 **移除参考** 后不带参考继续。
-
 ## 服装模型预览
 
 1. 在 Unreal Binding 中指定服装 **Preview Static Mesh**。
@@ -264,15 +215,16 @@ Unreal 导出时已配对目标所在的位置。目标被移动或旋转之后�
 | --- | --- |
 | Maya 提示 MtoU_LiveLink 安装不完整 | 提示中写明了缺少的文件。重新完整解压 Maya 组件，把其中的 `install.mel` 拖入 Maya 视口，然后重启 Maya。 |
 | 安装后点击 MtoU 仍打开旧版本 | 安装时当前 Maya 已加载旧版本，重启 Maya 即可。 |
+| Maya 提示“连接失败 · 插件协议版本不匹配” | 弹窗列出 Maya 端和 UE 端各自已加载的插件版本与协议版本；对端没有提供的项显示“未知（对端未提供）”。请从同一发行包重新安装两端组件，重启 Maya 和 UE 后再连接。若 Maya 只显示旧提示“Maya 与 UE 插件版本不匹配”，说明 Maya 端组件较旧：请在 UE 的 Output Log 中搜索 “another protocol version”，其中一条警告写明了两端的插件版本与协议版本。 |
 | 骨架不匹配 | 先按详情中的根因排查：首个未映射骨骼的完整路径与父级、受阻的 Maya 后代与未访问的 Unreal 骨骼数量，以及提示的导入改名候选；若详情指出同一必要骨骼由两根 Maya 骨骼竞争，请在 Maya 中重命名其中一根。再检查 Maya 选择的根骨骼、层级，以及 Unreal Driver 网格是否为最新版本。 |
 | 附加部件被拒绝 | 诊断信息会指出具体部件和原因。请检查是否共用同一个 **Skeleton** 资产、Maya 中提示的必要骨骼及父链是否完整，以及共有参考姿势是否一致。若无法读取蒙皮权重，保留 CPU 蒙皮数据后重新构建或导入网格。 |
 | 预览刷新失败 | 检查网格对齐情况、服装与身体的材质槽是否分离，修正提示的问题后重新刷新。 |
 | 有意减面的模型无法通过自动服装识别 | 检查源模型是否有重复几何体或服装／身体混用材质槽。确认是有意减面后，在 Binding 的 **Driver Garment Slot Override** 中指定服装独立的材质槽，再刷新并检查效果。 |
 | BlendShape 未生效 | 检查“传递 BS”、名称匹配、当前服装及连接诊断。模型预览的源资产变更后需重新刷新。 |
 | 镜头联动中经常显示“Maya 跟不上”和滞后时间 | 在 Maya 中打开 **窗口 > 设置/首选项 > 插件管理器**（英文界面：**Windows > Settings/Preferences > Plug-in Manager**），取消不用的插件的 **自动加载**，例如 MASH、XGen（`xgenToolkit`）、GPU Cache、Scene Assembly、LookdevX 和 Type，然后重启 Maya。打开场景时，场景需要的插件仍会加载。 |
-| 修改后连接断开 | 更换服装、模式、“传递 BS”或角色部件后需重连；刷新也会断开当前连接。修改或重新导入 Primary Driver、Preview Static Mesh，或修改 **Driver Garment Slot Override** 后，刷新模型预览并重连；撤销／重做这些修改时也遵循同一规则。 |
+| 修改后连接断开 | 更换服装、模式、“传递 BS”或角色部件后需重连；只有刷新正在参与连接的 Actor 才会断开当前连接；Maya 刚连接、对象集合还在协商时，任何 Binding Actor 的变化都会结束这次连接，需要重新连接。修改或重新导入 Primary Driver、Preview Static Mesh，或修改 **Driver Garment Slot Override** 后，刷新模型预览并重连；撤销／重做这些修改时也遵循同一规则。 |
 
-预览时请保留 Binding Actor 并保持其关卡加载；删除 Actor 或卸载关卡会结束连接。
+预览时请保留参与连接的 Binding Actor 并保持其关卡加载；删除该 Actor 或卸载其关卡会结束连接。放置、刷新或删除没有参与连接的 Binding Actor 不会断开连接；Maya 刚连接、对象集合还在协商时除外，此时任何 Binding Actor 的变化都会结束这次连接，需要重新连接。
 
 ## 许可证
 

@@ -22,9 +22,6 @@ from mtou_livelink import (  # noqa: E402
     cache as mtou_cache,
 )
 from mtou_livelink import (
-    camera as mtou_camera,
-)
-from mtou_livelink import (
     config as mtou_config,
 )
 from mtou_livelink import (
@@ -39,6 +36,7 @@ from mtou_livelink import (
 from mtou_livelink import (
     scene as mtou_scene,
 )
+from mtou_livelink import timecontrol  # noqa: E402
 from mtou_livelink import (
     session as mtou_session,
 )
@@ -531,7 +529,7 @@ class MayaHostTests(unittest.TestCase):
         class FakeWorker(object):
             instance = None
 
-            def __init__(self, init_messages, hello_message=None):
+            def __init__(self, init_messages, hello_message=None, on_reply=None):
                 # One init per object of the set; this session has one object.
                 self.init_message = init_messages[0]
                 self.init_count = len(init_messages)
@@ -566,11 +564,11 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual(1.0, FakeWorker.instance.joined)
         self.assertEqual(mtou_config.PROTOCOL_VERSION,
                          FakeWorker.instance.init_message["version"])
-        self.assertEqual(11, FakeWorker.instance.init_message["version"])
         self.assertEqual("character", FakeWorker.instance.init_message["object_id"])
         self.assertEqual(["character"], FakeWorker.instance.init_message["set_objects"])
         self.assertEqual(1, FakeWorker.instance.init_count)
-        self.assertEqual(11, FakeWorker.instance.hello_message["version"])
+        self.assertEqual(mtou_config.PROTOCOL_VERSION,
+                         FakeWorker.instance.hello_message["version"])
         self.assertEqual("cm", FakeWorker.instance.hello_message["scene"]["linear_unit"])
         self.assertEqual("animation", FakeWorker.instance.init_message["workflow"])
         self.assertTrue(FakeWorker.instance.init_message["blendshapes_enabled"])
@@ -589,7 +587,7 @@ class MayaHostTests(unittest.TestCase):
         events = []
 
         class FakeWorker(object):
-            def __init__(self, init_message, hello_message=None):
+            def __init__(self, init_message, hello_message=None, on_reply=None):
                 pass
 
             def start(self):
@@ -629,56 +627,6 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual(["failed"], [event.kind for event in events])
         self.assertEqual(0, mtou_mayaapi.drain_deferred())
 
-    def test_reference_container_in_the_anchor_frame_lines_up_with_the_character_and_camera(self):
-        # The D003 fixture anchor: (60, 40, 0), roll 3, pitch -4, yaw 37. Real
-        # Maya nodes: the imported level geometry sits at C(p), the character
-        # stands at the Maya origin, the linked camera at C(A^-1 camera).
-        import math
-        import test_mtou_reference as fixtures
-        from mtou_livelink import reference
-        anchor, problem = reference.parse_anchor(fixtures.D003_ANCHOR)
-        self.assertIsNone(problem)
-        group = cmds.createNode("transform", name="reference_container")
-        prop_world = (360.0, 140.0, 20.0)
-        wall = cmds.createNode("transform", name="reference_wall", parent=group)
-        cmds.xform(wall, translation=mtou_camera.ue_to_maya_point(*prop_world),
-                   worldSpace=True)
-        character = cmds.createNode("transform", name="reference_character")
-        cmds.xform(group, matrix=reference.anchor_container_matrix(anchor))
-
-        local_prop = fixtures.to_anchor_local(fixtures.D003_ANCHOR, prop_world)
-        expected = mtou_camera.ue_to_maya_point(*local_prop)
-        placed = cmds.xform(wall, query=True, worldSpace=True, translation=True)
-        for index in range(3):
-            self.assertAlmostEqual(expected[index], placed[index], places=4)
-        # Rigid: the container never rescales or shears the reference.
-        matrix = cmds.xform(group, query=True, matrix=True)
-        for row in range(3):
-            self.assertAlmostEqual(1.0, math.sqrt(sum(
-                matrix[row * 4 + column] ** 2 for column in range(3))), places=6)
-
-        # The character stays at the origin, where the anchor's own position
-        # lands; the camera Unreal sends is relative to the anchor.
-        probe = cmds.createNode("transform", name="reference_anchor_probe", parent=group)
-        cmds.xform(probe, translation=mtou_camera.ue_to_maya_point(60.0, 40.0, 0.0),
-                   worldSpace=False)
-        at_anchor = cmds.xform(probe, query=True, worldSpace=True, translation=True)
-        at_character = cmds.xform(character, query=True, worldSpace=True, translation=True)
-        for index in range(3):
-            self.assertAlmostEqual(at_character[index], at_anchor[index], places=4)
-
-        camera_world = (160.0, -60.0, 170.0)
-        camera = cmds.createNode("transform", name="reference_linked_camera")
-        cmds.xform(camera, translation=mtou_camera.ue_to_maya_point(
-            *fixtures.to_anchor_local(fixtures.D003_ANCHOR, camera_world)),
-            worldSpace=True)
-        camera_at = cmds.xform(camera, query=True, worldSpace=True, translation=True)
-        wall_at = cmds.xform(wall, query=True, worldSpace=True, translation=True)
-        distance = math.sqrt(sum((camera_at[i] - wall_at[i]) ** 2 for i in range(3)))
-        world_distance = math.sqrt(sum(
-            (camera_world[i] - prop_world[i]) ** 2 for i in range(3)))
-        self.assertAlmostEqual(world_distance, distance, places=4)
-
     def test_cached_capture_uses_real_playback_range_and_restores_after_cancel(self):
         cmds.playbackOptions(min=10, max=12)
         cmds.currentTime(11, edit=True)
@@ -713,22 +661,17 @@ class MayaHostTests(unittest.TestCase):
 
                 def __init__(self):
                     self.resumed = 0
-                    self.reply_listener = None
+                    self.time_control = timecontrol.TimeControl(
+                        resume=self._resume)
 
-                def pause_for_cached(self, reply_listener=None):
-                    self.reply_listener = reply_listener
-
-                def resume_from_cached(self):
+                def _resume(self):
                     self.resumed += 1
 
                 def submit_cached(self, message):
-                    if message["type"] == "cache_clear" and self.reply_listener:
-                        self.reply_listener({"type": "cache_cleared",
-                                             "upload_id": 0, "play_id": 0,
-                                             "clear_id": message["clear_id"]})
-
-                def end_cached_replay(self):
-                    pass
+                    if message["type"] == "cache_clear":
+                        mtou_session.route_reply(
+                            {"type": "cache_cleared", "upload_id": 0, "play_id": 0,
+                             "clear_id": message["clear_id"]}, self.time_control)
 
             stream = FakeStream()
             progress = []
@@ -1117,6 +1060,44 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual([], host.restore_state(state))
         self.assertEqual((35.0, 4.0), self._camera_values(transform))
 
+    def test_linkage_restores_the_whole_gate_once_and_skips_a_locked_unchanged_plug(self):
+        # The camera adapter alone captures and restores the resolution gate:
+        # all four attributes return to their pre-linkage values, and a plug the
+        # user locked that still holds its value is not a residual.
+        import test_mtou_camera as payloads
+
+        gate_plugs = ("width", "height", "pixelAspect", "deviceAspectRatio")
+
+        def gate():
+            return tuple(round(cmds.getAttr("defaultResolution." + name), 6)
+                         for name in gate_plugs)
+
+        cmds.setAttr("defaultResolution.width", 1024)
+        cmds.setAttr("defaultResolution.height", 768)
+        cmds.setAttr("defaultResolution.pixelAspect", 1.1)
+        cmds.setAttr("defaultResolution.deviceAspectRatio", 1024 * 1.1 / 768)
+        before = gate()
+        self.addCleanup(lambda: cmds.objExists(mtou_config.LINK_CAMERA_NAME)
+                        and cmds.delete(mtou_config.LINK_CAMERA_NAME))
+        time_payload = {"display_frame": 12.0, "playback_range": {"start": 0, "end": 100},
+                        "display_rate": {"numerator": 24, "denominator": 1}}
+        host = self._linkage_host()
+        state = host.capture_state()
+        self.assertNotIn("gate", state)
+        host.apply_target(time_payload, payloads.camera_payload(),
+                          payloads.gate_payload())
+        self.assertNotEqual(before, gate())
+        self.assertEqual([], host.restore_state(state))
+        self.assertEqual(before, gate())
+
+        # Locked before entering and never written: restoring reports nothing.
+        host = self._linkage_host()
+        state = host.capture_state()
+        cmds.setAttr("defaultResolution.width", lock=True)
+        self.addCleanup(lambda: cmds.setAttr("defaultResolution.width", lock=False))
+        self.assertEqual([], host.restore_state(state))
+        self.assertEqual(before, gate())
+
     def _camera(self, name, focal, x):
         transform = cmds.createNode("transform", name=name)
         shape = cmds.createNode("camera", name=name + "Shape", parent=transform)
@@ -1233,6 +1214,7 @@ class MayaHostTests(unittest.TestCase):
 
         class Session(object):
             messages = []
+            time_control = timecontrol.TimeControl()
 
             def submit_linkage(self, message):
                 self.messages.append(message)
@@ -1288,237 +1270,6 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual([], card.children())
         QtCore.QCoreApplication.sendEvent(card, QtCore.QEvent(QtCore.QEvent.User))
         self.assertEqual([], events)
-
-    # ------------------------------------------- scene-reference fault matrix
-    def _real_handoff(self, directory, mesh_name, anchor=None, transfer_id="tx-host"):
-        """A handoff directory with an ASCII FBX Maya itself exported."""
-        import hashlib
-        import json
-
-        import maya.mel as mel
-        directory = pathlib.Path(directory)
-        directory.mkdir(parents=True, exist_ok=True)
-        cmds.loadPlugin("fbxmaya", quiet=True)
-        cube = cmds.polyCube(name=mesh_name)[0]
-        geometry = directory / "Lvl.fbx"
-        cmds.select(cube, replace=True)
-        mel.eval("FBXResetExport")
-        mel.eval("FBXExportInAscii -v true")
-        mel.eval('FBXExport -f "{0}" -s'.format(geometry.as_posix()))
-        cmds.delete(cube)
-        size = geometry.stat().st_size
-        manifest = {
-            "schema": "mtou-scene-ref-manifest/1",
-            "world": {"name": "Lvl", "up_axis": "Z", "linear_unit": "cm"},
-            "conventions": {"export_axis_option": "bForceFrontXAxis=false",
-                            "engine_to_maya_point_map": "engine"},
-            "scope": {"level": "/Game/Lvl", "completeness": "confirmed"},
-            "counts": {"objects": 1, "triangles": 12, "bytes": size},
-            "files": {"geometry": "Lvl.fbx", "geometry_bytes": size,
-                      "image_data": False},
-        }
-        if anchor is not None:
-            manifest["world"]["anchor"] = anchor
-        text = json.dumps(manifest, indent=2).encode("utf-8")
-        (directory / "Lvl.manifest.json").write_bytes(text)
-        digest = hashlib.md5(text + geometry.read_bytes()).hexdigest()
-        return {"transfer_id": transfer_id, "directory": str(directory),
-                "digest": digest, "space_revision": 1,
-                "scope": {"level": "/Game/Lvl", "sublevels": []},
-                "counts": {"objects": 1, "triangles": 12, "bytes": size}}
-
-    def _reference_scratch(self):
-        import shutil
-        root = pathlib.Path(__file__).resolve().parents[3]
-        for candidate in (root.parent / ".tmp", root / ".tmp"):
-            if candidate.is_dir():
-                directory = pathlib.Path(tempfile.mkdtemp(
-                    prefix="mtou_host_ref_", dir=str(candidate)))
-                break
-        else:
-            directory = pathlib.Path(tempfile.mkdtemp(prefix="mtou_host_ref_"))
-        self.addCleanup(shutil.rmtree, str(directory), True)
-        return directory
-
-    def _scene_snapshot(self):
-        return sorted(cmds.ls(long=True) or []), sorted(cmds.ls(uuid=True) or [])
-
-    def _container_group(self):
-        name = mtou_config.REFERENCE_CONTAINER
-        found = cmds.ls("{0}:{0}".format(name), long=True, type="transform") or []
-        return found[0] if found else None
-
-    def _container_meshes(self):
-        name = mtou_config.REFERENCE_CONTAINER
-        return sorted(path.rsplit("|", 1)[-1] for path in
-                      cmds.ls(name + ":*", long=True, type="mesh") or [])
-
-    def test_reference_fault_matrix_keeps_the_scene_and_the_previous_reference(self):
-        # Real FBX handoffs through the real importer: a first import, an
-        # update, refusals before any write, a failed import, a failure inside
-        # the swap and a scene node under the reference. The production node,
-        # the previous reference and its UUID survive every failure.
-        import hashlib
-
-        from mtou_livelink import reference
-        scratch = self._reference_scratch()
-        d003 = {"location_cm": [60.0, 40.0, 0.0],
-                "rotation_deg": {"roll": 3.0, "pitch": -4.0, "yaw": 37.0}}
-        hero = cmds.createNode("transform", name="HeroCtrl")
-        cmds.setAttr(hero + ".translateX", 12.5)
-
-        first = reference.import_handoff(
-            self._real_handoff(scratch / "a", "SM_First", anchor=d003))
-        self.assertTrue(first["accepted"], first["problems"])
-        self.assertTrue(any("SM_First" in name for name in self._container_meshes()))
-        self.assertIsNone(reference.stale_reference(d003))
-        moved = dict(d003, location_cm=[160.0, 40.0, 0.0])
-        self.assertIn("100.000 cm", reference.stale_reference(moved))
-
-        update = reference.import_handoff(
-            self._real_handoff(scratch / "b", "SM_Second", anchor=moved,
-                               transfer_id="tx-host-2"))
-        self.assertTrue(update["accepted"], update["problems"])
-        meshes = self._container_meshes()
-        self.assertTrue(any("SM_Second" in name for name in meshes), meshes)
-        self.assertFalse(any("SM_First" in name for name in meshes), meshes)
-        self.assertIsNone(reference.stale_reference(moved))
-        previous_uuid = cmds.ls(self._container_group(), uuid=True)[0]
-
-        # Stale, digest-mismatched and over-budget handoffs are refused before
-        # any node is created.
-        good = self._real_handoff(scratch / "c", "SM_Third")
-        before = self._scene_snapshot()
-        refusals = {
-            "REFERENCE_STALE": dict(good, session_space_revision=7),
-            "REFERENCE_DIGEST_MISMATCH": dict(good, digest="0" * 32),
-        }
-        for code, handoff in refusals.items():
-            with self.assertRaises(reference.ReferenceRefused) as caught:
-                reference.import_handoff(handoff)
-            self.assertEqual(code, caught.exception.code)
-        with self.assertRaises(reference.ReferenceRefused) as caught:
-            reference.import_handoff(good, {"bytes": 1, "objects": 1, "triangles": 1})
-        self.assertEqual("REFERENCE_OVER_BUDGET", caught.exception.code)
-        self.assertEqual(before, self._scene_snapshot())
-
-        # A handoff whose FBX the importer cannot read fails without touching
-        # the previous reference.
-        broken = self._real_handoff(scratch / "d", "SM_Broken")
-        fbx = pathlib.Path(broken["directory"]) / "Lvl.fbx"
-        fbx.write_bytes(b"; FBX 7.7.0 project file\nObjects:  {\n\tModel: 1, garbage")
-        manifest = pathlib.Path(broken["directory"]) / "Lvl.manifest.json"
-        broken["digest"] = hashlib.md5(manifest.read_bytes() + fbx.read_bytes()).hexdigest()
-        failed = reference.import_handoff(broken)
-        self.assertFalse(failed["accepted"])
-        self.assertEqual(previous_uuid, cmds.ls(self._container_group(), uuid=True)[0])
-        self.assertTrue(any("SM_Second" in name for name in self._container_meshes()))
-
-        # A failure inside the swap rolls back to the previous reference.
-        original = reference.ReferenceImporter._rehome_paths
-
-        def fail_rehome(importer):
-            raise RuntimeError("the injected rehome failed")
-
-        reference.ReferenceImporter._rehome_paths = fail_rehome
-        try:
-            rolled = reference.import_handoff(self._real_handoff(scratch / "e", "SM_Fifth"))
-        finally:
-            reference.ReferenceImporter._rehome_paths = original
-        self.assertFalse(rolled["accepted"])
-        self.assertTrue(rolled["rolled_back"], rolled["problems"])
-        self.assertEqual(previous_uuid, cmds.ls(self._container_group(), uuid=True)[0])
-        self.assertTrue(any("SM_Second" in name for name in self._container_meshes()))
-        self.assertIsNone(reference.stale_reference(moved))
-
-        # A scene node a person parented under the reference keeps it: the
-        # update and the removal are refused and nothing is deleted.
-        mesh_transform = cmds.listRelatives(
-            cmds.ls(mtou_config.REFERENCE_CONTAINER + ":*", long=True, type="mesh")[0],
-            parent=True, fullPath=True)[0]
-        prop = cmds.createNode("transform", name="HeroProp", parent=mesh_transform)
-        prop_uuid = cmds.ls(prop, uuid=True)[0]
-        before = self._scene_snapshot()
-        with self.assertRaises(reference.ReferenceRefused) as caught:
-            reference.import_handoff(self._real_handoff(scratch / "f", "SM_Sixth"))
-        self.assertEqual("CONTAINER_NOT_OWNED", caught.exception.code)
-        self.assertIn("HeroProp", caught.exception.detail)
-        self.assertEqual(before, self._scene_snapshot())
-        with self.assertRaises(reference.ReferenceRefused) as caught:
-            reference.ReferenceContainer().remove()
-        self.assertEqual("CONTAINER_NOT_OWNED", caught.exception.code)
-        self.assertEqual(before, self._scene_snapshot())
-        self.assertEqual(1, len(cmds.ls(prop_uuid)))
-
-        cmds.parent(cmds.ls(prop_uuid, long=True)[0], world=True)
-
-        # The container's namespace does not prove a node came from the import:
-        # nodes a person created there, under the reference, in a child
-        # namespace or as a DG node, are kept and refuse the update and removal.
-        container = mtou_config.REFERENCE_CONTAINER
-        group = self._container_group()
-        artist = [
-            cmds.createNode("transform", name=container + ":ArtistProp", parent=group),
-            cmds.createNode("lambert", name=container + ":ArtistShader"),
-        ]
-        cmds.namespace(add="Props", parent=container)
-        artist.append(cmds.createNode("transform", name=container + ":Props:Crate",
-                                      parent=mesh_transform))
-        artist_uuids = [cmds.ls(node, uuid=True)[0] for node in artist]
-        before = self._scene_snapshot()
-        with self.assertRaises(reference.ReferenceRefused) as caught:
-            reference.import_handoff(self._real_handoff(scratch / "g", "SM_Seventh"))
-        self.assertEqual("CONTAINER_NOT_OWNED", caught.exception.code)
-        with self.assertRaises(reference.ReferenceRefused) as caught:
-            reference.ReferenceContainer().remove()
-        self.assertEqual("CONTAINER_NOT_OWNED", caught.exception.code)
-        for name in ("ArtistProp", "ArtistShader", "Crate"):
-            self.assertIn(name, caught.exception.detail)
-        self.assertEqual(before, self._scene_snapshot())
-        self.assertEqual(3, len(cmds.ls(artist_uuids)))
-        cmds.delete(cmds.ls(artist_uuids))
-        cmds.namespace(removeNamespace=container + ":Props")
-
-        # A locked node makes the removal fail with its residual reported;
-        # unlocked, the removal completes.
-        locked = cmds.ls(mtou_config.REFERENCE_CONTAINER + ":*", long=True,
-                         type="mesh")[0]
-        cmds.lockNode(locked, lock=True)
-        report = reference.ReferenceContainer().remove()
-        self.assertFalse(report["removed"])
-        self.assertTrue(any("CONTAINER_REMOVAL_FAILED" in entry
-                            for entry in report["problems"]), report["problems"])
-        self.assertTrue(report["residual"]["nodes"])
-        cmds.lockNode(locked, lock=False)
-        report = reference.ReferenceContainer().remove()
-        self.assertTrue(report["removed"], report["problems"])
-        self.assertIsNone(self._container_group())
-        self.assertIsNone(reference.stale_reference(moved))
-
-        # A staging namespace an interrupted run left behind is kept whole while
-        # it holds a DG node or a child-namespace node the import did not record.
-        staging = container + reference.STAGING_SUFFIX
-        for extra in ("lambert", "Props:Crate"):
-            cmds.namespace(add=staging)
-            staged = cmds.createNode("transform", name=staging + ":" + staging)
-            reference._mark_owned(staged, staging)
-            reference._record_inventory(staged, staging)
-            if extra == "lambert":
-                node = cmds.createNode("lambert", name=staging + ":ArtistShader")
-            else:
-                cmds.namespace(add="Props", parent=staging)
-                node = cmds.createNode("transform", name=staging + ":Props:Crate")
-            node_uuid = cmds.ls(node, uuid=True)[0]
-            recovery = reference._recover_previous_runs(container)
-            self.assertEqual([], recovery["stale_staging_namespaces"])
-            self.assertEqual(1, len(cmds.ls(node_uuid)))
-            self.assertTrue(cmds.namespace(exists=staging))
-            cmds.namespace(removeNamespace=staging, deleteNamespaceContent=True)
-
-        # The production nodes never changed.
-        self.assertEqual(12.5, cmds.getAttr(hero + ".translateX"))
-        self.assertEqual(1, len(cmds.ls("HeroCtrl")))
-        self.assertEqual(1, len(cmds.ls("HeroProp")))
 
 
 if __name__ == "__main__":

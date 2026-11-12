@@ -884,7 +884,6 @@ struct FMtoULinkageEditorState
 
     TWeakObjectPtr<AActor> ObservedActor;
     TArray<TWeakPtr<SWidget>> PanelWidgets;
-    FSimpleMulticastDelegate ViewChanged;
 };
 
 FMtoULinkageEditorState& GetState()
@@ -1794,7 +1793,6 @@ void OnActorMovedHook(AActor* Actor)
 void OnViewChangedHook(const FMtoULinkageView& View)
 {
     FMtoULinkageEditorState& State = GetState();
-    State.ViewChanged.Broadcast();
     // A panel that was closed leaves its weak reference behind; a broadcast
     // purges those, so the registered set stays the live panels.
     State.PanelWidgets.RemoveAll(
@@ -1864,11 +1862,6 @@ void FMtoULinkageEditor::SetObservedLinkageActor(TWeakObjectPtr<AActor> Actor)
 TWeakObjectPtr<AActor> FMtoULinkageEditor::GetObservedLinkageActor()
 {
     return GetState().ObservedActor;
-}
-
-FSimpleMulticastDelegate& FMtoULinkageEditor::OnLinkageViewChanged()
-{
-    return GetState().ViewChanged;
 }
 
 void FMtoULinkageEditor::RegisterLinkagePanelWidget(TWeakPtr<SWidget> Widget)

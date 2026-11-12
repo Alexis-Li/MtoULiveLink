@@ -1,6 +1,6 @@
 # MtoU Live Link wire protocol
 
-Protocol version: **11**. This document is the complete wire contract the Maya
+Protocol version: **12**. This document is the complete wire contract the Maya
 component and the Unreal plugin implement; neither host reads the other's
 source, configuration or runtime files. Its executable form is
 [`conformance.json`](conformance.json), which both hosts' test suites run.
@@ -16,16 +16,29 @@ Git history.
 
 ## Version pairing
 
-- Both hosts declare `version: 11`: Maya's `PROTOCOL_VERSION` and the Unreal
+- Both hosts declare `version: 12`: Maya's `PROTOCOL_VERSION` and the Unreal
   plugin report the same value.
 - The Maya client opens with `hello`. A peer that cannot answer with the same
   version returns `error` with `code: "PROTOCOL_VERSION_MISMATCH"` and closes
-  the connection **before** it discovers a target, borrows a camera, mutes a
-  writer or reads a handoff directory. The same code answers any message whose
+  the connection **before** it discovers a target, borrows a camera or mutes a
+  writer. The same code answers any message whose
   `version` differs, including an `init` from an earlier version.
+- Maya refuses a `hello_ack` whose `version` differs the same way: it reports
+  `PROTOCOL_VERSION_MISMATCH`, ends the connection and sends nothing more.
 - A mismatched pair never partially succeeds: no partial target takeover, no
-  half-imported reference, no cached pose left behind. Users therefore install
+  cached pose left behind. Users therefore install
   both components from one release.
+- So that Maya can name both releases, the refusal carries the refuser's. Three
+  optional fields hold them: `hello.plugin_version` (the Maya component's
+  release) and, on an `error` with `code: "PROTOCOL_VERSION_MISMATCH"` only,
+  `protocol_version` (the protocol version the refuser implements, an integer;
+  an `error` has no `version`) and `plugin_version` (the refuser's release). Both are the versions the host has loaded, not those on disk, and
+  a host omits an item it cannot name. They are for display: no host decides
+  anything by them, a missing item is shown as unknown, and the text of
+  `details` is never read for a version. A value of the wrong type is
+  `INVALID_MESSAGE` like any known field, but only after the version check: a
+  `hello` whose `version` differs is always answered with
+  `PROTOCOL_VERSION_MISMATCH`, whatever else it holds.
 
 ## Transport and framing
 
@@ -38,7 +51,14 @@ Git history.
   unsigned 64-bit big-endian integer. The length counts the JSON only.
 - Every message has a string `type`. Receivers ignore unknown fields, so
   additive diagnostic fields need no new version; any structural or semantic
-  change does.
+  change does. A known field with a value the protocol does not define is not
+  an unknown field: an unknown `mode`, `control` or `error.kind`, a `mode`
+  that its `control` does not pair with, or a `plugin_version` or
+  `protocol_version` of the wrong type (see [Version pairing](#version-pairing)),
+  is `INVALID_MESSAGE`.
+- A message whose `type` the protocol does not define, a retired one included,
+  is refused with `INVALID_MESSAGE` and the receiver closes the connection,
+  whatever state the connection is in.
 - Numbers must be finite. Transforms are
   `[tx, ty, tz, qx, qy, qz, qw, sx, sy, sz]`: translation in centimetres, a
   normalised rotation quaternion and scale, already converted to Unreal axes
@@ -59,9 +79,6 @@ changes only with a recorded reason, never to make a failing run pass.
 | `max_set_objects` | 2 (one primary character + one independent object) | both hosts at negotiation |
 | `max_cache_frame_count` | 20,000 frames | Maya before capture, Unreal at `cache_begin` |
 | `max_cache_payload_bytes` | 1,073,741,824 (1 GiB) of encoded `cache_frame` JSON | Maya during capture, Unreal metered at the framing boundary |
-| `max_reference_bytes` | 268,435,456 (256 MiB) | Maya importer before staging |
-| `max_reference_objects` | 20,000 imported roots | Maya importer before staging |
-| `max_reference_triangles` | 20,000,000 | Maya importer before staging |
 
 Unreal also holds fixed budgets that are not wire values: at most one linkage
 target in flight plus one replaceable pending target, 1,536 MiB of predicted
@@ -86,20 +103,20 @@ backpressure instead of growing. There is no fixed bone or curve count.
 | Field | Owner | Meaning |
 | --- | --- | --- |
 | `revision` | Maya | the character snapshot revision `init` establishes and `ready` echoes; cache uploads must name it |
-| `session_id` | Unreal | positive integer for one TCP connection; every later linkage, removal and reference message repeats it |
+| `session_id` | Unreal | positive integer for one TCP connection; every later linkage and removal message repeats it |
 | `set_revision` | Maya | the object set's revision: 1 for the set a connection negotiates, +1 for every accepted removal |
 | `set_objects` | Maya | the ordered object ids of the negotiated set, primary first |
 | `object_id` | both | stable object identifier, never a display name, bone short name or list position: `character` for the primary character, `secondary` for the independent object |
 | `upload_id`, `play_id`, `clear_id` | Maya (`upload_id`, `clear_id`), Unreal (`play_id`) | positive, increasing per connection; every cache outcome echoes the identity it belongs to, and reused or older identities are refused or ignored. A new connection starts again from 1 |
 | `mode_revision` | Unreal | increments per accepted mode transition |
-| `space_revision` | Unreal | binds the common anchor, unit and mapping; a reference and a pose group must match the current one |
+| `space_revision` | Unreal | binds the common anchor, unit and mapping; a pose group must match the current one |
 | `eval_id` | Unreal | opaque evaluation identity: time plus cut plus camera content, at 1/1000 tick precision, plus the editor's discrete-event count, so a pause or edit that keeps the time names new work |
 | `transport_serial` | Unreal | monotonically increasing send counter; ordering only |
 | `sample_serial` | Maya | increments per new sample of one `eval_id`; a paused edit produces a new sample |
 | `frame_serial` | Unreal | counts publications of one connection, including heartbeats |
 
-A message naming an old session, set, space, mode, cancelled target or repeated
-publication is refused with its specific code and changes no host state.
+A message naming an old session, set, space, mode or cancelled target is refused
+with its specific code and changes no host state.
 
 ## Connection and negotiation
 
@@ -181,7 +198,8 @@ The removal is a set transition inside one connection, in any mode:
 
 1. The side that removes closes the old set's submission: Maya stops sending
    frames and groups of set N once it sends `remove_object`; Unreal refuses any
-   later group of set N with `SET_REVISION_STALE` (scheduling, not a conflict)
+   later group of set N with `SET_REVISION_STALE` (a `scheduling` error, see
+   [Error kinds](#error-kinds))
    and cancels a published group that is not confirmed yet, returning the
    primary to its last complete display.
 2. Unreal restores the removed object: while it holds the object's writers it
@@ -224,8 +242,9 @@ playback-segment semantics are in
    attempt's progress, pause, seek, loop, completion or stop, and every later
    outcome carries the same `play_id`.
 5. `cache_clear` with a new `clear_id` releases the cache; Unreal echoes the
-   identities it dropped in `cache_cleared`, and Maya waits for that exact
-   acknowledgement before it samples a new capture or returns to realtime.
+   identities it dropped in `cache_cleared`. Maya resumes realtime frames right
+   after the clear, which precede them on the socket, and samples a new
+   capture or enters linkage only once it received that exact acknowledgement.
 
 Cache errors are routed by identity like the other outcomes. Only a
 recoverable cache error that belongs to an existing upload or play attempt
@@ -239,7 +258,7 @@ carries an identity, and only a positive one:
 - a refused play start and `CACHED_PLAYBACK_PERFORMANCE` carry the attempt's
   `play_id` and the `upload_id` of the cache it plays;
 - a refused pause, resume or seek carries the active `play_id` when an attempt
-  exists; `cache_stop` is never refused;
+  exists; stopping is never refused;
 - a `cache_clear` with an old or repeated `clear_id` is refused with
   `CACHE_METADATA_INVALID` and carries **no** identity, because it belongs to
   no current operation (only an accepted clear reports identities, in
@@ -257,9 +276,9 @@ a new upload never fails or clears that upload.
 `cache_complete.scope` is `cache` only when one unbroken segment applied every
 pose once, in order, from the first frame within the duration bound; after a
 seek or a completed loop round it is `segment` with that segment's range and
-count. Unreal still accepts `cache_play` and `cache_stop` from Maya; the
-product drives playback from the Unreal Binding Actor and Maya does not send
-them.
+count. Playback is started, paused, resumed, sought, looped and stopped from
+the Unreal Binding Actor only: Maya sends no playback command, and `cache_play`
+and `cache_stop` are not protocol messages.
 
 ## Camera linkage
 
@@ -277,6 +296,26 @@ them.
 `mode_revision` increments on every accepted transition and is echoed by both
 sides. During a transition the pose gate is closed: no `group` and no `applied`
 is accepted for the previous revision.
+
+### Legal statements
+
+`mode` names a wire mode, `control` the one host that controls it and, in the
+`mode` message only, `transition` the outcome. Cached Playback holds time from
+`cache_enter` to its clear without a `mode` statement, so `cached` is not a
+wire mode.
+
+| `mode` | `control` | `transition` | Legal |
+| --- | --- | --- | --- |
+| `linkage` | `unreal` | `ready` | yes |
+| `realtime` | `maya` | `ready` or `failed` | yes |
+| `linkage` | `unreal` | `failed` | no: Maya reports a failed transition as `realtime` |
+| `linkage` | `maya` | any | no |
+| `realtime` | `unreal` | any | no |
+| any other `mode`, `cached` included | any | any | no |
+
+Unreal refuses an illegal `mode` with `INVALID_MESSAGE` and keeps the
+connection; it never adopts a `control` the pairing does not give. Maya
+refuses an illegal `mode_state` with `INVALID_MESSAGE` and ends the connection.
 
 ### Starting and ending from either host
 
@@ -344,7 +383,9 @@ One group is published at a time.
   before any display commits it; such a group is never confirmed. An ordinary
   camera move along continuous time does not cancel the target.
 - A `group` whose `eval_id` is no longer current is refused with `EVAL_STALE`
-  and changes nothing; the last complete display stays.
+  and changes nothing; the last complete display stays. A second publication of
+  a sample whose application was already confirmed is such a group, because the
+  confirmation ends the issue.
 - After the last desired target, Unreal must observe an applied group within
   2 s and only then report 已同步; otherwise it reports 未收敛 with the last
   target and the elapsed time.
@@ -375,45 +416,13 @@ linkage starts, so returning to realtime restores the frame the artist had.
   (`MOVING_SOCKET`); a target placed elsewhere is refused (`ANCHOR_MISMATCH`),
   at negotiation and at the linkage entry, and a target moved while linkage
   holds it ends the linkage.
-- Camera and reference geometry travel back through the inverse mapping; the
-  camera basis is transferred as basis vectors, never as Euler angles.
+- The camera travels back through the inverse mapping; its
+  basis is transferred as basis vectors, never as Euler angles.
   `camera_time.camera` is expressed relative to the static anchor in Unreal
   axes, and `gate.pixel_aspect_ratio` is the shape of one pixel (1 for Unreal),
   never the image aspect.
-- `space_revision` changes when `A`, the unit or the mapping changes. A
-  reference or an in-flight group from an older revision is refused
-  (`SPACE_REVISION_STALE`); re-labelling an old reference is not an update.
-
-## Scene reference handoff
-
-Unreal exports an explicit level scope with its FBX level exporter into a local
-handoff directory holding the FBX file and a `mtou-scene-ref-manifest/1`
-manifest of the engine-evaluated world transforms, then sends
-`reference_offer` with the directory, the manifest digest, the scope and its
-completeness, the `space_revision` and the counts. The user imports it in Maya;
-Maya answers `reference_result`, and `reference_removed` when the user removes
-the container.
-
-- Maya checks the digest (`REFERENCE_DIGEST_MISMATCH`), refuses image data in
-  the delivered files or inside the FBX (`REFERENCE_IMAGE_DATA`) and enforces
-  the reference budgets (`REFERENCE_OVER_BUDGET`) before it touches the scene.
-  Material assignments and external image path references are allowed.
-- Maya stages the import in its own namespace, verifies it against the
-  manifest and only then lets it replace the previous tool-owned container,
-  whose ownership mark it checks (`CONTAINER_NOT_OWNED`). A failure before the
-  takeover restores the previous container (`RECOVERY_REFUSED` when it cannot).
-- Reference geometry is delivered in Unreal world space. The manifest's
-  optional `world.anchor` (`location_cm[3]`, `rotation_deg{roll, pitch, yaw}`)
-  is the primary target's placement when the export ran, identity when nothing
-  was paired, and the digest covers it. Maya places the container by the
-  inverse anchor so it shares the frame of the objects and the camera; a
-  manifest without `world.anchor` means identity. A target moved after the
-  export, or a changed `space_revision`, needs a new export and import: an
-  imported container keeps the anchor it was placed with and records it. When
-  a linkage `mode_state` names an anchor that differs from the recorded one
-  (translation above 0.01 cm or rotation above 0.01°), or the container records
-  none, Maya fails the transition with `REFERENCE_STALE` and keeps the old
-  reference; with no tool-owned container there is nothing to check.
+- `space_revision` changes when `A`, the unit or the mapping changes. An
+  in-flight group from an older revision is refused (`SPACE_REVISION_STALE`).
 
 ## Message reference
 
@@ -421,23 +430,18 @@ the container.
 
 | `type` | Payload | Notes |
 | --- | --- | --- |
-| `hello` | `version`, `host`, `maya_version`, `scene{linear_unit, unit_scale_cm, fps}`, `capabilities{linkage, reference, cache, model}` | first message of a connection |
+| `hello` | `version`, `host`, `maya_version`, `scene{linear_unit, unit_scale_cm, fps}`, `capabilities{linkage, cache, model}`; optional `plugin_version` | first message of a connection; `plugin_version` is the Maya component's release, shown when a protocol version is refused |
 | `init` | `version`, `revision`, `workflow`, `blendshapes_enabled`, `bones[[name, parent_index, transform]]` parent first (root parent `-1`), `curves[name]`, `object_id`, `set_revision`, `space_revision`, `set_objects` | one per object of the set, in `set_objects` order; an existing pairing must name the placed Binding Actor |
 | `frame` | `transforms`, `curves` for the primary, plus `objects[{object_id, transforms, curves}]` for the other object of a two-object set | one realtime sample of the whole set at one Maya time |
 | `cache_enter` | — | the connection enters cached ownership before capture |
 | `cache_begin` | `upload_id`, `revision`, `fps`, `start_frame`, `end_frame`, `frame_count`, `payload_size` | starts one upload |
 | `cache_frame` | `index`, `transforms`, `curves` | one captured pose, zero-based index |
 | `cache_end` | — | finishes the upload |
-| `cache_play` | `play_id` | accepted; not sent by the product |
-| `cache_stop` | — | accepted; not sent by the product |
 | `cache_clear` | `clear_id` | releases the cache; answered by `cache_cleared` |
-| `mode` | `session_id`, `mode_revision`, `mode`, `control`, `transition`, `detail` | Maya's authority statement after a transition; `transition` is `ready` or `failed` |
+| `mode` | `session_id`, `mode_revision`, `mode`, `control`, `transition`, `detail` | Maya's authority statement after a transition; `transition` is `ready` or `failed`; the combinations are in [Legal statements](#legal-statements) |
 | `group` | `session_id`, `set_revision`, `mode_revision`, `space_revision`, `eval_id`, `transport_serial`, `sample_serial`, `objects[{object_id, transforms, curves}]`, `camera{...}`, `time{maya_frame, ue_display_frame}` | one complete sample of the whole set answering one `camera_time` target |
 | `leave_linkage` | `session_id`, `mode_revision`, `target` (`realtime` or `end`), `detail` | Maya confirms it restored its own state |
 | `remove_object` | `session_id`, `object_id`, `set_revision`, `detail` | the user removes the second object; `set_revision` is the new set's revision (current + 1) and `object_id` must be `secondary` |
-| `reference_result` | `session_id`, `transfer_id`, `accepted`, `detail`, `counts{objects, triangles, bytes}`, `container` | outcome of a local handoff import, swap or removal |
-| `reference_removed` | `session_id`, `detail` | the user removed the tool-owned container |
-| `reference_query` | `session_id`, `transfer_id`, `scope` | reserved: Maya may ask for a handoff of a scope; the product ships the one-way flow (Unreal exports and offers) and does not send it |
 
 ### Unreal → Maya
 
@@ -445,7 +449,7 @@ the container.
 | --- | --- | --- |
 | `hello_ack` | `version`, `session_id`, `capabilities`, `targets[{object_id, kind, binding_path, generation}]`, `space{space_revision, anchor}` | `targets` lists the explicitly paired targets, primary first; empty until the user pairs |
 | `ready` | `revision`, `workflow`, `missing_in_unreal`, `missing_in_maya`, `bone_name_remaps`, `target_morph_count`, `accepted_morph_count`, `session_id`, `object_id`, `set_revision`, `space_revision` | negotiation result for one object |
-| `error` | `code`, `message`, `details`; `upload_id` and/or `play_id` for a cache error | a stable code from the table below; text is diagnostic only. A recoverable cache error carries the positive identity of the upload or play attempt it belongs to; each field is omitted when the error has none, including a refused stale `cache_clear` and structural errors (see [Cached playback](#cached-playback)) |
+| `error` | `code`, `message`, `details`, `kind`; `eval_id` and `sample_serial` for a refused `group`; `upload_id` and/or `play_id` for a cache error; `protocol_version` and `plugin_version` for `PROTOCOL_VERSION_MISMATCH` | a stable code from the table below; text is diagnostic only. `kind` is `scheduling` or `failure` (see [Error kinds](#error-kinds)). A recoverable cache error carries the positive identity of the upload or play attempt it belongs to; each field is omitted when the error has none, including a refused stale `cache_clear` and structural errors (see [Cached playback](#cached-playback)). The routing by `upload_id` and `play_id` does not depend on `kind`, `eval_id` or `sample_serial`. `protocol_version` and `plugin_version` name the refusing release (see [Version pairing](#version-pairing)) |
 | `cache_ready` | `upload_id`, `revision`, `frame_count` | the complete upload was accepted |
 | `cache_playing` | `upload_id`, `play_id`, `loop` | an attempt started; precedes its other outcomes |
 | `cache_progress` | `play_id`, `applied` | bounded progress of applied poses |
@@ -458,21 +462,20 @@ the container.
 | `cache_cleared` | `upload_id`, `play_id`, `clear_id` | echoes the identities that were dropped |
 | `camera_time` | `session_id`, `set_revision`, `mode_revision`, `space_revision`, `eval_id`, `eval_serial`, `transport_serial`, `frame_serial`, `time{display_frame, source_frame, seconds, tick, display_rate{n,d}, tick_resolution{n,d}, playback_range{start,end}}`, `camera{...}`, `gate{...}`, `cut{stage, name}` | the current linkage target |
 | `applied` | `session_id`, `mode_revision`, `eval_id`, `sample_serial`, `applied`, `applied_display_frame`, `lag_seconds`, `components[{object_id, bones, morphs, parts}]`, `reason` | completion evidence for the whole set |
-| `mode_state` | `session_id`, `mode_revision`, `mode`, `control`, `detail`; `anchor{location_cm[3], rotation_deg{roll, pitch, yaw}}` when `mode` is `linkage` | Unreal's authority statement; a linkage statement names the takeover's static anchor in the shape of the manifest's `world.anchor` |
+| `mode_state` | `session_id`, `mode_revision`, `mode`, `control`, `detail`; `anchor{location_cm[3], rotation_deg{roll, pitch, yaw}}` when `mode` is `linkage` | Unreal's authority statement, with `mode` and `control` paired as in [Legal statements](#legal-statements); a linkage statement names the takeover's static anchor `A` (see [Space](#space)) |
 | `object_removed` | `session_id`, `object_id`, `set_revision`, `restored`, `detail` | Unreal removed the second object (asked by Maya or by the Unreal user) and confirms the new set revision; `restored: false` names the residual and is followed by `RECOVERY_REFUSED`, which ends the connection |
-| `reference_offer` | `session_id`, `transfer_id`, `directory`, `manifest_digest`, `scope{level, sublevels, completeness, unloaded_sublevels}`, `space_revision`, `counts{objects, triangles, bytes}` | a finished local handoff the user may import |
 
 ## Rejection codes
 
 Codes are stable; the message text is diagnostic only. Unless a row says
 otherwise, a negotiation or structural failure closes the connection, while
-linkage, removal, reference and cache refusals answer that one message and keep
-it.
+linkage, removal and cache refusals answer that one message and keep
+it. A message whose `type` is not defined is always a structural failure.
 
 | Code | Trigger |
 | --- | --- |
-| `PROTOCOL_VERSION_MISMATCH` | version field or `hello` version differs |
-| `INVALID_MESSAGE` | malformed shape or framing, invalid UTF-8, non-finite number, wrong length, duplicate id, partial or unknown object set; a dropped realtime frame keeps the connection |
+| `PROTOCOL_VERSION_MISMATCH` | version field or `hello` version differs, or Maya receives a `hello_ack` of another `version`; the `error` Unreal sends names its `protocol_version` and `plugin_version` |
+| `INVALID_MESSAGE` | malformed shape or framing, invalid UTF-8, non-finite number, wrong length, duplicate id, partial or unknown object set, an undefined `type`, a value the protocol does not define for a known field, a `mode` that its `control` or `transition` does not pair with; a dropped realtime frame keeps the connection, and so does an illegal `mode` |
 | `SECOND_CLIENT_REJECTED` | a second Maya connects while one is connected |
 | `NO_BINDING_ACTOR`, `MULTIPLE_BINDING_ACTORS` | no placed Binding Actor, or several without an explicit pairing |
 | `SKELETON_MISMATCH` | the Maya bones cannot drive the required Unreal bones of every enabled display |
@@ -488,18 +491,13 @@ it.
 | `OBJECT_SET_UNSUPPORTED` | the set is larger than `max_set_objects`, or the workflow (Model, Cached Playback) keeps the single-character contract |
 | `MODE_CONFLICT` | the requested transition contradicts the current mode or revision |
 | `CACHE_NOT_CLEARED` | linkage requested while a cache is still owned |
-| `SET_REVISION_STALE` | message names an older object set |
+| `SET_REVISION_STALE` | message names another object set than the current one; an older group of a set a removal closed is `scheduling`, a newer one or a wrongly numbered `remove_object` is a `failure` |
 | `SPACE_REVISION_STALE` | message names an older common space |
 | `EVAL_STALE` | group answers a cancelled or superseded target |
 | `LINKAGE_APPLY_FAILED` | Unreal could not display a group on every display of the set |
 | `LINKAGE_NOT_ACTIVE` | a linkage-only message arrived in another mode |
 | `RESOURCE_LIMIT` | message or group exceeds a frozen budget |
-| `REFERENCE_STALE` | the offered manifest belongs to an older space revision, or the imported reference was placed for another anchor than the linkage target's |
-| `REFERENCE_DIGEST_MISMATCH` | the directory content does not match the offered digest |
-| `REFERENCE_IMAGE_DATA` | the handoff delivers image data |
-| `REFERENCE_OVER_BUDGET` | file, object or triangle budget exceeded |
-| `CONTAINER_NOT_OWNED` | a node under the container name lacks the ownership mark |
-| `RECOVERY_REFUSED` | a previous reference or writer state cannot be restored safely; for a removal it ends the connection |
+| `RECOVERY_REFUSED` | a previous writer state cannot be restored safely; for a removal it ends the connection |
 | `CACHE_METADATA_INVALID` | `cache_begin` declares an invalid range, rate, count or size |
 | `CACHE_PAYLOAD_TOO_LARGE` | declared or metered bytes, or predicted parsed memory, exceed the budget |
 | `CACHE_FRAME_INDEX_INVALID` | a `cache_frame` index is negative or not the next expected index |
@@ -511,20 +509,49 @@ it.
 | `CACHED_PLAYBACK_PERFORMANCE` | a pose missed its window or the run exceeded its duration bound |
 | `INTERNAL_ERROR` | the Unreal Live Link client is unavailable |
 
+### Error kinds
+
+Every `error` Unreal sends names its `kind`, and a receiver decides between
+the two values by this field alone: neither `code` nor the text decides.
+
+| `kind` | Meaning | Maya |
+| --- | --- | --- |
+| `scheduling` | Unreal refused a `group` that its own scheduling made obsolete. Exactly five gates are scheduling: a group that arrives during a mode transition (`MODE_CONFLICT`), a group that arrives while another host owns time (`LINKAGE_NOT_ACTIVE`), a group of an older mode revision (`MODE_CONFLICT`), a group of an older set revision (`SET_REVISION_STALE`) and a group answering a cancelled or superseded target (`EVAL_STALE`). It never closes the connection | counts the refusal, shows no error and does not record it as the reason a connection ends; frees the issued sample when `eval_id` and `sample_serial` name it |
+| `failure` | every other error, including the same codes where the group is ahead of the session (a newer mode or set revision) | reports it, and a failure that closes the connection is the reason the connection ended |
+
+An error that refuses a parsed `group` also carries that group's `eval_id`
+(string) and `sample_serial` (integer), whatever its kind. Maya's issued sample
+is released only when both match it. A missing `kind` reads as `failure` (an
+earlier peer's `PROTOCOL_VERSION_MISMATCH` carries neither `kind` nor the
+release fields); a `kind` that is neither value, or is not a string, is
+`INVALID_MESSAGE` and ends the connection. Unreal only sends `kind`, `eval_id`
+and `sample_serial`.
+
 ## Conformance corpus
 
-`conformance.json` (`schema_version` 1, `protocol_version` 11) is executed by
+`conformance.json` (`schema_version` 1, `protocol_version` 12) is executed by
 the Maya unit tests and, through the generated `.inl`, by the Unreal
 Automation tests. Each case names its `operation`, the hosts it `applies_to`,
 exactly one input (`payload`, `payloads`, `raw_utf8` or `raw_hex`), any
 pre-state it runs against (`linkage`, `negotiated_set`, `negotiated_revision`,
 `session`) and the `expected` outcome: `accepted`, `close`, the stable
-`error_code` of a rejection and diagnostic `keywords`. A resource case names
+`error_code` of a rejection, the `kind` of the `error` Unreal answers a
+rejected `group` with, and diagnostic `keywords`. The operation `unknown_type`
+is a message whose `type` the protocol does not define. Unreal judges a
+`group` case with a real linkage session over paired Binding actors and
+captures the `error` it sends. A case may add `expected.peer_versions`, the
+release Maya shows of the peer: `plugin_version` (string) and
+`protocol_version` (integer), each `null` when the message does not provide
+it. Only Maya judges it, on an accepted `PROTOCOL_VERSION_MISMATCH` `error` or
+a refused `hello_ack`; the generator rejects it anywhere else. The corpus holds
+no value that depends on the product version: Unreal judges the `error` that
+refuses an earlier-version `hello`, `init` or `cache_begin` by the protocol it
+implements and the plugin version it loaded. A resource case names
 one `limits` key and a measured size above it instead of carrying the
 oversized payload. The corpus covers framing, negotiation, realtime frames,
 the cache upload and its outcomes, identity staleness, the object set and its
 removal, linkage transitions, groups and applied evidence, resources, an
-earlier-version `init`, `frame` and `cache_begin`, and the reference handoff.
+earlier-version `hello`, `init`, `frame`, `cache_begin` and `hello_ack`.
 The cancelled-target and paused-resample refusals are pinned by the linkage
 unit tests on both hosts rather than by a corpus case.
 

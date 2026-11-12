@@ -5,19 +5,17 @@
 MtoU_LiveLink connects Maya to Unreal Editor on the same computer so you can
 preview character animation, BlendShapes, and garment changes in Unreal while
 working in Maya. It supports real-time preview and cached animation playback,
-follows a Level Sequence's camera and time in Maya, adds a second skeletal
-object beside the main character, and imports an Unreal level as reference
-geometry in Maya, without creating animation or preview assets.
+follows a Level Sequence's camera and time in Maya, and adds a second skeletal
+object beside the main character, without creating animation or preview assets.
 
 ## Compatibility
 
 - Windows 64-bit
 - Autodesk Maya 2024 (current workflow); Maya 2022.4 remains supported
 - Stock Unreal Editor 5.7.4
-- Topia Engine 5.7.4 (plugin build and editor loading verified)
 - Editor use only; Play In Editor (PIE) is not supported.
 
-Compatibility with other third-party Unreal Engine 5.7 builds is not guaranteed.
+Compatibility with modified or third-party Unreal Engine 5.7 builds is not guaranteed.
 Install the Maya and Unreal components from the same release.
 
 ## Installation
@@ -50,7 +48,7 @@ earlier version, restart Maya when prompted.
 
 1. Copy `unreal/MtoULiveLink/` (or the `MtoULiveLink` folder of the Unreal
    archive) to `<Project>/Plugins/MtoULiveLink/`.
-2. Compile the Unreal project. For Topia Engine, use the instructions below.
+2. Compile the Unreal project.
 3. Enable **Live Link** and **MtoU_LiveLink**, then restart Unreal Editor.
 
 **Upgrade, rollback and removal**
@@ -68,35 +66,6 @@ End the current session first, then:
 - Remove the Maya component: delete `MtoULiveLink.mod` and any
   `MtoULiveLink` folder from the `modules` folder of the user Maya directory,
   delete the MtoU shelf button, then restart Maya.
-
-### Topia Engine 5.7.4
-
-**Recommended: double-click wizard (Windows, Chinese UI)**
-
-Close Unreal Editor and ensure the source plugin is installed at the project's
-`Plugins/MtoULiveLink` directory.
-Double-click `tools/build_mtou_topia_gui.cmd`, select the project `.uproject`, then
-the company engine's `Engine/Binaries/Win64/UnrealEditor.exe`. Check the displayed
-paths and click OK. Wait for the success message before opening the project.
-On failure, share the console error and `Build log` path with a technical teammate.
-If a compiler or SDK is missing, ask a technical teammate to configure
-it or supply a plugin already compiled for the same company engine version.
-After compilation, the tool replaces the target plugin's build outputs.
-To copy the wizard separately, keep `build_mtou_topia_gui.cmd`,
-`build_mtou_topia_gui.ps1`, and `build_mtou_topia.ps1` in the same folder.
-
-**Command-line alternative**: Close Unreal Editor. Set `TOPIA_ENGINE_ROOT` to the directory containing
-`Engine` and `ATHENA_UPROJECT` to your target `.uproject`, then run this command
-from the repository root:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/build_mtou_topia.ps1 `
-  -EngineRoot $env:TOPIA_ENGINE_ROOT `
-  -ProjectFile $env:ATHENA_UPROJECT `
-  -Apply
-```
-
-Omit `-Apply` to check the paths and preview the installation first.
 
 ## Prepare your character
 
@@ -148,8 +117,8 @@ on the Binding. All enabled parts pose and display under one connection:
    and connection states plus the next step), **角色组成** (Primary and expandable
    Additional Parts), and **预览控制** (Binding and generated mesh asset fields,
    Refresh, Delete, and cache playback). Expand **高级设置与诊断** for the full
-   selectable report; **复制完整诊断** copies it, including the linkage and
-   scene-reference details, for a problem report. An empty diagnostic does not
+   selectable report; **复制完整诊断** copies it, including the linkage
+   details, for a problem report. An empty diagnostic does not
    occupy the daily view.
    The connection reads 未连接 before the first session, 已连接 while streaming,
    and 连接已中断 after a session ends; reconnect in Maya after an interruption.
@@ -160,7 +129,7 @@ on the Binding. All enabled parts pose and display under one connection:
    on the left; bone/BlendShape counts and cache on the right; a long name is
    shortened, hover it for the full name), Preview & Playback (preview mode,
    transmission cap, and cache actions in Cached Playback), Camera Linkage (one
-   status line, the linkage buttons, and the scene-reference window), Tools
+   status line and the linkage buttons), Tools
    (Display and duplicate-bone selection), and Diagnostics (status and
    诊断详情, whose **复制完整诊断** copies the whole report). The warning switch
    sits below Diagnostics.
@@ -236,9 +205,10 @@ comparison work without it.
 While linkage is active, a camera edit, a pause, a cut or an explicit jump
 cancels the old target; a continuously moving camera never cancels the answer
 already on its way. Unreal refuses a target whose writers cannot be isolated
-safely, and names the reason, instead of pausing the whole sequence. Cached
-Playback must be cleared before entering linkage. A failed restore appears on
-both hosts only when it happens (恢复失败 in Maya, 恢复未完成 in Unreal):
+safely, and names the reason, instead of pausing the whole sequence. During
+Cached Playback **进入联动** is unavailable on both hosts: click **实时** in Maya,
+and it becomes available once Unreal confirms the cache was cleared. A failed
+restore appears on both hosts only when it happens (恢复失败 in Maya, 恢复未完成 in Unreal):
 open Maya's 诊断详情 or Unreal's **高级设置与诊断** for the resources that were
 not restored, restore them by hand (for example unlock the camera or reset the
 time range in Maya, or check the track in the Sequencer), or reopen the level.
@@ -281,39 +251,6 @@ workflow support one character: remove the second object first. If removing
 the object cannot restore its tracks, the connection ends and both hosts name
 what to restore by hand.
 
-## Scene reference in Maya
-
-Unreal can export an explicit level scope as static reference geometry so Maya
-shows the same surroundings. The reference is a display aid: no preview
-workflow requires it, and the handoff never delivers image data.
-
-1. In Unreal, choose the level and the sublevels to include under **场景参考**
-   and run the export. Unreal reports the result, for example 已导出 152 个对象，
-   可在 Maya 导入, and says when a requested sublevel was not loaded. Pair the
-   target first (see camera linkage) so the reference lines up with it.
-2. In Maya, click **打开场景参考窗口** on the main panel's **镜头联动** card. The
-   window shows the source level and sublevels, the size (for example 152 个对象，
-   约 120 万三角面) and whether the handoff is 可导入, 已导入 (with the time) or
-   已过期 and needs a new export from Unreal. Click **导入/更新参考**: Maya
-   validates the handoff and its size budgets before it touches the scene,
-   imports into its own container, and states the result in one sentence.
-   Discarded nodes, rollback and leftovers are listed only when an import fails.
-   The handoff identity, digest, space revision and budgets are in 诊断详情.
-3. **移除参考** deletes only that container; **恢复上次更新** finishes or
-   discards an interrupted update. If you parented one of your own objects under
-   the reference, or created one in its `MtoU_UE_SceneRef` namespace, the update
-   and the removal are refused and name it: move it out of the reference and that
-   namespace, then try again.
-
-The reference is placed in the same frame as the character and the linked
-camera, so it follows a moved or rotated target. The placement is the paired
-target's position when Unreal exports. Export and import again after moving or
-rotating the target, and for any reference exported by an earlier version; if
-the status line says the manifest carried no anchor, the reference sits at the
-Maya origin until you do. Camera linkage does not start while the imported
-reference belongs to another placement (场景参考属于旧的共同空间): export and
-import it again, or click **移除参考** to continue without it.
-
 ## Garment model preview
 
 1. On the Unreal Binding, assign the garment **Preview Static Mesh**.
@@ -337,16 +274,20 @@ import it again, or click **移除参考** to continue without it.
 | --- | --- |
 | Maya reports an incomplete MtoU_LiveLink install | The message names the missing file. Extract the whole Maya component again, drag its `install.mel` into a Maya viewport, then restart Maya. |
 | The MtoU button still opens the earlier version after installation | The current Maya session had already loaded the earlier version; restart Maya. |
+| Maya reports 连接失败 · 插件协议版本不匹配 | The dialog lists the plugin and protocol version that the Maya component and Unreal each have loaded; an item the other side did not provide reads 未知（对端未提供）. Install both components again from one release, restart Maya and Unreal, then connect. If Maya only shows the earlier text "Maya 与 UE 插件版本不匹配", its Maya component is older: search Unreal's Output Log for "another protocol version", where one warning names both sides' plugin and protocol versions. |
 | Skeleton mismatch | Start from the reported root cause: the first unmapped Maya path and parent, the blocked Maya and unreached Unreal counts, and any suggested import rename. When the details report that one required bone is claimed by two Maya bones, rename one of them in Maya. Then check the selected Maya root, the hierarchy, and whether the Unreal Driver mesh is up to date. |
 | An Additional Part is rejected | The diagnostics name the part and the reason. Check the shared **Skeleton** asset, the reported required bones and their parent chains in Maya, and the shared reference poses. If skin weights cannot be read, rebuild or reimport the mesh with CPU skin data available. |
 | Preview refresh fails | Check mesh alignment and separate garment/body material slots. Correct the reported issue and refresh again. |
 | Auto garment selection rejects an intentionally reduced mesh | Inspect the source for duplicates or mixed garment/body slots. If the reduction is intentional, set **Driver Garment Slot Override** on the Binding to the garment's separate slots, then refresh and inspect the result. |
 | BlendShapes do not appear | Check **Transfer BS**, matching names, the selected outfit, and the connection diagnostics. Refresh the Model preview after changing its source assets. |
 | Camera linkage often shows Maya 跟不上 with a lag | In Maya open **Windows > Settings/Preferences > Plug-in Manager** (Chinese UI: **窗口 > 设置/首选项 > 插件管理器**), clear **Auto load** for the plug-ins you do not use, for example MASH, XGen (`xgenToolkit`), GPU Cache, Scene Assembly, LookdevX and Type, then restart Maya. Plug-ins a scene needs are still loaded when you open it. |
-| Connection ends after a change | Reconnect after changing the outfit, mode, **Transfer BS**, or the character parts. Refreshing also disconnects the session. After changing or reimporting the Primary Driver or the Preview Static Mesh, or changing **Driver Garment Slot Override**, refresh the Model preview and reconnect. Undo/Redo of these changes follows the same rule. |
+| Connection ends after a change | Reconnect after changing the outfit, mode, **Transfer BS**, or the character parts. Only refreshing an actor that takes part in the connection disconnects it; while Maya is still connecting and the object set is being negotiated, a change to any Binding Actor ends that connection and you reconnect. After changing or reimporting the Primary Driver or the Preview Static Mesh, or changing **Driver Garment Slot Override**, refresh the Model preview and reconnect. Undo/Redo of these changes follows the same rule. |
 
-Keep the Binding Actor and its level loaded while previewing; deleting the actor
-or unloading its level ends the connection.
+Keep the Binding Actor that takes part in the connection and its level loaded
+while previewing; deleting that actor or unloading its level ends the connection.
+Placing, refreshing or deleting a Binding Actor that does not take part does not,
+except while Maya is still connecting and the object set is being negotiated: then a
+change to any Binding Actor ends that connection, so reconnect.
 
 ## License
 

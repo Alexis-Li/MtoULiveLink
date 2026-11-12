@@ -46,6 +46,26 @@ void NoteQueuePeak(TAtomic<int32>& Peak, int32 Value)
     {
     }
 }
+
+/**
+ * The worker refused a connection over its protocol version. This is the one
+ * place that holds both releases: a Maya component of another release may be
+ * too old to show Unreal's, so the Output Log names them both. An item the
+ * peer did not provide reads "unknown".
+ */
+void LogVersionRefusal(int32 MayaProtocolVersion, const FString& MayaPluginVersion)
+{
+    const auto Release = [](const FString& Version)
+    {
+        return Version.IsEmpty() ? FString(TEXT("unknown")) : Version;
+    };
+    UE_LOG(LogMtoULiveLinkSource, Warning,
+        TEXT("Refused a connection of another protocol version. Maya: plugin %s, protocol %d. "
+             "Unreal: plugin %s, protocol %d. Install both components from one release and "
+             "restart Maya and Unreal."),
+        *Release(MayaPluginVersion), MayaProtocolVersion,
+        *Release(FMtoUProtocol::PluginVersionName()), FMtoUProtocol::Version);
+}
 }
 
 namespace
@@ -92,17 +112,26 @@ void CloseSocket(ISocketSubsystem& SocketSubsystem, FSocket*& Socket)
     }
 }
 
-bool SendPacket(FSocket& Socket, const TArray<uint8>& Packet, const TAtomic<bool>& bStopping)
+// A failed send is retried only while the socket cannot take more bytes yet;
+// any other error means the peer reset or aborted the connection. The
+// connection state cannot tell: it reports a reset socket as connected for
+// seconds after its last activity, and again whenever the socket polls ready.
+bool SendPacket(
+    ISocketSubsystem& SocketSubsystem,
+    FSocket& Socket,
+    const TArray<uint8>& Packet,
+    const TAtomic<bool>& bStopping)
 {
     int32 Offset = 0;
     while (Offset < Packet.Num() && !bStopping.Load())
     {
         int32 Sent = 0;
-        if (Socket.Send(Packet.GetData() + Offset, Packet.Num() - Offset, Sent) && Sent > 0)
+        const bool bSent = Socket.Send(Packet.GetData() + Offset, Packet.Num() - Offset, Sent);
+        if (bSent && Sent > 0)
         {
             Offset += Sent;
         }
-        else if (Socket.GetConnectionState() != SCS_Connected)
+        else if (!bSent && SocketSubsystem.GetLastErrorCode() != SE_EWOULDBLOCK)
         {
             return false;
         }
@@ -128,12 +157,13 @@ bool IsPlacedEditorActor(const AMtoULiveLinkActor& Actor)
     return World && World->WorldType == EWorldType::Editor;
 }
 
-TAtomic<uint64> GStreamingSessionEndRequests{0};
 TWeakPtr<FMtoULiveLinkSource> GActiveSource;
 #if WITH_DEV_AUTOMATION_TESTS
 // Test-only hold on worker disconnect cleanup (see header). Defaults off, so
 // production and ordinary automation never observe it.
 TAtomic<bool> GDeferStreamingSessionEndCleanup{false};
+// Test-only record of the actors that ask for a session end (see header).
+TFunction<void(const AMtoULiveLinkActor&)> GStreamingSessionEndProbe;
 #endif
 }
 
@@ -160,82 +190,30 @@ TWeakPtr<FMtoULiveLinkSource> MtoUGetActiveLinkageSource()
     return GActiveSource;
 }
 
-FMtoUCachePlaybackView MtoUGetActorCachePlaybackView(const AMtoULiveLinkActor& Actor)
+void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester)
 {
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
+    check(IsInGameThread());
+#if WITH_DEV_AUTOMATION_TESTS
+    if (GStreamingSessionEndProbe)
     {
-        return Source->GetActorCachePlaybackView(Actor);
+        GStreamingSessionEndProbe(Requester);
     }
-    return FMtoUCachePlaybackView();
-}
-
-bool MtoUStartActorCachedPlayback(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
+#endif
+    if (const TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
     {
-        return Source->StartActorCachedPlayback(Actor);
+        Source->RequestStreamingSessionEnd(Requester);
     }
-    return false;
-}
-
-bool MtoUStopActorCachedPlayback(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->StopActorCachedPlayback(Actor);
-    }
-    return false;
-}
-
-bool MtoUPauseActorCachedPlayback(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->PauseActorCachedPlayback(Actor);
-    }
-    return false;
-}
-
-bool MtoUResumeActorCachedPlayback(const AMtoULiveLinkActor& Actor)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->ResumeActorCachedPlayback(Actor);
-    }
-    return false;
-}
-
-bool MtoUSeekActorCachedPlayback(const AMtoULiveLinkActor& Actor, int32 SourceFrame)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->SeekActorCachedPlayback(Actor, SourceFrame);
-    }
-    return false;
-}
-
-bool MtoUSetActorCachedLoop(const AMtoULiveLinkActor& Actor, bool bEnabled)
-{
-    if (TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
-    {
-        return Source->SetActorCachedLoop(Actor, bEnabled);
-    }
-    return false;
-}
-
-void MtoURequestStreamingSessionEnd()
-{
-    ++GStreamingSessionEndRequests;
-}
-
-uint64 MtoUGetStreamingSessionEndCount()
-{
-    return GStreamingSessionEndRequests.Load();
 }
 #if WITH_DEV_AUTOMATION_TESTS
 void MtoUSetDeferStreamingSessionEndCleanup(bool bDefer)
 {
     GDeferStreamingSessionEndCleanup.Store(bDefer);
+}
+
+void MtoUSetStreamingSessionEndProbe(TFunction<void(const AMtoULiveLinkActor& Requester)> Probe)
+{
+    check(IsInGameThread());
+    GStreamingSessionEndProbe = MoveTemp(Probe);
 }
 
 namespace
@@ -261,12 +239,13 @@ void MtoUNotifyEditorWorldCleanup(UWorld* World, bool bSessionEnded, bool bClean
     {
         return;
     }
+    // Each Binding actor of the world asks like any other requester, so a
+    // session that streams none of them keeps running.
     for (TObjectIterator<AMtoULiveLinkActor> It; It; ++It)
     {
         if (!It->HasAnyFlags(RF_ClassDefaultObject) && It->GetWorld() == World)
         {
-            MtoURequestStreamingSessionEnd();
-            return;
+            MtoURequestStreamingSessionEnd(**It);
         }
     }
 }
@@ -298,7 +277,53 @@ FMtoULiveLinkSource::FMtoULiveLinkSource(uint16 InPort)
     {
         SendLinkageControlPacketOnGameThread(MoveTemp(Packet), bControl);
     };
+    // Every entry, from the editor or from Maya, is refused before any writer
+    // is borrowed while Cached Playback holds the connection. Both wire and
+    // editor entries reach this guard after Source applies earlier controls.
+    LinkageSession.EntryGuard = [this](FString& OutCode, FString& OutError)
+    {
+        if (CacheSession.GetState() == EMtoUCacheState::Idle)
+        {
+            return true;
+        }
+        OutCode = TEXT("CACHE_NOT_CLEARED");
+        OutError = TEXT("Cached Playback holds the connection; return to realtime in Maya and wait for the cache to clear.");
+        return false;
+    };
     StartListener();
+}
+
+bool FMtoULiveLinkSource::RequestLinkageEnter(int32 ModeRevision, FString& OutError)
+{
+    FString ErrorCode;
+    return RequestLinkageEnter(ModeRevision, OutError, ErrorCode);
+}
+
+bool FMtoULiveLinkSource::RequestLinkageEnter(int32 ModeRevision, FString& OutError, FString& OutCode)
+{
+    check(IsInGameThread());
+    // Revalidate mode and revision AFTER queued peer controls, before starting
+    // BeginTakeover. Draining from its guard would reenter an in-progress mode.
+    LeavesTakenBeforeUpdate += DrainTimeControlsOnGameThread();
+    return LinkageSession.RequestEnter(ModeRevision, OutError, OutCode);
+}
+
+FMtoUTimeControlView FMtoULiveLinkSource::GetTimeControlView() const
+{
+    const FMtoULinkageView Linkage = LinkageSession.GetView();
+    FMtoUTimeControlView View;
+    View.bTransitioning = Linkage.bTransitioning;
+    View.bTakeoverHeld = Linkage.bTakeoverHeld;
+    View.ModeRevision = Linkage.Identity.ModeRevision;
+    if (CacheSession.GetState() != EMtoUCacheState::Idle)
+    {
+        View.Authority = EMtoUTimeAuthority::Cache;
+    }
+    else if (Linkage.Mode == TEXT("linkage"))
+    {
+        View.Authority = EMtoUTimeAuthority::Sequence;
+    }
+    return View;
 }
 
 FMtoULiveLinkSource::~FMtoULiveLinkSource()
@@ -353,9 +378,9 @@ bool FMtoULiveLinkSource::StopActorCachedPlayback(const AMtoULiveLinkActor& Acto
     return Transition.bAccepted;
 }
 
-// The four interactive actions below exist only on this Binding actor, unlike
-// play/stop which Maya can also send. A refused one therefore stays a local
-// prompt in the actor row and is never reported to Maya as a peer outcome.
+// The interactive actions below exist only on this Binding actor: Maya sends no
+// playback command. A refused one therefore stays a local prompt in the actor
+// row and is never reported to Maya as a peer outcome.
 bool FMtoULiveLinkSource::PauseActorCachedPlayback(const AMtoULiveLinkActor& Actor)
 {
     if (!GetActorCachePlaybackView(Actor).CanPause())
@@ -440,68 +465,12 @@ void FMtoULiveLinkSource::Update()
     // Maya's leave_linkage messages this update takes off the intake queue;
     // the worker drops frames behind them until the mirror below shows what
     // they did.
-    int32 LeavesTaken = 0;
+    int32 LeavesTaken = LeavesTakenBeforeUpdate;
+    LeavesTakenBeforeUpdate = 0;
     uint64 DisconnectedSession = 0;
     while (DisconnectedSessions.Dequeue(DisconnectedSession))
     {
-        if (DisconnectedSession == GameThreadSession)
-        {
-            SetEditorViewportRealtimeOverride(false);
-            HoldLinkageDisplaysOnGameThread(false);
-            RestoreGeneration.Reset();
-            if (Client && SourceGuid.IsValid())
-            {
-                for (const FMtoUSessionObject& Object : SessionObjects)
-                {
-                    Client->RemoveSubject_AnyThread(Object.SubjectKey);
-                }
-            }
-            for (const TWeakObjectPtr<AMtoULiveLinkActor>& Actor : ParticipatingActors)
-            {
-                if (Actor.IsValid())
-                {
-                    Actor->ReleaseLiveLinkSubject();
-                    Actor->ReapplyDisplayTarget();
-                    Actor->SetConnectionStatus(TEXT("Disconnected"));
-                    Actor->NoteSessionEnded();
-                }
-            }
-            GameThreadSession = 0;
-            SessionObjects.Reset();
-            SetObjects.Reset();
-            PendingApplication.Reset();
-            NegotiatedSetRevision = 0;
-            NegotiatedSpaceRevision = 1;
-            // Every borrowed writer is restored per resource and the linkage
-            // state returns to realtime; a new connection negotiates again.
-            LinkageSession.EndSession();
-            {
-                FScopeLock Lock(&PendingMutex);
-                FMtoUPendingHello Hello;
-                while (PendingHellos.Dequeue(Hello))
-                {
-                    QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
-                }
-                FMtoUPendingLinkageControl Control;
-                while (PendingLinkageControls.Dequeue(Control))
-                {
-                    QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
-                    if (Control.Kind == FMtoUPendingLinkageControl::EKind::LeaveLinkage)
-                    {
-                        ++LeavesTaken;
-                    }
-                }
-                FMtoUPendingPoseGroup Group;
-                while (PendingPoseGroups.Dequeue(Group))
-                {
-                    QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
-                }
-            }
-            // The transient cache and its upload/play identity history are
-            // scoped to one negotiated streaming session; a newer connection
-            // starts its own fresh sequence at 1.
-            CacheSession.EndSession();
-        }
+        EndStreamingSessionOnGameThread(DisconnectedSession);
     }
 
     // The greeting is answered before any object is negotiated, so the intake
@@ -517,24 +486,13 @@ void FMtoULiveLinkSource::Update()
     }
     for (FMtoUPendingInit& Init : Inits)
     {
-        if (!IsCurrentSession(Init.SessionId))
+        // An init of a session the worker left, or one an end request already
+        // closed (an explicit refresh replaces the display right after it),
+        // never negotiates; only a newer session may stream the newer
+        // revision.
+        if (!IsCurrentSession(Init.SessionId) || Init.SessionId == EndedSession)
         {
             continue;
-        }
-        // An explicit refresh increments the termination counter before
-        // replacing the display. An init queued for the replaced session must
-        // never negotiate after the refresh started; only a new session id
-        // may establish a new epoch and stream the newer revision.
-        const bool bStaleInitForReplacedSession = Init.SessionId == GameThreadSession
-            && GameThreadSession != 0
-            && MtoUGetStreamingSessionEndCount() != GameThreadSessionEndEpoch;
-        if (bStaleInitForReplacedSession)
-        {
-            continue;
-        }
-        if (Init.SessionId != GameThreadSession)
-        {
-            GameThreadSessionEndEpoch = MtoUGetStreamingSessionEndCount();
         }
         GameThreadSession = Init.SessionId;
         // A refused object ends the whole set: the rest of its inits are not
@@ -544,7 +502,8 @@ void FMtoULiveLinkSource::Update()
             break;
         }
     }
-    HandleCacheCommandsOnGameThread();
+    LeavesTaken += DrainTimeControlsOnGameThread();
+    TickCacheOnGameThread();
 
     // A display of the set evaluates only its subject: a Sequencer restoring
     // what a muted track saved before the takeover (an earlier anim instance
@@ -570,7 +529,6 @@ void FMtoULiveLinkSource::Update()
     // Linkage intake and pump: the control messages and the staged pose groups
     // follow the greeting, and the camera/time pump asks the editor for the
     // current target on its bounded cadence.
-    LeavesTaken += DrainLinkageControlsOnGameThread();
     {
         // A confirmed removal of the second object runs before any group of
         // the old set is staged, so none of them is published any more.
@@ -603,10 +561,11 @@ void FMtoULiveLinkSource::Update()
     {
         WorkerLinkageLeavesPending -= LeavesTaken;
     }
-    if (LinkageSession.ConsumeSessionEndRequest())
+    if (const int32 FailedRestoreSession = LinkageSession.ConsumeSessionEndRequest())
     {
-        // A failed restore ended the session rather than hiding the residual.
-        MtoURequestStreamingSessionEnd();
+        // A failed restore ended the session rather than hiding the residual;
+        // it ends the session whose restore failed and no other.
+        RequestSessionEndOnGameThread(static_cast<uint64>(FailedRestoreSession));
     }
 
     // While a cache owns this session, ordinary live frames must neither
@@ -692,19 +651,153 @@ void FMtoULiveLinkSource::StopListener()
     SetStatus(TEXT("Stopped"));
     if (IsInGameThread())
     {
+        // The worker is gone, so no session is current any more: the end
+        // contract runs for what the game thread still holds, without any
+        // reply and without touching the Live Link client, which may be
+        // invalid by now. The editor module has already handed the writers
+        // back and cleared its hooks when the editor closes.
+        const int32 GreetedSession = LinkageSession.GetSessionId();
+        EndStreamingSessionOnGameThread(GameThreadSession, true);
+        if (GreetedSession > 0)
+        {
+            EndStreamingSessionOnGameThread(static_cast<uint64>(GreetedSession), true);
+        }
+        EndedSession = 0;
         CacheSession.EndSession();
         HoldLinkageDisplaysOnGameThread(false);
         SetEditorViewportRealtimeOverride(false);
-        for (const TWeakObjectPtr<AMtoULiveLinkActor>& Actor : ParticipatingActors)
-        {
-            if (Actor.IsValid())
+    }
+}
+
+void FMtoULiveLinkSource::RequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester)
+{
+    check(IsInGameThread());
+    uint64 Target = 0;
+    {
+        FScopeLock Lock(&PendingMutex);
+        Target = CurrentWorkerSession;
+    }
+    // No session is current: nothing to end, and nothing may be left behind
+    // that could end a later one.
+    if (Target == 0)
+    {
+        return;
+    }
+    // Until the object set is negotiated, any Binding actor may change what
+    // the negotiation reads, so any request ends it. Afterwards the session
+    // streams its participating actors only; the others come and go freely.
+    const bool bNegotiated = GameThreadSession == Target
+        && !SetObjects.IsEmpty()
+        && SessionObjects.Num() == SetObjects.Num();
+    if (bNegotiated)
+    {
+        const bool bParticipates = ParticipatingActors.ContainsByPredicate(
+            [&Requester](const TWeakObjectPtr<AMtoULiveLinkActor>& Participant)
             {
-                Actor->ReleaseLiveLinkSubject();
-                Actor->ReapplyDisplayTarget();
-                Actor->SetConnectionStatus(TEXT("Disconnected"));
-                Actor->NoteSessionEnded();
+                return Participant.GetEvenIfUnreachable() == &Requester;
+            });
+        if (!bParticipates)
+        {
+            return;
+        }
+    }
+    RequestSessionEndOnGameThread(Target);
+}
+
+void FMtoULiveLinkSource::RequestSessionEndOnGameThread(uint64 SessionId)
+{
+    check(IsInGameThread());
+    if (SessionId == 0 || SessionId == EndedSession || !IsCurrentSession(SessionId))
+    {
+        return;
+    }
+    EndedSession = SessionId;
+    SessionEndRequests.Enqueue(SessionId);
+}
+
+void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool bListenerStopped)
+{
+    check(IsInGameThread());
+    if (SessionId == 0)
+    {
+        return;
+    }
+    const bool bNegotiated = GameThreadSession == SessionId;
+    const bool bGreeted = LinkageSession.GetSessionId() == static_cast<int32>(SessionId);
+    if (!bNegotiated && !bGreeted)
+    {
+        return;
+    }
+    if (EndedSession == SessionId)
+    {
+        // The worker's disconnect reached the game thread: no message of this
+        // session can arrive any more, so the gate it needed is spent.
+        EndedSession = 0;
+    }
+
+    // The actors that took part, released below. Collected first because the
+    // restore result decides what they report.
+    TArray<TWeakObjectPtr<AMtoULiveLinkActor>> Released;
+    if (bNegotiated)
+    {
+        SetEditorViewportRealtimeOverride(false);
+        HoldLinkageDisplaysOnGameThread(false);
+        RestoreGeneration.Reset();
+        PendingApplication.Reset();
+        for (FMtoUSessionObject& Object : SessionObjects)
+        {
+            Released.AddUnique(Object.Actor);
+            ReleaseSessionObjectOnGameThread(
+                Object, EMtoUConnectionState::Disconnected, !bListenerStopped);
+        }
+        // An actor whose object was refused or is not negotiated yet took part
+        // too: it leaves the connection the same way.
+        for (const TWeakObjectPtr<AMtoULiveLinkActor>& Participant : ParticipatingActors)
+        {
+            if (AMtoULiveLinkActor* Actor = Participant.Get())
+            {
+                if (!Released.Contains(Participant))
+                {
+                    Released.Add(Participant);
+                    Actor->ReleaseLiveLinkSubject();
+                    Actor->ReapplyDisplayTarget();
+                    Actor->SetConnectionState(EMtoUConnectionState::Disconnected);
+                    Actor->NoteSessionEnded();
+                }
             }
         }
+        GameThreadSession = 0;
+        SessionObjects.Reset();
+        ParticipatingActors.Reset();
+        SetObjects.Reset();
+        NegotiatedSetRevision = 0;
+        NegotiatedSpaceRevision = 1;
+    }
+
+    // Every borrowed writer is restored per resource and the linkage state
+    // returns to realtime with no session identity; a new connection
+    // negotiates again. A restore that failed leaves its residual in the view.
+    LinkageSession.EndSession();
+    const FString Residual = LinkageSession.GetView().RecoveryResidual;
+    if (!Residual.IsEmpty() && !bListenerStopped)
+    {
+        const FString Report = FString::Printf(
+            TEXT("Disconnected; the linkage takeover could not be restored: %s"), *Residual);
+        SetStatus(Report);
+        for (const TWeakObjectPtr<AMtoULiveLinkActor>& Participant : Released)
+        {
+            if (AMtoULiveLinkActor* Actor = Participant.Get())
+            {
+                Actor->SetConnectionState(EMtoUConnectionState::Error, Residual);
+            }
+        }
+    }
+    if (bNegotiated)
+    {
+        // The transient cache and its upload/play identity history are
+        // scoped to one negotiated streaming session; a newer connection
+        // starts its own fresh sequence at 1.
+        CacheSession.EndSession();
     }
 }
 
@@ -726,7 +819,7 @@ int32 FMtoULiveLinkSource::GetPendingLeaveCount() const
 #if WITH_DEV_AUTOMATION_TESTS
 int32 FMtoULiveLinkSource::GetPendingCacheCommandCount() const
 {
-    return CacheCommands.GetPendingCommandCount();
+    return CacheCommands.GetPendingCommandCount(PublishedTimeControlOrder.Load());
 }
 
 EMtoUCacheState FMtoULiveLinkSource::GetCacheSessionState() const
@@ -798,11 +891,6 @@ uint32 FMtoULiveLinkSource::Run()
 
     uint64 SessionCounter = 0;
     uint64 ActiveSession = 0;
-    // Each worker tracks the shared counter independently, so one listener
-    // can never swallow a termination request meant for another. Requests
-    // made before this accept belong to older sessions and are never applied
-    // retroactively.
-    uint64 LastSeenSessionEndRequests = GStreamingSessionEndRequests.Load();
     // Every init of the declared set arrives before any other message.
     bool bInitReceived = false;
     int32 WorkerInitsExpected = 0;
@@ -872,6 +960,7 @@ uint32 FMtoULiveLinkSource::Run()
         if (ClientSocket)
         {
             SendPacket(
+                *SocketSubsystem,
                 *ClientSocket,
                 FMtoUProtocol::EncodeError(Code, Message),
                 bStopRequested);
@@ -886,6 +975,7 @@ uint32 FMtoULiveLinkSource::Run()
         if (ClientSocket)
         {
             SendPacket(
+                *SocketSubsystem,
                 *ClientSocket,
                 FMtoUProtocol::EncodeError(Code, Message),
                 bStopRequested);
@@ -894,11 +984,7 @@ uint32 FMtoULiveLinkSource::Run()
 
     // Bounded linkage intake: the frozen control queue is enforced before a
     // message gains a queue slot, so a peer that never lets the game thread
-    // drain is refused instead of backlogged.
-    auto CanAdmitLinkageControl = [&]() -> bool
-    {
-        return QueuedLinkageControls.Load() < FMtoUProtocol::MaxControlQueue;
-    };
+    // drain is refused instead of backlogged (CanAdmitLinkageControl).
 
     // Bounded admission enqueue: the producer never blocks the loop for
     // control messages, and a pre-admitted frame is always accepted. Only a
@@ -919,6 +1005,8 @@ uint32 FMtoULiveLinkSource::Run()
                 return true;
             }
         }
+        const uint64 Order = ++NextTimeControlOrder;
+        Command.IntakeOrder = Order;
         const bool bEnqueued = CacheCommands.Produce(
             MoveTemp(Command),
             [this, ActiveSession]()
@@ -937,6 +1025,10 @@ uint32 FMtoULiveLinkSource::Run()
         if (!bEnqueued)
         {
             MarkDisconnected();
+        }
+        else
+        {
+            PublishedTimeControlOrder.Store(Order);
         }
         return bEnqueued;
     };
@@ -1006,19 +1098,25 @@ uint32 FMtoULiveLinkSource::Run()
         // One shared idempotent termination boundary: a Preview revision
         // invalidation or Binding actor lifetime end closes the socket here,
         // and the existing disconnect path performs the Game Thread cleanup.
+        // A request names the session it ends, so one for a session this
+        // worker has already left, or has not accepted, closes nothing.
         // Test-only deferral (automation, off by default) holds this cleanup
         // so the synchronous Game Thread publish gate can be proven before
-        // any worker close; the pending counter is left unread so release
-        // still disconnects exactly once.
-        const uint64 SessionEndRequests = GStreamingSessionEndRequests.Load();
+        // any worker close; the requests stay queued, so release still
+        // disconnects exactly once.
         bool bSessionEndCleanupDeferred = false;
 #if WITH_DEV_AUTOMATION_TESTS
         bSessionEndCleanupDeferred = GDeferStreamingSessionEndCleanup.Load();
 #endif
-        if (SessionEndRequests != LastSeenSessionEndRequests && !bSessionEndCleanupDeferred)
+        if (!bSessionEndCleanupDeferred)
         {
-            LastSeenSessionEndRequests = SessionEndRequests;
-            if (ActiveSession != 0)
+            bool bCloseActiveSession = false;
+            uint64 EndRequestedSession = 0;
+            while (SessionEndRequests.Dequeue(EndRequestedSession))
+            {
+                bCloseActiveSession |= ActiveSession != 0 && EndRequestedSession == ActiveSession;
+            }
+            if (bCloseActiveSession)
             {
                 MarkDisconnected();
                 continue;
@@ -1049,6 +1147,7 @@ uint32 FMtoULiveLinkSource::Run()
                 if (ClientSocket)
                 {
                     SendPacket(
+                        *SocketSubsystem,
                         *Accepted,
                         FMtoUProtocol::EncodeError(
                             TEXT("SECOND_CLIENT_REJECTED"),
@@ -1060,7 +1159,6 @@ uint32 FMtoULiveLinkSource::Run()
                 {
                     ClientSocket = Accepted;
                     ActiveSession = ++SessionCounter;
-                    LastSeenSessionEndRequests = GStreamingSessionEndRequests.Load();
                     bInitReceived = false;
                     WorkerInitsExpected = 0;
                     WorkerInitsReceived = 0;
@@ -1083,16 +1181,19 @@ uint32 FMtoULiveLinkSource::Run()
             FMtoUOutgoing Reply;
             while (OutgoingReplies.Dequeue(Reply))
             {
+                // The slot is returned once the reply leaves the queue, sent
+                // or not: a reply of an ended session is dropped here and
+                // must not keep a slot of the frozen control queue.
+                if (Reply.bControl)
+                {
+                    ReleaseOutgoingControl();
+                }
                 if (Reply.SessionId != ActiveSession)
                 {
                     continue;
                 }
                 bDidWork = true;
-                if (Reply.bControl)
-                {
-                    QueuedOutgoingControls.Store(FMath::Max(0, QueuedOutgoingControls.Load() - 1));
-                }
-                if (!SendPacket(*ClientSocket, Reply.Packet, bStopRequested))
+                if (!SendPacket(*SocketSubsystem, *ClientSocket, Reply.Packet, bStopRequested))
                 {
                     MarkDisconnected();
                     break;
@@ -1170,21 +1271,46 @@ uint32 FMtoULiveLinkSource::Run()
                         break;
                     }
 
+                    FString MessageType;
+                    {
+                        FString TypeError;
+                        if (!FMtoUProtocol::PeekType(Payload, MessageType, TypeError))
+                        {
+                            SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), TypeError);
+                            break;
+                        }
+                    }
+
+                    // Version pairing precedes connection and time-authority
+                    // gates. Keep the parsed frame for realtime below; other
+                    // parse errors still follow those gates' existing rules.
+                    FMtoUFrameMessage Frame;
+                    FString FrameErrorCode;
+                    const bool bFrameParsed = MessageType == TEXT("frame")
+                        && FMtoUProtocol::ParseFrame(Payload, Frame, Error, &FrameErrorCode);
+                    if (MessageType == TEXT("frame") && !bFrameParsed
+                        && FrameErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                    {
+                        SendErrorAndDisconnect(FrameErrorCode, Error);
+                        break;
+                    }
+
                     if (!bInitReceived)
                     {
                         // The greeting opens a v10 connection. A mismatched
                         // version is refused here, before any target is
-                        // discovered, a writer is muted or a handoff is read.
-                        FString FirstType;
-                        FString FirstTypeError;
-                        if (FMtoUProtocol::PeekType(Payload, FirstType, FirstTypeError)
-                            && FirstType == TEXT("hello"))
+                        // discovered or a writer is muted.
+                        if (MessageType == TEXT("hello"))
                         {
                             FMtoUHelloMessage Hello;
                             FString HelloError;
                             FString HelloErrorCode;
                             if (!FMtoUProtocol::ParseHello(Payload, Hello, HelloError, &HelloErrorCode))
                             {
+                                if (HelloErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                                {
+                                    LogVersionRefusal(Hello.Version, Hello.PluginVersion);
+                                }
                                 SendErrorAndDisconnect(HelloErrorCode, HelloError);
                                 break;
                             }
@@ -1198,15 +1324,19 @@ uint32 FMtoULiveLinkSource::Run()
                             FMtoUPendingHello Pending;
                             Pending.SessionId = ActiveSession;
                             Pending.Message = MoveTemp(Hello);
+                            AdmitLinkageControl();
                             PendingHellos.Enqueue(MoveTemp(Pending));
-                            QueuedLinkageControls.Store(QueuedLinkageControls.Load() + 1);
-                            NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.Load());
                             continue;
                         }
                         FMtoUInitMessage Init;
                         FString ErrorCode;
                         if (!FMtoUProtocol::ParseInit(Payload, Init, Error, &ErrorCode))
                         {
+                            if (ErrorCode == TEXT("PROTOCOL_VERSION_MISMATCH"))
+                            {
+                                // An init names no plugin release.
+                                LogVersionRefusal(Init.Version, FString());
+                            }
                             SendErrorAndDisconnect(ErrorCode, Error);
                             break;
                         }
@@ -1230,14 +1360,17 @@ uint32 FMtoULiveLinkSource::Run()
                         break;
                     }
 
-                    FString MessageType;
+                    // A type the protocol does not define, a retired one
+                    // included, is refused whatever state the connection is
+                    // in; the mode and set checks below see only defined
+                    // types, so none of them can answer it with a code that
+                    // keeps the connection.
+                    if (!FMtoUProtocol::IsDefinedMessageType(MessageType))
                     {
-                        FString TypeError;
-                        if (!FMtoUProtocol::PeekType(Payload, MessageType, TypeError))
-                        {
-                            SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), TypeError);
-                            break;
-                        }
+                        SendErrorAndDisconnect(
+                            TEXT("INVALID_MESSAGE"),
+                            FMtoUProtocol::UndefinedTypeError(MessageType));
+                        break;
                     }
 
                     // Exactly one host owns time in each mode: while linkage
@@ -1274,10 +1407,7 @@ uint32 FMtoULiveLinkSource::Run()
 
                     if (MessageType == TEXT("mode")
                         || MessageType == TEXT("leave_linkage")
-                        || MessageType == TEXT("remove_object")
-                        || MessageType == TEXT("reference_result")
-                        || MessageType == TEXT("reference_removed")
-                        || MessageType == TEXT("reference_query"))
+                        || MessageType == TEXT("remove_object"))
                     {
                         // Linkage control work happens on the game thread
                         // because it mutates the takeover and the published
@@ -1305,29 +1435,11 @@ uint32 FMtoULiveLinkSource::Run()
                             bValid = FMtoUProtocol::ParseLeaveLinkage(
                                 Payload, Control.LeaveLinkage, LinkageError, &LinkageErrorCode);
                         }
-                        else if (MessageType == TEXT("remove_object"))
+                        else
                         {
                             Control.Kind = FMtoUPendingLinkageControl::EKind::RemoveObject;
                             bValid = FMtoUProtocol::ParseRemoveObject(
                                 Payload, Control.RemoveObject, LinkageError, &LinkageErrorCode);
-                        }
-                        else if (MessageType == TEXT("reference_result"))
-                        {
-                            Control.Kind = FMtoUPendingLinkageControl::EKind::ReferenceResult;
-                            bValid = FMtoUProtocol::ParseReferenceResult(
-                                Payload, Control.ReferenceResult, LinkageError, &LinkageErrorCode);
-                        }
-                        else if (MessageType == TEXT("reference_removed"))
-                        {
-                            Control.Kind = FMtoUPendingLinkageControl::EKind::ReferenceRemoved;
-                            bValid = FMtoUProtocol::ParseReferenceRemoved(
-                                Payload, Control.ReferenceRemoved, LinkageError, &LinkageErrorCode);
-                        }
-                        else
-                        {
-                            Control.Kind = FMtoUPendingLinkageControl::EKind::ReferenceQuery;
-                            bValid = FMtoUProtocol::ParseReferenceQuery(
-                                Payload, Control.ReferenceQuery, LinkageError, &LinkageErrorCode);
                         }
                         if (!bValid)
                         {
@@ -1335,8 +1447,8 @@ uint32 FMtoULiveLinkSource::Run()
                             // per-message rejection: the session answers with
                             // its stable code and keeps the connection, so an
                             // operator can correct the action without losing
-                            // the streaming session (protocol/README.md, mode and
-                            // reference message tables).
+                            // the streaming session (protocol/README.md, message
+                            // tables).
                             SendLinkageError(LinkageErrorCode, LinkageError);
                             continue;
                         }
@@ -1346,9 +1458,11 @@ uint32 FMtoULiveLinkSource::Run()
                             // so the drain can never undercount it.
                             WorkerLinkageLeavesPending += 1;
                         }
+                        const uint64 Order = ++NextTimeControlOrder;
+                        Control.IntakeOrder = Order;
+                        AdmitLinkageControl();
                         PendingLinkageControls.Enqueue(MoveTemp(Control));
-                        QueuedLinkageControls.Store(QueuedLinkageControls.Load() + 1);
-                        NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.Load());
+                        PublishedTimeControlOrder.Store(Order);
                         continue;
                     }
                     if (MessageType == TEXT("group"))
@@ -1380,9 +1494,8 @@ uint32 FMtoULiveLinkSource::Run()
                             SendErrorAndDisconnect(GroupErrorCode, GroupError);
                             break;
                         }
+                        AdmitLinkageControl();
                         PendingPoseGroups.Enqueue(MoveTemp(Pending));
-                        QueuedLinkageControls.Store(QueuedLinkageControls.Load() + 1);
-                        NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.Load());
                         continue;
                     }
                     if (MessageType == TEXT("cache_frame"))
@@ -1427,6 +1540,7 @@ uint32 FMtoULiveLinkSource::Run()
                                     ActiveSession, WorkerCacheUploadId);
                                 bDidWork = true;
                                 SendPacket(
+                                    *SocketSubsystem,
                                     *ClientSocket,
                                     FMtoUProtocol::EncodeError(
                                         ErrorCode,
@@ -1474,42 +1588,17 @@ uint32 FMtoULiveLinkSource::Run()
                         EnqueueCacheCommand(MoveTemp(Command));
                         continue;
                     }
-                    if (MessageType == TEXT("cache_play"))
+                    if (MessageType == TEXT("cache_clear"))
                     {
                         FString CacheError;
                         FMtoUCacheCommand Command;
-                        Command.Kind = FMtoUCacheCommand::EKind::Play;
-                        if (!FMtoUProtocol::ParseCachePlay(Payload, Command.PlayId, CacheError))
+                        Command.Kind = FMtoUCacheCommand::EKind::Clear;
+                        if (!FMtoUProtocol::ParseCacheClear(Payload, Command.ClearId, CacheError))
                         {
                             SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), CacheError);
                             break;
                         }
-                        EnqueueCacheCommand(MoveTemp(Command));
-                        continue;
-                    }
-                    if (MessageType == TEXT("cache_stop") || MessageType == TEXT("cache_clear"))
-                    {
-                        FString CacheError;
-                        bool bValid = false;
-                        FMtoUCacheCommand Command;
-                        if (MessageType == TEXT("cache_stop"))
-                        {
-                            bValid = FMtoUProtocol::ParseCacheStop(Payload, CacheError);
-                            Command.Kind = FMtoUCacheCommand::EKind::Stop;
-                        }
-                        else
-                        {
-                            bValid = FMtoUProtocol::ParseCacheClear(
-                                Payload, Command.ClearId, CacheError);
-                            Command.Kind = FMtoUCacheCommand::EKind::Clear;
-                        }
-                        if (!bValid)
-                        {
-                            SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), CacheError);
-                            break;
-                        }
-                        if (Command.Kind == FMtoUCacheCommand::EKind::Clear
-                            && Command.ClearId > WorkerLastSeenClearId)
+                        if (Command.ClearId > WorkerLastSeenClearId)
                         {
                             WorkerLastSeenClearId = Command.ClearId;
                             WorkerCacheUploadId = 0;
@@ -1519,11 +1608,16 @@ uint32 FMtoULiveLinkSource::Run()
                         continue;
                     }
 
-                    FMtoUFrameMessage Frame;
                     bool bStructuralError = true;
-                    if (!FMtoUProtocol::ParseFrame(Payload, Frame, Error))
+                    if (!bFrameParsed)
                     {
-                        SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), Error);
+                        if (MessageType != TEXT("frame"))
+                        {
+                            // Other defined types that cannot arrive here
+                            // retain the parser's structural error response.
+                            FMtoUProtocol::ParseFrame(Payload, Frame, Error, &FrameErrorCode);
+                        }
+                        SendErrorAndDisconnect(FrameErrorCode, Error);
                         break;
                     }
                     if (!FMtoUProtocol::ValidateFrame(
@@ -1689,7 +1783,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             const FString Details = FString::Printf(
                 TEXT("%s stands %s %s; the targets of one set share one placement."),
                 *Actor->GetName(), *Difference, *PrimaryActor->GetName());
-            Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Details));
+            Actor->SetConnectionState(EMtoUConnectionState::Error, Details);
             EnqueueErrorOnGameThread(
                 TEXT("ANCHOR_MISMATCH"),
                 TEXT("The second object's Binding actor does not share the primary placement."),
@@ -1699,7 +1793,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     }
 
     ParticipatingActors.Add(Actor);
-    Actor->SetConnectionStatus(TEXT("Validating"));
+    Actor->SetConnectionState(EMtoUConnectionState::Validating);
 
     // One user-facing text for every invalid-Binding refusal.
     const TCHAR* const InvalidBindingMessage =
@@ -1709,7 +1803,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     {
         const FString Details = FString::Printf(
             TEXT("%s has no MtoU_LiveLink Binding."), *Actor->GetName());
-        Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Details));
+        Actor->SetConnectionState(EMtoUConnectionState::Error, Details);
         EnqueueErrorOnGameThread(
             FMtoUCompositionFailures::InvalidBinding,
             InvalidBindingMessage,
@@ -1724,7 +1818,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             TEXT("%s character composition is not usable:\n%s"),
             *Actor->GetName(),
             *Composition.Diagnostics);
-        Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Details));
+        Actor->SetConnectionState(EMtoUConnectionState::Error, Details);
         EnqueueErrorOnGameThread(
             Composition.FailureCategory,
             Composition.FailureCategory == FMtoUCompositionFailures::SkeletonMismatch
@@ -1745,7 +1839,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
         const FString Details = FString::Printf(
             TEXT("%s has no ready Generated Preview Skeletal Mesh. Run Refresh Preview in Unreal before connecting in the Model workflow."),
             *Actor->GetName());
-        Actor->SetConnectionStatus(TEXT("Preview not ready"));
+        Actor->SetConnectionState(EMtoUConnectionState::PreviewNotReady);
         EnqueueErrorOnGameThread(
             TEXT("PREVIEW_NOT_READY"),
             TEXT("The Model workflow requires a ready Generated Preview Skeletal Mesh."),
@@ -1784,7 +1878,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             TEXT("%s skeleton cannot be mapped:\n%s"),
             *Actor->GetName(),
             *Outcome.TechnicalDetails());
-        Actor->SetConnectionStatus(FString::Printf(TEXT("Error: %s"), *Details));
+        Actor->SetConnectionState(EMtoUConnectionState::Error, Details);
         EnqueueErrorOnGameThread(
             Outcome.FailureCategory,
             bPrimary
@@ -1865,7 +1959,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             *Actor->GetName(),
             Outcome.MayaOnlyMorphNames.Num(),
             Outcome.UnrealOnlyMorphNames.Num());
-        Actor->SetConnectionStatus(TEXT("Preview morph mismatch"));
+        Actor->SetConnectionState(EMtoUConnectionState::PreviewMorphMismatch);
         EnqueueErrorOnGameThread(
             TEXT("PREVIEW_MORPH_MISMATCH"),
             TEXT("Model preview with BS transmission requires at least one accepted Morph Target."),
@@ -1894,7 +1988,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     Object.NegotiatedRevision = Message.Revision;
     if (bPrimary)
     {
-        // The v11 identity of this session: the object set, its revision and
+        // The identity of this session: the object set, its revision and
         // the common space every later group or mode message must repeat.
         NegotiatedSetRevision = Message.SetRevision;
         NegotiatedSpaceRevision = Message.SpaceRevision;
@@ -1956,11 +2050,13 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     {
         Actor->ShowDriverMesh();
     }
-    Actor->SetConnectionStatus(bBoneOnlySession
-        ? TEXT("Connected: bone-only diagnostic; not valid for model acceptance")
+    Actor->SetConnectionState(bBoneOnlySession
+        ? EMtoUConnectionState::ConnectedBoneOnly
         : bPartialMorphCoverage
-            ? TEXT("Connected: partial Morph coverage")
-            : bPrimary ? TEXT("Connected") : TEXT("Connected as the second object"));
+            ? EMtoUConnectionState::ConnectedPartialMorph
+            : bPrimary
+                ? EMtoUConnectionState::Connected
+                : EMtoUConnectionState::ConnectedAsSecondObject);
     Actor->NoteSessionStreaming();
     SetEditorViewportRealtimeOverride(true);
 
@@ -2001,7 +2097,7 @@ void FMtoULiveLinkSource::DrainLinkageHellosOnGameThread()
     FMtoUPendingHello Hello;
     while (PendingHellos.Dequeue(Hello))
     {
-        QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+        ReleaseLinkageControl();
         if (Hello.SessionId == 0 || !IsSessionActiveOnGameThread(Hello.SessionId))
         {
             continue;
@@ -2014,73 +2110,86 @@ void FMtoULiveLinkSource::DrainLinkageHellosOnGameThread()
     }
 }
 
-int32 FMtoULiveLinkSource::DrainLinkageControlsOnGameThread()
+int32 FMtoULiveLinkSource::DrainTimeControlsOnGameThread()
 {
     check(IsInGameThread());
-    const double NowSeconds = FPlatformTime::Seconds();
+    const uint64 ThroughOrder = PublishedTimeControlOrder.Load();
     int32 LeavesDrained = 0;
-    FMtoUPendingLinkageControl Control;
-    while (PendingLinkageControls.Dequeue(Control))
+    while (true)
     {
-        QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
-        if (Control.Kind == FMtoUPendingLinkageControl::EKind::LeaveLinkage)
+        const FMtoUPendingLinkageControl* Head = PendingLinkageControls.Peek();
+        const bool bLinkage = Head && Head->IntakeOrder <= ThroughOrder;
+        uint64 CacheOrder = 0;
+        const bool bCache = CacheCommands.PeekOrder(CacheOrder) && CacheOrder <= ThroughOrder;
+        if (!bLinkage && !bCache)
         {
-            ++LeavesDrained;
-        }
-        int32 SessionId = INDEX_NONE;
-        switch (Control.Kind)
-        {
-        case FMtoUPendingLinkageControl::EKind::Mode:
-            SessionId = Control.Mode.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::LeaveLinkage:
-            SessionId = Control.LeaveLinkage.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::RemoveObject:
-            SessionId = Control.RemoveObject.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceResult:
-            SessionId = Control.ReferenceResult.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
-            SessionId = Control.ReferenceRemoved.SessionId;
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceQuery:
-            SessionId = Control.ReferenceQuery.SessionId;
             break;
         }
-        if (SessionId == INDEX_NONE || SessionId < 1
-            || !IsSessionActiveOnGameThread(static_cast<uint64>(SessionId)))
+        if (bCache && (!bLinkage || CacheOrder < Head->IntakeOrder))
         {
-            continue;
+            FMtoUCacheCommand Command;
+            // Cancellation may replace the cache head between peek and take.
+            // Never take the replacement if it follows the next linkage control.
+            if (CacheCommands.TryConsume(Command, bLinkage ? Head->IntakeOrder - 1 : ThroughOrder))
+            {
+                HandleCacheCommandOnGameThread(Command);
+            }
         }
-        if (LinkageSession.GetSessionId() != SessionId)
+        else
         {
-            LinkageSession.BeginSession(SessionId);
-        }
-        switch (Control.Kind)
-        {
-        case FMtoUPendingLinkageControl::EKind::Mode:
-            LinkageSession.NoteMode(Control.Mode, NowSeconds);
-            break;
-        case FMtoUPendingLinkageControl::EKind::LeaveLinkage:
-            LinkageSession.NoteLeaveLinkage(Control.LeaveLinkage, NowSeconds);
-            break;
-        case FMtoUPendingLinkageControl::EKind::RemoveObject:
-            LinkageSession.NoteRemoveObject(Control.RemoveObject);
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceResult:
-            LinkageSession.NoteReferenceResult(Control.ReferenceResult);
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceRemoved:
-            LinkageSession.NoteReferenceRemoved(Control.ReferenceRemoved);
-            break;
-        case FMtoUPendingLinkageControl::EKind::ReferenceQuery:
-            LinkageSession.NoteReferenceQuery(Control.ReferenceQuery);
-            break;
+            FMtoUPendingLinkageControl Control;
+            if (PendingLinkageControls.Dequeue(Control))
+            {
+                ReleaseLinkageControl();
+                if (Control.Kind == FMtoUPendingLinkageControl::EKind::LeaveLinkage)
+                {
+                    ++LeavesDrained;
+                }
+                HandleLinkageControlOnGameThread(Control);
+            }
         }
     }
     return LeavesDrained;
+}
+
+void FMtoULiveLinkSource::HandleLinkageControlOnGameThread(const FMtoUPendingLinkageControl& Control)
+{
+    check(IsInGameThread());
+    const double NowSeconds = FPlatformTime::Seconds();
+    int32 SessionId = INDEX_NONE;
+    switch (Control.Kind)
+    {
+    case FMtoUPendingLinkageControl::EKind::Mode:
+        SessionId = Control.Mode.SessionId;
+        break;
+    case FMtoUPendingLinkageControl::EKind::LeaveLinkage:
+        SessionId = Control.LeaveLinkage.SessionId;
+        break;
+    case FMtoUPendingLinkageControl::EKind::RemoveObject:
+        SessionId = Control.RemoveObject.SessionId;
+        break;
+    }
+    if (SessionId == INDEX_NONE || SessionId < 1
+        || !IsSessionActiveOnGameThread(static_cast<uint64>(SessionId)))
+    {
+        return;
+    }
+    if (LinkageSession.GetSessionId() != SessionId)
+    {
+        LinkageSession.BeginSession(SessionId);
+    }
+    switch (Control.Kind)
+    {
+    case FMtoUPendingLinkageControl::EKind::Mode:
+        LinkageSession.NoteMode(Control.Mode, NowSeconds);
+        break;
+    case FMtoUPendingLinkageControl::EKind::LeaveLinkage:
+        LinkageSession.NoteLeaveLinkage(Control.LeaveLinkage, NowSeconds);
+        break;
+    case FMtoUPendingLinkageControl::EKind::RemoveObject:
+        LinkageSession.NoteRemoveObject(Control.RemoveObject);
+        break;
+    }
 }
 
 void FMtoULiveLinkSource::IntakeLinkageGroupsOnGameThread()
@@ -2090,7 +2199,7 @@ void FMtoULiveLinkSource::IntakeLinkageGroupsOnGameThread()
     FMtoUPendingPoseGroup Pending;
     while (PendingPoseGroups.Dequeue(Pending))
     {
-        QueuedLinkageControls.Store(FMath::Max(0, QueuedLinkageControls.Load() - 1));
+        ReleaseLinkageControl();
         if (Pending.SessionId == 0 || !IsSessionActiveOnGameThread(Pending.SessionId))
         {
             continue;
@@ -2231,7 +2340,7 @@ void FMtoULiveLinkSource::RemoveSecondaryObjectOnGameThread(
                 }
             }
         }
-        ReleaseSessionObjectOnGameThread(Removed, TEXT("Removed from the set"));
+        ReleaseSessionObjectOnGameThread(Removed, EMtoUConnectionState::RemovedFromSet);
     }
     NegotiatedSetRevision = SetRevision;
     // 4. The new set is confirmed; the worker stops expecting the object's
@@ -2244,8 +2353,7 @@ void FMtoULiveLinkSource::RemoveSecondaryObjectOnGameThread(
         Residual.IsEmpty() ? FString(TEXT("the removed target was restored")) : Residual);
     Reply.RemovedObjectId = ObjectId;
     Reply.bControl = true;
-    QueuedOutgoingControls.Store(QueuedOutgoingControls.Load() + 1);
-    NoteQueuePeak(OutgoingControlPeak, QueuedOutgoingControls.Load());
+    AdmitOutgoingControl();
     OutgoingReplies.Enqueue(MoveTemp(Reply));
     if (!Residual.IsEmpty())
     {
@@ -2307,10 +2415,10 @@ void FMtoULiveLinkSource::NotePairingChangedOnGameThread()
 }
 
 void FMtoULiveLinkSource::ReleaseSessionObjectOnGameThread(
-    FMtoUSessionObject& Object, const TCHAR* ActorStatus)
+    FMtoUSessionObject& Object, EMtoUConnectionState ActorState, bool bRemoveSubject)
 {
     check(IsInGameThread());
-    if (Client && SourceGuid.IsValid())
+    if (bRemoveSubject && Client && SourceGuid.IsValid())
     {
         Client->RemoveSubject_AnyThread(Object.SubjectKey);
     }
@@ -2318,7 +2426,7 @@ void FMtoULiveLinkSource::ReleaseSessionObjectOnGameThread(
     {
         Actor->ReleaseLiveLinkSubject();
         Actor->ReapplyDisplayTarget();
-        Actor->SetConnectionStatus(ActorStatus);
+        Actor->SetConnectionState(ActorState);
         Actor->NoteSessionEnded();
     }
 }
@@ -3134,6 +3242,45 @@ void FMtoULiveLinkSource::HoldLinkageDisplaysOnGameThread(bool bHold)
     }
 }
 
+bool FMtoULiveLinkSource::TryAdmitOutgoingControl()
+{
+    int32 Queued = QueuedOutgoingControls.Load();
+    while (Queued < FMtoUProtocol::MaxControlQueue)
+    {
+        if (QueuedOutgoingControls.CompareExchange(Queued, Queued + 1))
+        {
+            NoteQueuePeak(OutgoingControlPeak, Queued + 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+void FMtoULiveLinkSource::AdmitOutgoingControl()
+{
+    NoteQueuePeak(OutgoingControlPeak, QueuedOutgoingControls.IncrementExchange() + 1);
+}
+
+void FMtoULiveLinkSource::ReleaseOutgoingControl()
+{
+    QueuedOutgoingControls.DecrementExchange();
+}
+
+bool FMtoULiveLinkSource::CanAdmitLinkageControl() const
+{
+    return QueuedLinkageControls.Load() < FMtoUProtocol::MaxControlQueue;
+}
+
+void FMtoULiveLinkSource::AdmitLinkageControl()
+{
+    NoteQueuePeak(IncomingControlPeak, QueuedLinkageControls.IncrementExchange() + 1);
+}
+
+void FMtoULiveLinkSource::ReleaseLinkageControl()
+{
+    QueuedLinkageControls.DecrementExchange();
+}
+
 void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Packet, bool bControl)
 {
     check(IsInGameThread());
@@ -3144,7 +3291,17 @@ void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Pac
     const int32 SessionId = LinkageSession.GetSessionId() != 0
         ? LinkageSession.GetSessionId()
         : static_cast<int32>(GameThreadSession);
-    if (bControl && QueuedOutgoingControls.Load() >= FMtoUProtocol::MaxControlQueue)
+    // A reply for a session that is over, or that an end request already
+    // closed, has nobody to receive it: it is dropped here, before it can take
+    // a slot of the frozen control queue that no worker will ever return while
+    // nobody is connected. The greeting acknowledgement is answered before the
+    // session is negotiated, so the gate is the active session, not the
+    // publishable one.
+    if (SessionId <= 0 || !IsSessionActiveOnGameThread(static_cast<uint64>(SessionId)))
+    {
+        return;
+    }
+    if (bControl && !TryAdmitOutgoingControl())
     {
         // Overflow is an error, never an unbounded backlog.
         SetStatus(TEXT("Linkage control queue overflow."));
@@ -3156,15 +3313,9 @@ void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Pac
             FString::Printf(TEXT("%d undelivered control messages"), FMtoUProtocol::MaxControlQueue));
         Reply.bCloseAfter = true;
         Reply.bControl = true;
-        QueuedOutgoingControls.Store(QueuedOutgoingControls.Load() + 1);
-        NoteQueuePeak(OutgoingControlPeak, QueuedOutgoingControls.Load());
+        AdmitOutgoingControl();
         OutgoingReplies.Enqueue(MoveTemp(Reply));
         return;
-    }
-    if (bControl)
-    {
-        QueuedOutgoingControls.Store(QueuedOutgoingControls.Load() + 1);
-        NoteQueuePeak(OutgoingControlPeak, QueuedOutgoingControls.Load());
     }
     FMtoUOutgoing Reply;
     Reply.SessionId = SessionId;
@@ -3176,7 +3327,7 @@ void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Pac
 bool FMtoULiveLinkSource::IsSessionActiveOnGameThread(uint64 SessionId) const
 {
     check(IsInGameThread());
-    if (SessionId == 0)
+    if (SessionId == 0 || SessionId == EndedSession)
     {
         return false;
     }
@@ -3185,41 +3336,53 @@ bool FMtoULiveLinkSource::IsSessionActiveOnGameThread(uint64 SessionId) const
         return IsSessionPublishableOnGameThread(SessionId);
     }
     // The greeting phase precedes negotiation: the worker still owns the
-    // socket and no explicit refresh has ended this session yet.
+    // socket and no end has been requested for this session yet.
     return IsCurrentSession(SessionId);
 }
 
-void FMtoULiveLinkSource::HandleCacheCommandsOnGameThread()
+void FMtoULiveLinkSource::TickCacheOnGameThread()
 {
     check(IsInGameThread());
-    FMtoUCacheCommand Command;
-    while (CacheCommands.TryConsume(Command))
-    {
-        if (Command.SessionId != GameThreadSession || GameThreadSession == 0
-            || !IsSessionPublishableOnGameThread(Command.SessionId))
-        {
-            continue;
-        }
-        if ((Command.Kind == FMtoUCacheCommand::EKind::Frame
-             || Command.Kind == FMtoUCacheCommand::EKind::End)
-            && Command.UploadId != CacheSession.GetActiveUploadId())
-        {
-            // Rejected, superseded, or cleared upload: discard every pending
-            // command of that identity at once. They can never produce a
-            // flood of stale errors or touch a newer upload attempt.
-            CacheCommands.CancelUpload(Command.SessionId, Command.UploadId);
-            continue;
-        }
-        ApplyCacheTransitionOnGameThread(
-            Command.SessionId, CacheSession.HandleCommand(Command));
-    }
 
+    // Advance playback only once per Update, never from an entry guard.
     // The synchronous epoch gate stays in the source: a replaced session
     // neither advances cached replay nor applies a transition's side effects.
     if (IsSessionPublishableOnGameThread(GameThreadSession))
     {
         ApplyCacheTransitionOnGameThread(GameThreadSession, CacheSession.Tick());
     }
+}
+
+void FMtoULiveLinkSource::HandleCacheCommandOnGameThread(const FMtoUCacheCommand& Command)
+{
+    check(IsInGameThread());
+    if (Command.SessionId != GameThreadSession || GameThreadSession == 0
+        || !IsSessionPublishableOnGameThread(Command.SessionId))
+    {
+        return;
+    }
+    // Evaluate authority at this command's receive position: a valid earlier
+    // exit has already applied, but a later or refused exit cannot release it.
+    // This also covers editor takeovers not yet mirrored to the worker.
+    if (LinkageSession.GetView().Mode == TEXT("linkage"))
+    {
+        EnqueueReplyPacketOnGameThread(Command.SessionId,
+            FMtoUProtocol::EncodeError(TEXT("MODE_CONFLICT"),
+                TEXT("Unreal owns the sequence time while linkage is active.")), false);
+        return;
+    }
+    if ((Command.Kind == FMtoUCacheCommand::EKind::Frame
+         || Command.Kind == FMtoUCacheCommand::EKind::End)
+        && Command.UploadId != CacheSession.GetActiveUploadId())
+    {
+        // Rejected, superseded, or cleared upload: discard every pending
+        // command of that identity at once. They can never produce a
+        // flood of stale errors or touch a newer upload attempt.
+        CacheCommands.CancelUpload(Command.SessionId, Command.UploadId);
+        return;
+    }
+    ApplyCacheTransitionOnGameThread(
+        Command.SessionId, CacheSession.HandleCommand(Command));
 }
 
 void FMtoULiveLinkSource::ApplyCacheTransitionOnGameThread(
@@ -3468,11 +3631,7 @@ bool FMtoULiveLinkSource::IsCurrentSession(uint64 SessionId) const
 bool FMtoULiveLinkSource::IsSessionPublishableOnGameThread(uint64 SessionId) const
 {
     check(IsInGameThread());
-    if (SessionId == 0 || SessionId != GameThreadSession)
-    {
-        return false;
-    }
-    if (MtoUGetStreamingSessionEndCount() != GameThreadSessionEndEpoch)
+    if (SessionId == 0 || SessionId != GameThreadSession || SessionId == EndedSession)
     {
         return false;
     }
