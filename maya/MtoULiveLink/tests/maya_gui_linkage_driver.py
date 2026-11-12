@@ -34,6 +34,7 @@ Commands (``{"id": n, "action": ...}``): ``enter``, ``connect``, ``disconnect``,
 ``leave`` (with ``target`` ``realtime``/``end``), ``workflow`` (``target``
 ``animation``/``model``), ``mode`` (``target`` ``realtime``/``cached``),
 ``capture`` (``range`` ``[start, end]``), ``time`` (``frame``), ``snapshot``,
+``fatal_protocol`` (send a malformed frame over this test session),
 ``panel_shot`` (with ``name``), ``stage`` (with ``name``: every dialog is
 recorded with the latest stage, so the test can tell which ones a scenario
 expects), ``sample_plugins`` (with ``name``), ``set_secondary``,
@@ -522,13 +523,14 @@ def reopen_scene():
     connect_role()
 
 
-def connect_role():
+def connect_role(connect=True):
     cmds.select(FIXTURE["root"], replace=True)
     CONTROLLER.set_role()
     if FIXTURE.get("secondary"):
         select_secondary()
         CONTROLLER.set_secondary_object()
-    CONTROLLER.connect()
+    if connect:
+        CONTROLLER.connect()
 
 
 def run_command(command):
@@ -555,8 +557,15 @@ def run_command(command):
         grab_windows(command.get("name", "panel"))
     elif action == "time":
         cmds.currentTime(float(command["frame"]), update=True)
+        RESULT["time_evaluated"] = {"frame": cmds.currentTime(query=True),
+                                    "seconds": time.perf_counter()}
     elif action == "disconnect":
         CONTROLLER.disconnect()
+    elif action == "fatal_protocol":
+        # A real malformed packet on the existing session exercises the fatal
+        # protocol end path. The product's serializer and sender stay in use.
+        CONTROLLER._session._worker.submit_control(
+            {"type": "frame", "transforms": None, "curves": []})
     elif action == "workflow":
         # The 动画／模型 tab buttons' own handler.
         CONTROLLER._on_workflow_changed(command["target"])
@@ -728,7 +737,7 @@ def start():
         if "start_frame" in FIXTURE:
             # Where the artist starts: linkage maps every target from here.
             cmds.currentTime(float(FIXTURE["start_frame"]), update=True)
-        connect_role()
+        connect_role(connect=not FIXTURE.get("start_disconnected", False))
         RESULT["phase"] = "running"
         write_result()
         try:
