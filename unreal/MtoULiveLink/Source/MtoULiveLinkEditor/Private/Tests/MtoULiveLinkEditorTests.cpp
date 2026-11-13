@@ -36,6 +36,7 @@
 #include "GeometryScript/MeshAssetFunctions.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
+#include "Misc/OutputDeviceNull.h"
 #include "Materials/Material.h"
 #include "MeshDescription.h"
 #include "Misc/AutomationTest.h"
@@ -7660,7 +7661,9 @@ namespace
 {
 void WriteBackgroundSnapshot(const TArray<FString>& Args, UWorld*, FOutputDevice& Output)
 {
-    if (Args.Num() != 1 || Args[0].IsEmpty())
+    // ConsoleManager splits quoted paths on whitespace and keeps the quotes.
+    const FString OutputPath = FString::Join(Args, TEXT(" ")).TrimQuotes();
+    if (OutputPath.IsEmpty())
     {
         Output.Logf(ELogVerbosity::Error, TEXT("Usage: MtoU.BackgroundSnapshot <output.json>"));
         return;
@@ -7722,19 +7725,48 @@ void WriteBackgroundSnapshot(const TArray<FString>& Args, UWorld*, FOutputDevice
     Snapshot->SetArrayField(TEXT("actors"), Actors);
     FString Json;
     if (!FJsonSerializer::Serialize(Snapshot, TJsonWriterFactory<>::Create(&Json))
-        || !FFileHelper::SaveStringToFile(Json, *Args[0], FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+        || !FFileHelper::SaveStringToFile(Json, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
     {
         Output.Logf(ELogVerbosity::Error,
-            TEXT("MtoU.BackgroundSnapshot could not write '%s'. Supply a writable file path with an existing parent directory."), *Args[0]);
+            TEXT("MtoU.BackgroundSnapshot could not write '%s'. Supply a writable file path with an existing parent directory."), *OutputPath);
         return;
     }
-    Output.Logf(TEXT("MtoU.BackgroundSnapshot wrote '%s'."), *Args[0]);
+    Output.Logf(TEXT("MtoU.BackgroundSnapshot wrote '%s'."), *OutputPath);
 }
 
 FAutoConsoleCommandWithWorldArgsAndOutputDevice BackgroundSnapshotCommand(
     TEXT("MtoU.BackgroundSnapshot"),
     TEXT("Write a read-only editor/session/viewport/display snapshot to <output.json>."),
     FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&WriteBackgroundSnapshot));
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUBackgroundSnapshotPathTest,
+    "MtoULiveLink.Editor.BackgroundSnapshotPath",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUBackgroundSnapshotPathTest::RunTest(const FString&)
+{
+    const FString OutputPath = FPaths::CreateTempFilename(
+        *FPaths::ProjectSavedDir(), TEXT("MtoU Background "), TEXT(".json"));
+    ON_SCOPE_EXIT { IFileManager::Get().Delete(*OutputPath); };
+    const FString Command = FString::Printf(TEXT("MtoU.BackgroundSnapshot \"%s\""), *OutputPath);
+    FOutputDeviceNull Output;
+    TestTrue(TEXT("the console accepts a quoted path containing spaces"),
+        IConsoleManager::Get().ProcessUserConsoleInput(*Command, Output, GEditor->GetEditorWorldContext().World()));
+    FString Json;
+    if (!TestTrue(TEXT("the snapshot is written to the unquoted filename"),
+        FFileHelper::LoadFileToString(Json, *OutputPath)))
+    {
+        return false;
+    }
+    TSharedPtr<FJsonObject> Snapshot;
+    if (!TestTrue(TEXT("the snapshot contains valid JSON"),
+        FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Snapshot)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the command records the actual editor state"), Snapshot->GetBoolField(TEXT("editor_available")));
+    return true;
 }
 
 #endif
