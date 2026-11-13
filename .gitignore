@@ -1,5 +1,6 @@
 # Local agent instructions
 AGENTS.override.md
+/HANDOFF.md
 .tmp/
 
 # Operating system

@@ -34,6 +34,50 @@ pinned commit. Do not change sibling projects.
   `NOTICE` and the legal header in every shipped source file (ADR 0015), add no
   check that blocks use over them, and assess any third-party reuse separately.
 
+## Session handoff
+
+A session can end without warning: the user's usage allowance runs out, and
+no session can see how much of it is left. Resuming or compacting a long
+conversation afterwards is expensive. So the work is kept resumable at all
+times by a fresh session that has only the repository and `HANDOFF.md`.
+
+- Keep `HANDOFF.md` in the root of the working directory you are working in;
+  each worktree has its own. Git ignores it: it is a note to the next
+  session, not a project document. Knowledge that must last still goes to the
+  Issue, docs/roadmap.md or an ADR.
+- Update it at every checkpoint, without being asked and without waiting for
+  the task to end: a step finished and verified, a decision made, an approach
+  tried and ruled out, and before starting anything long (a full suite, a
+  benchmark, a subagent, a review round). Do not try to guess when the
+  allowance will run out; a note that is always current is the only
+  protection.
+- Save the work at the same checkpoints: commit verified work to the branch
+  allowed by docs/workflow.md (the integration branch for small rule or
+  documentation edits, the task branch for PR work), so the note points at a
+  commit. Anything left uncommitted is listed
+  in the note with its state.
+- Write it in Chinese, as the current state, rewritten in place and never
+  appended to. Keep it within about 60 lines. Sections:
+  - `任务`: the goal, Issue number, branch, last commit SHA, update date.
+  - `已完成`: what is done and how it was verified.
+  - `进行中`: what is half-done, exactly where it stopped, uncommitted files.
+  - `下一步`: ordered actions, concrete enough to start on directly.
+  - `关键文件与决定`: the files that matter and why; decisions taken and
+    approaches ruled out, each with its reason.
+  - `未验证`: checks not yet run and assumptions not yet confirmed.
+
+  Point to commits, Issues and documents; do not copy code, logs or anything
+  the repository already records.
+- At the start of a session, if `HANDOFF.md` exists, read it before anything
+  else and compare it with `git status` and the recent log. Where they
+  disagree, the repository is right: correct the note. Then continue from
+  `下一步`; do not redo investigation the note already records.
+- When the user asks to continue interrupted work, continue from
+  `HANDOFF.md` in the current session; do not ask them to reopen the earlier
+  conversation.
+- When the task is delivered, delete the note or cut it down to the one line
+  of state that still matters. A stale note misleads the next session.
+
 ## Documentation and delivery
 
 - README.md and README_CN.md are aligned current manuals for first-time users:
