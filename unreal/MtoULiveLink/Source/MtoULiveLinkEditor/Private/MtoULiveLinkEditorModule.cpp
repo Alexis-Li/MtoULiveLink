@@ -6,6 +6,7 @@
 #include "MtoULiveLinkPreview.h"
 #include "MtoULiveLinkActorDetails.h"
 #include "MtoULinkageEditor.h"
+#include "MtoUBackgroundUpdates.h"
 
 #include "Editor.h"
 #include "IDetailCustomization.h"
@@ -57,6 +58,7 @@ public:
 
         // The editor half of the v10 linkage boundary, once per editor session.
         FMtoULinkageEditor::InstallHooks();
+        FMtoUBackgroundUpdates::Get().Start();
 
         AssetReimportHandle = GEditor->GetEditorSubsystem<UImportSubsystem>()
             ->OnAssetReimport.AddRaw(this, &FMtoULiveLinkEditorModule::HandleAssetReimport);
@@ -64,6 +66,7 @@ public:
 
     virtual void ShutdownModule() override
     {
+        FMtoUBackgroundUpdates::Get().Stop();
         if (GEditor)
         {
             if (ActorFactory.IsValid() && bRegisteredWithPlacementSubsystem)

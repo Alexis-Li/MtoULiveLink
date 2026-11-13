@@ -83,10 +83,6 @@ struct FMtoUCacheTransition
 
     EKind Kind = EKind::None;
     bool bAccepted = true;
-    // Unset means preserve the existing override (including on completion).
-    // The source alone applies this demand to editor viewports, and only for
-    // a still-publishable streaming session.
-    TOptional<bool> RealtimeOverride;
     int32 UploadId = INDEX_NONE;
     int32 PlayId = INDEX_NONE;
     int32 ClearId = INDEX_NONE;
