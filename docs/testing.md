@@ -205,6 +205,14 @@ recovery. Exit code 0 and `ok=true` require all checks. A failed run exits 1
 and records its error alongside the partial evidence. Inspect the editor and
 Maya logs for startup or shutdown failures.
 
+Each Maya peer acknowledges a complete pass through `motion_frames` before
+measurement, with that preparation recorded separately. The same prepared
+motion is used for the foreground reference and background samples. Full
+settings-file hashes remain in the evidence. Persisted preference preservation
+compares the complete `EditorPerformanceSettings` sections, including their
+presence in each observed settings file. Ordinary Editor startup updates the
+recent project's last-open time in another section.
+
 The default scenario disconnects and reconnects around a malformed protocol
 frame, participating Actor deletion, world replacement, real Maya peer exit
 and source removal through an empty Live Link preset. World replacement uses

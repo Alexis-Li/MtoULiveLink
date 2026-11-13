@@ -128,6 +128,41 @@ def motion_measurement(shown):
 
 
 class BackgroundAcceptanceTests(unittest.TestCase):
+    def test_preparation_acknowledges_every_measured_motion_frame(self):
+        box = mock.Mock()
+        box.send.side_effect = lambda action, frame: {"time_evaluated": {"frame": frame, "seconds": frame / 10}}
+        prepared = acceptance.prepare_motion(box, [300, 304])
+        self.assertEqual([300, 301, 302, 303], [row["frame"] for row in prepared])
+        self.assertEqual([mock.call("time", frame=frame) for frame in range(300, 304)], box.send.call_args_list)
+        box.send.side_effect = None
+        box.send.return_value = {"time_evaluated": {"frame": 299}}
+        with self.assertRaisesRegex(RuntimeError, "preparation frame"):
+            acceptance.prepare_motion(box, [300, 304])
+
+    def test_performance_preferences_observe_persisted_changes_and_keep_full_file_hashes(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(acceptance.os.environ, LOCALAPPDATA=directory):
+            root = Path(directory) / "UnrealEngine/5.7/Saved/Config/WindowsEditor"
+            root.mkdir(parents=True)
+            path = root / "EditorSettings.ini"
+            content = ("[/Script/UnrealEd.EditorPerformanceSettings]\n"
+                       "bThrottleCPUWhenNotForeground=False\n"
+                       "[/Script/UnrealEd.EditorSettings]\nLastOpenTime=first\n")
+            path.write_text(content, encoding="utf-8-sig")
+            before = acceptance.performance_preferences()
+            hashes = acceptance.settings_hashes()
+            path.write_text(content.replace("first", "second"), encoding="utf-8-sig")
+            self.assertEqual(before, acceptance.performance_preferences())
+            self.assertNotEqual(hashes, acceptance.settings_hashes())
+            path.write_text(content.replace("=False", "=True"), encoding="utf-8-sig")
+            self.assertNotEqual(before, acceptance.performance_preferences())
+            path.write_text("[/Script/UnrealEd.EditorSettings]\nLastOpenTime=first\n", encoding="utf-8-sig")
+            self.assertNotEqual(before, acceptance.performance_preferences())
+            path.unlink()
+            self.assertNotEqual(before, acceptance.performance_preferences())
+            path.write_text(content, encoding="utf-8-sig")
+            (root / "EditorPerProjectUserSettings.ini").write_text(content, encoding="utf-8")
+            self.assertNotEqual(before, acceptance.performance_preferences())
+
     def test_close_world_replaces_unsaved_map_repeatedly_in_one_host(self):
         with editor_driver() as driver:
             for unused in range(2):

@@ -392,6 +392,32 @@ def settings_hashes():
             for path in root.rglob("*Editor*Settings.ini")}
 
 
+def performance_preferences():
+    root = Path(os.environ["LOCALAPPDATA"]) / "UnrealEngine" / "5.7" / "Saved" / "Config"
+    result = {}
+    for path in root.rglob("*Editor*Settings.ini"):
+        lines = []
+        in_section = False
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                in_section = stripped.casefold() == "[/script/unrealed.editorperformancesettings]"
+            if in_section:
+                lines.append(line)
+        result[str(path.relative_to(root))] = lines
+    return result
+
+
+def prepare_motion(box, frames):
+    prepared = []
+    for frame in range(*frames):
+        evaluated = box.send("time", frame=frame)["time_evaluated"]
+        if evaluated["frame"] != frame:
+            raise RuntimeError("Maya did not evaluate the requested preparation frame")
+        prepared.append(evaluated)
+    return prepared
+
+
 def check_connected_cadence(value, reference, baseline, limits):
     if value["frame_hz"] < max(limits["connected_min_hz"], reference["frame_hz"] * limits["reference_ratio_min"]):
         raise RuntimeError("Background frame cadence failed the declared same-run reference limits")
@@ -427,6 +453,7 @@ def run(args):
                "-ExecutePythonScript=" + str(Path(__file__).resolve()), "-abslog=" + str(out / "editor.log")]
     summary = {"product_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
                "thresholds": fixture["thresholds"], "settings_before": settings_hashes(), "stages": {},
+               "performance_preferences_before": performance_preferences(),
                "oracles": [], "commands": {"editor": command}, "ok": False}
     summary["input_sha256"] = {
         "tool": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -463,6 +490,13 @@ def run(args):
             wait_for(lambda: (host_state(box.result, process).get("connected") if connect else
                              host_state(box.result, process).get("phase") == "running"),
                      "Maya readiness", 300)
+            box.send("stage", name="prepare_motion")
+            started = time.monotonic()
+            prepared = prepare_motion(box, fixture["motion_frames"])
+            write_json(directory / "motion-preparation.json", prepared)
+            summary.setdefault("motion_preparation", []).append(
+                {"peer": index, "frames": fixture["motion_frames"], "acknowledged": len(prepared),
+                 "duration_seconds": time.monotonic() - started})
             return process, box
 
         maya, maya_box = launch_maya(1)
@@ -627,8 +661,9 @@ def run(args):
         if summary["maya_exit_code"] != 0:
             raise RuntimeError("Maya failed normal shutdown")
         summary["settings_after"] = settings_hashes()
-        if summary["settings_after"] != summary["settings_before"]:
-            raise RuntimeError("Existing user editor settings changed")
+        summary["performance_preferences_after"] = performance_preferences()
+        if summary["performance_preferences_after"] != summary["performance_preferences_before"]:
+            raise RuntimeError("Existing user editor performance preferences changed")
         summary["ok"] = True
     except Exception:
         summary["error"] = traceback.format_exc()
@@ -643,6 +678,7 @@ def run(args):
                 summary.setdefault("cleanup_errors", []).append({"pid": process.pid, "error": str(exc)})
                 summary["ok"] = False
         summary["settings_after"] = settings_hashes()
+        summary["performance_preferences_after"] = performance_preferences()
         write_json(out / "summary.json", summary)
     if not summary["ok"]:
         raise RuntimeError("Host process cleanup failed, see summary.json")
