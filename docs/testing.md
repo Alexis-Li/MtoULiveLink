@@ -134,6 +134,99 @@ A test editor can run beside a person's own. `-MtoULiveLinkPort=<n>` moves the
 Unreal listener off 54321; the two Maya GUI tests pass it to the Maya they
 start, and `MTOU_LIVELINK_PORT` does the same for any other Maya.
 
+## Ordinary Editor background updates
+
+`tools/background_updates_acceptance.py` runs a rendered `UnrealEditor.exe`
+and real Maya GUI through the existing driver. Use a disposable host whose
+Content contains copies of the fixture assets and whose
+`AdditionalPluginDirectories` loads the checkout's `unreal/`. Enable LiveLink
+and PythonScriptPlugin and build that host with stock UE 5.7.4 first. Keep the
+production project and assets separate from the disposable host.
+
+Copy [background-updates.json](acceptance-fixtures/background-updates.json)
+to `<fixtures>` and fill its paths and assets. Its `display_bones` maps each
+visible display mesh to moving, streamed bones that it skins. Every display
+needs an oracle. `oracle_frames` must contain distinct poses inside the Maya
+animation. `motion_frames` defines the consecutive frames used for the cadence
+measurement. One primary mesh with moving streamed bones is sufficient. Add
+`parts` only when those displays are needed and their assets are available.
+Every listed part is enabled by this tool. Connected samples and stable-pose
+checks require the primary and each listed part to be visible and registered,
+with the fixture's mesh identities and counts, including repeated part meshes.
+`thresholds` requires explicit numeric limits and a `rationale` explaining their
+AC04 and same-run reference basis before measurement. The template leaves the
+numbers unset. `connected_min_hz` must exceed both the engine's 3 Hz throttle
+cap and `baseline_max_hz`. `reference_ratio_min` expresses the accepted frame
+cadence relative to the foreground reference. `producer_min_hz` establishes a
+useful controlled input cadence. `pose_ratio_min` checks every display against
+the slower of observed input and engine cadence, and against its same-run
+foreground capture fraction. `recovery_ratio_max` bounds recovered cadence
+relative to the measured disconnected baseline. Record the reason for each
+tolerance and keep the same fixture and preference-template hash when comparing
+runs. These limits belong to that measurement setup.
+
+Run from the repository root with a system Python. The output directory must
+be new. `--seconds` defaults to 12 and must be at least 8.
+
+```powershell
+python tools/background_updates_acceptance.py --editor '<UE>/Engine/Binaries/Win64/UnrealEditor.exe' --project '<scratch-host>/<Project.uproject>' --fixture '<fixtures>/background-updates.json' --evidence '<scratch>/background-exits' --port 55444
+python tools/background_updates_acceptance.py --editor '<UE>/Engine/Binaries/Win64/UnrealEditor.exe' --project '<scratch-host>/<Project.uproject>' --fixture '<fixtures>/background-updates.json' --evidence '<scratch>/background-editor-exit' --port 55444 --scenario editor_exit
+```
+
+The launcher supplies the process-level background CPU preference override,
+copies `maya.app_dir_template` for every peer and requests a non-activating
+normal-size startup through Windows `STARTUPINFO`. Host-created windows can
+still activate during startup, so arrange the run where those launches can
+occur without interrupting desktop work. The tool writes the next required
+foreground PID to `summary.json` and waits passively for it, with
+`--foreground-timeout` defaulting to 90 seconds. It has no foreground-switching
+or input-injection action. Each measured sample must name the required
+foreground PID, and the Editor window must remain visible and restored.
+The C++ snapshots also require matching real engine focus/foreground flags.
+No Automation command or unattended flag runs in this editor.
+
+The other GUI acceptance tests reuse file-driven Maya commands and hidden
+process startup. Their offscreen Details rendering can run without occupying
+the desktop. Ordinary background-update acceptance additionally requires the
+real Maya-foreground and Editor-foreground reference stages. A hidden process
+or an inactive private desktop alone does not establish those states. Arrange
+actual foreground transitions externally, or validate a separate session's
+foreground semantics before using it for this procedure. An unmet foreground
+condition fails with partial evidence. The launcher leaves the current
+desktop's focus selection to its operator.
+
+`summary.json` records thresholds, the product SHA and input-file hashes, frame and pose-change Hz,
+actual sample durations, producer acknowledgements, settings-file hashes,
+stable-pose errors in cm and process exit codes. Per-stage files retain the
+frame-deduplicated component transforms and C++ snapshots. Snapshots require
+the ordinary-editor flags, unchanged enabled preference, the exact owned CPU
+registration count, the expected throttle decision and viewport realtime
+recovery. Exit code 0 and `ok=true` require all checks. A failed run exits 1
+and records its error alongside the partial evidence. Inspect the editor and
+Maya logs for startup or shutdown failures.
+
+Each Maya peer acknowledges a complete pass through `motion_frames` before
+measurement, with that preparation recorded separately. The same prepared
+motion is used for the foreground reference and background samples. Full
+settings-file hashes remain in the evidence. Persisted preference preservation
+compares the complete `EditorPerformanceSettings` sections, including their
+presence in each observed settings file. Ordinary Editor startup updates the
+recent project's last-open time in another section.
+
+The default scenario disconnects and reconnects around a malformed protocol
+frame, participating Actor deletion, world replacement, real Maya peer exit
+and source removal through an empty Live Link preset. World replacement uses
+an unsaved blank map and verifies its new identity before acknowledging world
+cleanup. The second scenario
+exits the Editor while connected. Its final internal cleanup is covered by the
+default owner tests, since a terminated process cannot answer a snapshot.
+The Maya driver validates every dialog against the stage's expected codes.
+
+Inspect the visible viewport and minimize/restore behavior separately in the
+real GUI and record the observation method. The scripted window flags establish
+restored state during cadence measurement. They do not establish whether a
+minimized viewport submits drawing work.
+
 ## Maya GUI tests
 
 `ProductionSequence` and `GuiRegression` are the two Maya GUI tests.

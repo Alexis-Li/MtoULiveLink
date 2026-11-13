@@ -11,6 +11,12 @@
 #include "MtoULiveLinkActor.h"
 #include "MtoULiveLinkBinding.h"
 #include "MtoULinkage.h"
+#include "MtoUBackgroundUpdates.h"
+#include "HAL/IConsoleManager.h"
+#include "HAL/PlatformApplicationMisc.h"
+#include "Misc/App.h"
+#include "Misc/CoreDelegates.h"
+#include "Editor/EditorPerformanceSettings.h"
 
 #include "Animation/AnimCurveMetadata.h"
 #include "Animation/MorphTarget.h"
@@ -30,6 +36,7 @@
 #include "GeometryScript/MeshAssetFunctions.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
+#include "Misc/OutputDeviceNull.h"
 #include "Materials/Material.h"
 #include "MeshDescription.h"
 #include "Misc/AutomationTest.h"
@@ -842,7 +849,13 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
         const FMtoULiveLinkActorDetails::FStatusView View =
             FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor);
         TestEqual(FString::Printf(TEXT("%s has its own Chinese headline"), *Name),
-            View.Connection.ToString(), FString(Case.Headline));
+            View.Connection.ToString().Left(FString(Case.Headline).Len()), FString(Case.Headline));
+        const bool bConnected = Case.State == EMtoUConnectionState::Connected
+            || Case.State == EMtoUConnectionState::ConnectedAsSecondObject
+            || Case.State == EMtoUConnectionState::ConnectedPartialMorph
+            || Case.State == EMtoUConnectionState::ConnectedBoneOnly;
+        TestEqual(FString::Printf(TEXT("%s shows background updates only while connected"), *Name),
+            View.Connection.ToString().Contains(TEXT("连接期间 UE 在后台保持更新")), bConnected);
         TestFalse(FString::Printf(TEXT("%s never reads as an unknown status"), *Name),
             View.State.ToString().Contains(TEXT("状态未知")));
         TestFalse(FString::Printf(TEXT("%s names the state"), *Name),
@@ -986,13 +999,13 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
     ReadoutActor->NoteSessionStreaming();
     TestEqual(TEXT("a negotiated session reads as connected"),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).Connection.ToString(),
-        FString(TEXT("已连接")));
+        FString(TEXT("已连接\n连接期间 UE 在后台保持更新")));
 
     // The cached presenter is built while streaming, so it has to follow the
     // same actor through the interruption instead of serving the old headline.
     FMtoULiveLinkActorDetails::FStatusPresenter InterruptPresenter(ReadoutActor);
     TestEqual(TEXT("the cached presenter starts on the connected headline"),
-        InterruptPresenter.Get().Connection.ToString(), FString(TEXT("已连接")));
+        InterruptPresenter.Get().Connection.ToString(), FString(TEXT("已连接\n连接期间 UE 在后台保持更新")));
     ReadoutActor->SetConnectionState(EMtoUConnectionState::Disconnected);
     ReadoutActor->NoteSessionEnded();
     const FMtoULiveLinkActorDetails::FStatusView InterruptedView =
@@ -1013,7 +1026,7 @@ bool FMtoUDetailsStatusTest::RunTest(const FString& Parameters)
     ReadoutActor->NoteSessionStreaming();
     TestEqual(TEXT("a reconnected session reads as connected again"),
         FMtoULiveLinkActorDetails::MakeStatusView(ReadoutActor).Connection.ToString(),
-        FString(TEXT("已连接")));
+        FString(TEXT("已连接\n连接期间 UE 在后台保持更新")));
 
     // A session that ends before it ever streamed is not an interruption.
     AMtoULiveLinkActor* NeverStreamedActor = ReadoutWorld
@@ -5451,7 +5464,7 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
             && Actor->GetConnectionState() == EMtoUConnectionState::Connected);
     TestEqual(TEXT("a negotiated session reads as connected"),
         FMtoULiveLinkActorDetails::MakeStatusView(Actor).Connection.ToString(),
-        FString(TEXT("已连接")));
+        FString(TEXT("已连接\n连接期间 UE 在后台保持更新")));
     const TArray<uint8> AnimFrame = PacketFor(FrameJsonFor(*TestSkeleton, FVector(11.0, 12.0, 13.0)));
     TestTrue(TEXT("animation frame is sent"), AnimClient && SendBytes(*AnimClient, AnimFrame.GetData(), AnimFrame.Num()));
     TestTrue(TEXT("animation frame reaches Live Link"),
@@ -5513,7 +5526,7 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
             && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == Driver);
     TestEqual(TEXT("the reconnected session reads as connected again"),
         FMtoULiveLinkActorDetails::MakeStatusView(Actor).Connection.ToString(),
-        FString(TEXT("已连接")));
+        FString(TEXT("已连接\n连接期间 UE 在后台保持更新")));
     // A peer that simply closes the socket is the same interruption, produced
     // by the worker's own disconnect detection.
     DestroySocket(ReconnectClient);
@@ -5873,28 +5886,6 @@ FSocket* ComparisonConnect(ISocketSubsystem& SocketSubsystem, const uint16 Port)
     return Socket;
 }
 
-bool ComparisonHasOverride(const FText& OverrideName)
-{
-    int32 Count = 0;
-    if (!GEditor)
-    {
-        return false;
-    }
-    for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-    {
-        if (!ViewportClient)
-        {
-            continue;
-        }
-        ++Count;
-        if (!ViewportClient->HasRealtimeOverride(OverrideName) || !ViewportClient->IsRealtime())
-        {
-            return false;
-        }
-    }
-    return Count > 0;
-}
-
 struct FMtoUComparisonExpectation
 {
     FVector Pose = FVector::ZeroVector;
@@ -6052,7 +6043,6 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
     FMtoUPreviewComparisonNaturalTickTest* Self = this;
     TSharedRef<FMtoUComparisonNaturalTickState> State =
         MakeShared<FMtoUComparisonNaturalTickState>();
-    const FText OverrideName = FText::FromString(TEXT("MtoU Live Link"));
 
     const FMtoUComparisonExpectation GeneratedPose{
         FVector(21.0, 22.0, 23.0), 0.35f, 0.45f, 0.55f};
@@ -6066,7 +6056,7 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
     // Setup: negotiate the Model workflow with the Generated, Driver-only, and
     // part-only Morph manifest in the real editor world. This control plane
     // pumps Source->Update for determinism; no display conclusion is drawn here.
-    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, OverrideName]()
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State]()
     {
         ISocketSubsystem* SocketSubsystem = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
         Self->TestNotNull(TEXT("platform socket subsystem is available"), SocketSubsystem);
@@ -6354,8 +6344,8 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
             && Actor->GetPreviewReadiness().State == State->ReadinessState);
         State->Session = FMtoURefreshEndsSessionTestAccess::Session(*Source);
         Self->TestTrue(TEXT("the negotiated session is streaming"), State->Session != 0);
-        Self->TestTrue(TEXT("the connected stream forces editor viewport realtime"),
-            ComparisonHasOverride(OverrideName));
+        Self->TestTrue(TEXT("the connected stream requests background updates"),
+            MtoUGetTimeControlView().bConnected);
         return true;
     }));
 
@@ -6603,9 +6593,9 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
         return true;
     }));
 
-    // Cleanup always runs: the actor, source, socket, and viewport override
+    // Cleanup always runs: the actor, source, socket, and update demand
     // leave no trace in the real editor world.
-    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State, OverrideName]()
+    ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Self, State]()
     {
         if (State->bActiveSourceSet)
         {
@@ -6623,6 +6613,8 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
                     ILiveLinkClient::ModularFeatureName).RemoveSource(State->Source.ToSharedRef());
             }
         }
+        Self->TestTrue(TEXT("shutdown releases background update demand"),
+            !State->Source.IsValid() || !State->Source->GetTimeControlView().bConnected);
         State->Source.Reset();
         if (State->Actor && State->EditorWorld)
         {
@@ -6645,18 +6637,6 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
                 if (Saved.Key)
                 {
                     Saved.Key->SetRealtime(Saved.Value);
-                    Saved.Key->RemoveRealtimeOverride(OverrideName, false);
-                }
-            }
-        }
-        bool bNoOverride = true;
-        if (GEditor)
-        {
-            for (FLevelEditorViewportClient* ViewportClient : GEditor->GetLevelViewportClients())
-            {
-                if (ViewportClient && ViewportClient->HasRealtimeOverride(OverrideName))
-                {
-                    bNoOverride = false;
                 }
             }
         }
@@ -6672,7 +6652,6 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
                 }
             }
         }
-        Self->TestTrue(TEXT("cleanup leaves no plugin viewport override"), bNoOverride);
         Self->TestEqual(TEXT("cleanup leaves no binding actor in the editor world"),
             RemainingPlaced, 0);
         return true;
@@ -7403,6 +7382,390 @@ bool FMtoULinkageCameraTimeTest::RunTest(const FString& Parameters)
         }
     }
     Player->Stop();
+    return true;
+}
+
+
+/** Private owner observations shared by Automation and the ordinary-host snapshot. */
+class FMtoUBackgroundUpdatesTestAccess
+{
+public:
+    static void BeginFrame() { FMtoUBackgroundUpdates::Get().BeginFrame(); }
+    static int32 RegistrationCount()
+    {
+        const FMtoUBackgroundUpdates& Owner = FMtoUBackgroundUpdates::Get();
+        const UEditorEngine* Editor = Owner.RegisteringEditor.Get();
+        int32 Count = 0;
+        if (Editor)
+        {
+            for (const UEditorEngine::FShouldDisableCPUThrottling& Delegate : Editor->ShouldDisableCPUThrottlingDelegates)
+            {
+                if (Delegate.GetHandle() == Owner.CPUHandle)
+                {
+                    ++Count;
+                }
+            }
+        }
+        return Count;
+    }
+    static bool CPUCallback()
+    {
+        const FMtoUBackgroundUpdates& Owner = FMtoUBackgroundUpdates::Get();
+        if (const UEditorEngine* Editor = Owner.RegisteringEditor.Get())
+        {
+            for (const UEditorEngine::FShouldDisableCPUThrottling& Delegate : Editor->ShouldDisableCPUThrottlingDelegates)
+            {
+                if (Delegate.GetHandle() == Owner.CPUHandle)
+                {
+                    return Delegate.Execute();
+                }
+            }
+        }
+        return false;
+    }
+    static bool HasListeners()
+    {
+        const FMtoUBackgroundUpdates& Owner = FMtoUBackgroundUpdates::Get();
+        return Owner.FrameHandle.IsValid() && Owner.PreExitHandle.IsValid();
+    }
+};
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUBackgroundUpdatesTest,
+    "MtoULiveLink.Editor.BackgroundUpdates",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUBackgroundUpdatesTest::RunTest(const FString& Parameters)
+{
+    if (!GEditor)
+    {
+        AddError(TEXT("Background updates require an editor and real level viewport clients."));
+        return false;
+    }
+    CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    ISocketSubsystem* Sockets = ISocketSubsystem::Get(PLATFORM_SOCKETSUBSYSTEM);
+    ILiveLinkClient& Client = IModularFeatures::Get().GetModularFeature<ILiveLinkClient>(
+        ILiveLinkClient::ModularFeatureName);
+    auto Address = Sockets->CreateInternetAddr();
+    Address->SetIp(0x7f000001);
+    Address->SetPort(0);
+    FSocket* Reservation = Sockets->CreateSocket(NAME_Stream, TEXT("MtoUBackgroundUpdates reservation"));
+    if (!TestNotNull(TEXT("port reservation exists"), Reservation))
+    {
+        return false;
+    }
+    Reservation->Bind(*Address);
+    Reservation->GetAddress(*Address);
+    const uint16 Port = static_cast<uint16>(Address->GetPort());
+    Sockets->DestroySocket(Reservation);
+
+    FMtoUBackgroundUpdates& Owner = FMtoUBackgroundUpdates::Get();
+    Owner.Stop();
+    TSharedRef<FMtoULiveLinkSource> Source = MakeShared<FMtoULiveLinkSource>(Port);
+    const TSharedPtr<FMtoULiveLinkSource> Previous = MtoUSetActiveSource(Source);
+    Client.AddSource(Source);
+    UWorld* World = UWorld::CreateWorld(EWorldType::Editor, false);
+    FWorldContext& Context = GEngine->CreateNewWorldContext(EWorldType::Editor);
+    Context.SetCurrentWorld(World);
+    World->InitializeActorsForPlay(FURL());
+    AMtoULiveLinkActor* Actor = World->SpawnActor<AMtoULiveLinkActor>();
+    UMtoULiveLinkBinding* Binding = NewObject<UMtoULiveLinkBinding>(World);
+    Binding->SkeletalMesh = LoadObject<USkeletalMesh>(nullptr,
+        TEXT("/Engine/EngineMeshes/SkeletalCube.SkeletalCube"));
+    Actor->SetBinding(Binding);
+    FString PairError;
+    TestTrue(TEXT("normal actor pairing succeeds"), MtoUPairLinkageTarget(*Actor, TEXT("character"), PairError));
+    FSocket* Peer = nullptr;
+    const uint64 OriginalFrame = GFrameCounter;
+    UEditorPerformanceSettings* Settings = GetMutableDefault<UEditorPerformanceSettings>();
+    const bool OriginalPreference = Settings->bThrottleCPUWhenNotForeground;
+    UEditorEngine::FShouldDisableCPUThrottling Other =
+        UEditorEngine::FShouldDisableCPUThrottling::CreateLambda([]() { return false; });
+    const FDelegateHandle OtherHandle = Other.GetHandle();
+    GEditor->ShouldDisableCPUThrottlingDelegates.Add(MoveTemp(Other));
+    const int32 CPUCountWithoutOwner = GEditor->ShouldDisableCPUThrottlingDelegates.Num();
+    ON_SCOPE_EXIT
+    {
+        GFrameCounter = OriginalFrame;
+        Owner.Stop();
+        MtoUSetDeferStreamingSessionEndCleanup(false);
+        GEditor->ShouldDisableCPUThrottlingDelegates.RemoveAll(
+            [OtherHandle](const UEditorEngine::FShouldDisableCPUThrottling& Delegate)
+            { return Delegate.GetHandle() == OtherHandle; });
+        Settings->bThrottleCPUWhenNotForeground = OriginalPreference;
+        if (Peer)
+        {
+            Peer->Close();
+            Sockets->DestroySocket(Peer);
+        }
+        Source->StopListener();
+        Client.RemoveSource(Source);
+        MtoUSetActiveSource(Previous);
+        World->DestroyWorld(false);
+        GEngine->DestroyWorldContext(World);
+        Owner.Start();
+        CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    };
+    Settings->bThrottleCPUWhenNotForeground = true;
+    Owner.Start();
+    Owner.Start();
+    TestTrue(TEXT("start registers frame and pre-exit cleanup"), FMtoUBackgroundUpdatesTestAccess::HasListeners());
+    FMtoUBackgroundUpdatesTestAccess::BeginFrame();
+    TestEqual(TEXT("listener alone has no CPU registration"), FMtoUBackgroundUpdatesTestAccess::RegistrationCount(), 0);
+    if (!TestTrue(TEXT("listener is ready"), ComparisonPollUntil([&]()
+        { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); })))
+    {
+        return false;
+    }
+    Peer = ComparisonConnect(*Sockets, Port);
+    if (!TestNotNull(TEXT("Maya socket connects"), Peer) || !Binding->SkeletalMesh)
+    {
+        return false;
+    }
+    const FReferenceSkeleton& Skeleton = Binding->SkeletalMesh->GetRefSkeleton();
+    FString Bones;
+    for (int32 Index = 0; Index < Skeleton.GetNum(); ++Index)
+    {
+        if (!Bones.IsEmpty())
+        {
+            Bones += TEXT(",");
+        }
+        Bones += FString::Printf(TEXT("[\"%s\",%d,%s]"),
+            *Skeleton.GetBoneName(Index).ToString(), Skeleton.GetParentIndex(Index),
+            *ComparisonTransformJson(Skeleton.GetRefBonePose()[Index]));
+    }
+    const TArray<uint8> Init = ComparisonPacket(FString::Printf(
+        TEXT("{\"type\":\"init\",\"revision\":9," MTOU_PROTOCOL_VERSION_FIELD ",\"object_id\":\"character\","
+             "\"set_revision\":1,\"space_revision\":1,\"set_objects\":[\"character\"],"
+             "\"workflow\":\"animation\",\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
+        *Bones));
+    TArray<uint8> Reply;
+    if (!TestTrue(TEXT("init is sent"), ComparisonSend(*Peer, Init.GetData(), Init.Num()))
+        || !TestTrue(TEXT("normal negotiation succeeds"), ComparisonReceive(*Peer, Reply, [&]() { Source->Update(); }))
+        || !TestTrue(TEXT("complete session requests updates"), Source->GetTimeControlView().bConnected))
+    {
+        return false;
+    }
+
+    // Construct real level viewport clients. Each constructor registers with
+    // GEditor, including the one opened after the connection has begun.
+    FLevelEditorViewportClient Viewport(nullptr);
+    const FText Background = FText::FromString(TEXT("MtoU test background"));
+    for (bool bBase : {false, true})
+    {
+        Viewport.SetRealtime(bBase);
+        Viewport.AddRealtimeOverride(false, Background);
+        FMtoUBackgroundUpdatesTestAccess::BeginFrame();
+        FMtoUBackgroundUpdatesTestAccess::BeginFrame();
+        TestEqual(TEXT("active frames add exactly one delegate to the editor array"),
+            GEditor->ShouldDisableCPUThrottlingDelegates.Num(), CPUCountWithoutOwner + 1);
+        TestEqual(TEXT("repeated active frame owns one CPU delegate"), FMtoUBackgroundUpdatesTestAccess::RegistrationCount(), 1);
+        TestTrue(TEXT("CPU callback reads connected source"), FMtoUBackgroundUpdatesTestAccess::CPUCallback());
+        TestFalse(TEXT("owned delegate disables throttling"), GEditor->ShouldThrottleCPUUsage());
+        TestTrue(TEXT("one-frame request defeats a false background override"), Viewport.IsRealtime());
+        bool Saved = !bBase;
+        Viewport.SaveRealtimeStateToConfig(Saved);
+        TestEqual(TEXT("configured viewport realtime is unchanged"), Saved, bBase);
+        TestTrue(TEXT("background CPU preference is unchanged"), Settings->bThrottleCPUWhenNotForeground);
+        ++GFrameCounter;
+        TestFalse(TEXT("without renewal the one-frame realtime request expires"), Viewport.IsRealtime());
+        Viewport.RemoveRealtimeOverride(Background, false);
+    }
+    FLevelEditorViewportClient NewViewport(nullptr);
+    NewViewport.SetRealtime(false);
+    NewViewport.AddRealtimeOverride(false, Background);
+    FMtoUBackgroundUpdatesTestAccess::BeginFrame();
+    TestTrue(TEXT("a newly opened viewport receives the next frame request"), NewViewport.IsRealtime());
+
+    Owner.Stop();
+    Owner.Stop();
+    TestEqual(TEXT("active stop removes exactly its delegate from the editor array"),
+        GEditor->ShouldDisableCPUThrottlingDelegates.Num(), CPUCountWithoutOwner);
+    TestEqual(TEXT("stop removes an active CPU registration"), FMtoUBackgroundUpdatesTestAccess::RegistrationCount(), 0);
+    TestFalse(TEXT("stop removes both owned listeners"), FMtoUBackgroundUpdatesTestAccess::HasListeners());
+    Owner.Start();
+    FMtoUBackgroundUpdatesTestAccess::BeginFrame();
+    TestEqual(TEXT("restart reacquires one active CPU registration"), FMtoUBackgroundUpdatesTestAccess::RegistrationCount(), 1);
+
+    // Cache ownership retains the same connection-scoped editor demand.
+    const auto SendCache = [&](const FString& Text)
+    {
+        const TArray<uint8> Bytes = ComparisonPacket(Text);
+        return ComparisonSend(*Peer, Bytes.GetData(), Bytes.Num());
+    };
+    const auto WaitCache = [&](EMtoUCacheState State)
+    {
+        return ComparisonPollUntil([&]()
+        {
+            Source->Update();
+            return Source->GetActorCachePlaybackView(*Actor).State == State;
+        });
+    };
+    TestTrue(TEXT("cache entry is sent"), SendCache(TEXT("{\"type\":\"cache_enter\"}")));
+    TestTrue(TEXT("cache entry is applied"), WaitCache(EMtoUCacheState::Entered));
+    TestTrue(TEXT("cache entry retains background updates"), Source->GetTimeControlView().bConnected);
+    TestTrue(TEXT("cache begin is sent"), SendCache(TEXT(
+        "{\"type\":\"cache_begin\",\"upload_id\":1,\"revision\":9,\"fps\":1,\"start_frame\":1,"
+        "\"end_frame\":2,\"frame_count\":2,\"payload_size\":8192}")));
+    TestTrue(TEXT("upload begins"), WaitCache(EMtoUCacheState::Receiving));
+    TestTrue(TEXT("cache receiving retains background updates"), Source->GetTimeControlView().bConnected);
+    FString Transforms;
+    for (const FTransform& Transform : Skeleton.GetRefBonePose())
+    {
+        if (!Transforms.IsEmpty())
+        {
+            Transforms += TEXT(",");
+        }
+        Transforms += ComparisonTransformJson(Transform);
+    }
+    for (int32 Index = 0; Index < 2; ++Index)
+    {
+        TestTrue(TEXT("cached pose is sent"), SendCache(FString::Printf(
+            TEXT("{\"type\":\"cache_frame\",\"index\":%d,\"transforms\":[%s],\"curves\":[]}"), Index, *Transforms)));
+    }
+    TestTrue(TEXT("cache end is sent"), SendCache(TEXT("{\"type\":\"cache_end\"}")));
+    TestTrue(TEXT("cache is ready"), WaitCache(EMtoUCacheState::Ready));
+    TestTrue(TEXT("ready cache retains background updates"), Source->GetTimeControlView().bConnected);
+    TestTrue(TEXT("local cache play starts"), Source->StartActorCachedPlayback(*Actor));
+    TestTrue(TEXT("local cache pauses"), Source->PauseActorCachedPlayback(*Actor));
+    TestTrue(TEXT("paused cache retains background updates"), Source->GetTimeControlView().bConnected);
+    FMtoUBackgroundUpdatesTestAccess::BeginFrame();
+    TestTrue(TEXT("CPU callback keeps updating during a paused cache"), FMtoUBackgroundUpdatesTestAccess::CPUCallback());
+    TestTrue(TEXT("local cache stops"), Source->StopActorCachedPlayback(*Actor));
+    TestTrue(TEXT("stopped cache retains background updates"), Source->GetTimeControlView().bConnected);
+
+    // An end request is synchronous even while worker/display cleanup is held.
+    MtoUSetDeferStreamingSessionEndCleanup(true);
+    Actor->NotifyBindingInputsChanged();
+    TestFalse(TEXT("CPU callback refuses the ended source before another frame"), FMtoUBackgroundUpdatesTestAccess::CPUCallback());
+    FMtoUBackgroundUpdatesTestAccess::BeginFrame();
+    TestEqual(TEXT("inactive frame preserves other CPU delegates"),
+        GEditor->ShouldDisableCPUThrottlingDelegates.Num(), CPUCountWithoutOwner);
+    TestEqual(TEXT("next frame removes the owned CPU delegate"), FMtoUBackgroundUpdatesTestAccess::RegistrationCount(), 0);
+    ++GFrameCounter;
+    TestFalse(TEXT("ended session leaves no realtime request on a new viewport"), NewViewport.IsRealtime());
+    NewViewport.RemoveRealtimeOverride(Background, false);
+    MtoUSetDeferStreamingSessionEndCleanup(false);
+    Owner.Stop();
+    Owner.Stop();
+    TestFalse(TEXT("stop removes frame and pre-exit listeners"), FMtoUBackgroundUpdatesTestAccess::HasListeners());
+    TestTrue(TEXT("stop preserves another system's CPU delegate"),
+        GEditor->ShouldDisableCPUThrottlingDelegates.ContainsByPredicate(
+            [OtherHandle](const UEditorEngine::FShouldDisableCPUThrottling& Delegate)
+            { return Delegate.GetHandle() == OtherHandle; }));
+    Owner.Start();
+    TestTrue(TEXT("owner restarts after repeated stop"), FMtoUBackgroundUpdatesTestAccess::HasListeners());
+    return true;
+}
+
+namespace
+{
+void WriteBackgroundSnapshot(const TArray<FString>& Args, UWorld*, FOutputDevice& Output)
+{
+    // ConsoleManager splits quoted paths on whitespace and keeps the quotes.
+    const FString OutputPath = FString::Join(Args, TEXT(" ")).TrimQuotes();
+    if (OutputPath.IsEmpty())
+    {
+        Output.Logf(ELogVerbosity::Error, TEXT("Usage: MtoU.BackgroundSnapshot <output.json>"));
+        return;
+    }
+    const TSharedRef<FJsonObject> Snapshot = MakeShared<FJsonObject>();
+    Snapshot->SetBoolField(TEXT("automation_testing"), GIsAutomationTesting);
+    Snapshot->SetBoolField(TEXT("unattended"), FApp::IsUnattended());
+    Snapshot->SetBoolField(TEXT("has_focus"), FApp::HasFocus());
+    Snapshot->SetBoolField(TEXT("foreground"), FPlatformApplicationMisc::IsThisApplicationForeground());
+    Snapshot->SetNumberField(TEXT("frame"), static_cast<double>(GFrameCounter));
+    Snapshot->SetBoolField(TEXT("editor_available"), GEditor != nullptr);
+    Snapshot->SetBoolField(TEXT("should_throttle_cpu_usage"), GEditor && GEditor->ShouldThrottleCPUUsage());
+    Snapshot->SetBoolField(TEXT("throttle_cpu_when_not_foreground"),
+        GetDefault<UEditorPerformanceSettings>()->bThrottleCPUWhenNotForeground);
+    Snapshot->SetBoolField(TEXT("connected"), MtoUGetTimeControlView().bConnected);
+    Snapshot->SetNumberField(TEXT("owner_cpu_delegate_count"), FMtoUBackgroundUpdatesTestAccess::RegistrationCount());
+    TArray<TSharedPtr<FJsonValue>> Viewports;
+    if (GEditor)
+    {
+        for (const FLevelEditorViewportClient* Viewport : GEditor->GetLevelViewportClients())
+        {
+            if (Viewport)
+            {
+                const TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+                bool bBase = false;
+                Viewport->SaveRealtimeStateToConfig(bBase);
+                Entry->SetBoolField(TEXT("realtime"), Viewport->IsRealtime());
+                Entry->SetBoolField(TEXT("base_realtime"), bBase);
+                Viewports.Add(MakeShared<FJsonValueObject>(Entry));
+            }
+        }
+    }
+    Snapshot->SetArrayField(TEXT("viewports"), Viewports);
+    TArray<TSharedPtr<FJsonValue>> Actors;
+    for (TObjectIterator<AMtoULiveLinkActor> It; It; ++It)
+    {
+        if (It->HasAnyFlags(RF_ClassDefaultObject) || !IsValid(*It))
+        {
+            continue;
+        }
+        const TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
+        Entry->SetStringField(TEXT("actor"), It->GetPathName());
+        TArray<USkeletalMeshComponent*> Components;
+        It->GetComponents(Components);
+        TArray<TSharedPtr<FJsonValue>> Displays;
+        for (USkeletalMeshComponent* Component : Components)
+        {
+            const TSharedRef<FJsonObject> Display = MakeShared<FJsonObject>();
+            Display->SetStringField(TEXT("component"), Component->GetName());
+            Display->SetBoolField(TEXT("visible"), Component->IsVisible());
+            Display->SetBoolField(TEXT("registered"), Component->IsRegistered());
+            Display->SetNumberField(TEXT("bone_transform_revision"), Component->GetBoneTransformRevisionNumber());
+            Display->SetNumberField(TEXT("bone_transform_frame"), static_cast<double>(Component->GetCurrentBoneTransformFrame()));
+            Displays.Add(MakeShared<FJsonValueObject>(Display));
+        }
+        Entry->SetArrayField(TEXT("displays"), Displays);
+        Actors.Add(MakeShared<FJsonValueObject>(Entry));
+    }
+    Snapshot->SetArrayField(TEXT("actors"), Actors);
+    FString Json;
+    if (!FJsonSerializer::Serialize(Snapshot, TJsonWriterFactory<>::Create(&Json))
+        || !FFileHelper::SaveStringToFile(Json, *OutputPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
+    {
+        Output.Logf(ELogVerbosity::Error,
+            TEXT("MtoU.BackgroundSnapshot could not write '%s'. Supply a writable file path with an existing parent directory."), *OutputPath);
+        return;
+    }
+    Output.Logf(TEXT("MtoU.BackgroundSnapshot wrote '%s'."), *OutputPath);
+}
+
+FAutoConsoleCommandWithWorldArgsAndOutputDevice BackgroundSnapshotCommand(
+    TEXT("MtoU.BackgroundSnapshot"),
+    TEXT("Write a read-only editor/session/viewport/display snapshot to <output.json>."),
+    FConsoleCommandWithWorldArgsAndOutputDeviceDelegate::CreateStatic(&WriteBackgroundSnapshot));
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoUBackgroundSnapshotPathTest,
+    "MtoULiveLink.Editor.BackgroundSnapshotPath",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoUBackgroundSnapshotPathTest::RunTest(const FString&)
+{
+    const FString OutputPath = FPaths::CreateTempFilename(
+        *FPaths::ProjectSavedDir(), TEXT("MtoU Background "), TEXT(".json"));
+    ON_SCOPE_EXIT { IFileManager::Get().Delete(*OutputPath); };
+    const FString Command = FString::Printf(TEXT("MtoU.BackgroundSnapshot \"%s\""), *OutputPath);
+    FOutputDeviceNull Output;
+    TestTrue(TEXT("the console accepts a quoted path containing spaces"),
+        IConsoleManager::Get().ProcessUserConsoleInput(*Command, Output, GEditor->GetEditorWorldContext().World()));
+    FString Json;
+    if (!TestTrue(TEXT("the snapshot is written to the unquoted filename"),
+        FFileHelper::LoadFileToString(Json, *OutputPath)))
+    {
+        return false;
+    }
+    TSharedPtr<FJsonObject> Snapshot;
+    if (!TestTrue(TEXT("the snapshot contains valid JSON"),
+        FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(Json), Snapshot)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the command records the actual editor state"), Snapshot->GetBoolField(TEXT("editor_available")));
     return true;
 }
 

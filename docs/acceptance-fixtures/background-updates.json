@@ -1,0 +1,68 @@
+{
+  "primary_mesh": "<PrimarySkeletalMesh>",
+  "parts": [],
+  "world_tolerance_cm": 0.1,
+  "oracle_frames": [
+    300,
+    900
+  ],
+  "motion_frames": [
+    300,
+    400
+  ],
+  "display_bones": {
+    "<PrimarySkeletalMesh>": [
+      "pelvis",
+      "upperarm_l",
+      "spine_03",
+      "thigh_l"
+    ]
+  },
+  "thresholds": {
+    "rationale": "<Explain the AC04 cadence and same-run reference tolerances before running>",
+    "connected_min_hz": null,
+    "producer_min_hz": null,
+    "reference_ratio_min": null,
+    "recovery_ratio_max": null,
+    "pose_ratio_min": null,
+    "baseline_max_hz": null
+  },
+  "maya": {
+    "exe": "<Maya2024>/bin/maya.exe",
+    "driver": "<checkout>/maya/MtoULiveLink/tests/maya_gui_linkage_driver.py",
+    "scripts": "<checkout>/maya/MtoULiveLink/scripts",
+    "app_dir_template": "<fixtures>/maya-prefs-minimal",
+    "allow_scene_load_warnings": true,
+    "scene": "<MayaScene.ma>",
+    "root": "<CharacterRootJoint>",
+    "oracle_joints": [
+      "pelvis",
+      "spine_01",
+      "spine_03",
+      "neck_01",
+      "head",
+      "clavicle_l",
+      "clavicle_r",
+      "upperarm_l",
+      "upperarm_r",
+      "lowerarm_l",
+      "lowerarm_r",
+      "hand_l",
+      "hand_r",
+      "thigh_l"
+    ],
+    "keyed_joints": [
+      "upperarm_l",
+      "lowerarm_r",
+      "thigh_l",
+      "spine_03"
+    ],
+    "key_range": [
+      0,
+      1200
+    ],
+    "key_step": 42,
+    "key_degrees": 25,
+    "start_frame": 1
+  }
+}

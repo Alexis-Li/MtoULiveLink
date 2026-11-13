@@ -141,6 +141,8 @@ enum class EMtoUTimeAuthority : uint8
  */
 struct MTOULIVELINK_API FMtoUTimeControlView
 {
+    /** The source has a complete negotiated set and its publication gate is open. */
+    bool bConnected = false;
     EMtoUTimeAuthority Authority = EMtoUTimeAuthority::Maya;
     /** A linkage transition waits for the other host. */
     bool bTransitioning = false;
