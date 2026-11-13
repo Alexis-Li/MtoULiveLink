@@ -6,9 +6,32 @@ can be cloned alone or mounted as a registered submodule in a collection. Run
 Git and `gh` here for product work; the parent owns only its registration and
 pinned commit. Do not change sibling projects.
 
+## Reading map
+
+Read an existing `HANDOFF.md` first and reconcile it with Git. Then read
+CONTEXT.md and the workflow sections relevant to the task. Use this map to
+load only the additional material needed; do not routinely reread all ADRs
+or historical evidence.
+
+| Question | Owner |
+| --- | --- |
+| Terms and their exact meaning | CONTEXT.md |
+| Current modules, state ownership and code entry points | docs/architecture.md |
+| Current product scope, constraints and future candidates | docs/roadmap.md |
+| Task requirements and acceptance | The task Issue and its comments |
+| Cross-host messages and compatibility | protocol/README.md |
+| Design, review, experiments and delivery | docs/workflow.md |
+| Host acceptance procedures | docs/testing.md |
+| Rationale for a relevant architectural decision | The linked docs/adr/ entry |
+| Previous evidence needed for this task | The relevant docs/history/ record |
+
+Read the affected code before editing. The architecture overview is a map,
+not a second source of protocol definitions or task requirements. Update it
+when module responsibilities or state ownership change.
+
 ## Contracts and layout
 
-- Read CONTEXT.md for terminology and docs/adr/ for architecture decisions.
+- Use the reading map above for terminology and relevant architecture decisions.
   [docs/workflow.md](docs/workflow.md) defines the design, fix,
   verification-scope and Issue/PR rules, and where work before 2026-10-30 is
   tracked.

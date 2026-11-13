@@ -29,6 +29,56 @@ design when it suffices; write an ADR only for a new long-lived decision. Once
 responsibilities, contracts and acceptance are clear and no open question
 affects the approach, start implementing.
 
+## Technical decisions and experiments
+
+Preserve a coherent design across contributors and sessions. A different
+agent's confidence, habits, preferred style or claimed capability is not
+evidence that the current algorithm should change. Review against the agreed
+contracts and observable results, not the implementation the reviewer would
+have written.
+
+- Reopen a recorded decision only with new evidence: a reproducible failure,
+  a changed constraint, or a measured improvement absent from its rationale.
+  Read that rationale and rejected alternatives first. Without such evidence,
+  retain the existing approach; do not repeatedly investigate settled choices.
+- Propose replacement of a core algorithm as a separately scoped task, not
+  incidental cleanup in another feature or review fix. A focused correction
+  within the existing algorithm remains an ordinary bug fix.
+- Before an experiment, record the baseline, fixed inputs, metrics, success
+  criteria and an agreed effort boundary in its Issue. Compare old and new
+  approaches on the same inputs and environment, including correctness,
+  performance and compatibility relevant to the task. Do not move thresholds
+  or change the sample set to manufacture success. A flawed evaluation needs
+  independent evidence and an explicit correction before comparison resumes.
+- Select a coherent approach on evidence. Do not splice competing algorithms,
+  add fallback paths or retain multiple implementations merely to accommodate
+  contributors' preferences. A combined design needs its own technical
+  rationale and evidence against the same criteria; compromise is not proof.
+  If no replacement meets the agreed criteria, retain the current design.
+- At the agreed experiment boundary, record results and unresolved questions;
+  obtain the user's decision before extending that investment. This boundary
+  applies to exploratory work, not an arbitrary retry limit for ordinary fixes.
+- Keep adopted and rejected approaches with their reasons and useful evidence
+  in the owning Issue; put lasting architectural decisions in an ADR. Link
+  them from the handoff rather than repeating experiments in a fresh session.
+- Use the existing host toolchain. Adding or replacing a toolchain needs a
+  demonstrated task requirement and an assessment of installation, deployment
+  and compatibility costs; personal preference alone is insufficient. Follow
+  existing authorization and dependency rules rather than adding a blanket ban.
+
+Contributors own implementation choices within agreed contracts. Ask the user
+about changes to product behavior, interaction, scope or material trade-offs,
+using Chinese and art-pipeline terms with a recommended option. Do not ask the
+user to arbitrate code style or algorithm preferences. Continue independent
+work while an actual product decision is pending.
+
+For visual acceptance, use the existing fixture and evidence locations. Supply
+a short Chinese explanation of what to inspect, a directly usable result and
+relevant comparison images where applicable. Inspect these yourself first and
+state known limitations and specific questions. Production content remains
+local unless its publication is authorized; this does not add a manual gate
+to work already covered by automated acceptance.
+
 ## Review findings and fixes
 
 - Confirm a finding through the code path, a contract or a reproduction before
