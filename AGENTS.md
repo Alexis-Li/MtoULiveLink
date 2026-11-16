@@ -80,17 +80,32 @@ times by a fresh session that has only the repository and `HANDOFF.md`.
   commit. Anything left uncommitted is listed
   in the note with its state.
 - Write it in Chinese, as the current state, rewritten in place and never
-  appended to. Keep it within about 60 lines. Sections:
+  appended to. It holds only what a fresh session cannot find in the
+  repository, the Issues or the documents. Before writing a line, ask: would
+  the next session go wrong without it, and can it not look this up? What can
+  be looked up gets a pointer (commit, Issue, file), never a copy.
+- Sections, each left out when it has nothing to say, except `进行中`:
   - `任务`: the goal, Issue number, branch, last commit SHA, update date.
-  - `已完成`: what is done and how it was verified.
-  - `进行中`: what is half-done, exactly where it stopped, uncommitted files.
+  - `已完成`: progress on the task in flight that no commit message, Issue
+    comment or PR yet records, and how it was verified. Remove an entry once
+    it is merged or written to the Issue.
+  - `进行中`: what is half-done, exactly where it stopped, uncommitted files;
+    `无` when nothing is in flight.
   - `下一步`: ordered actions, concrete enough to start on directly.
-  - `关键文件与决定`: the files that matter and why; decisions taken and
-    approaches ruled out, each with its reason.
-  - `未验证`: checks not yet run and assumptions not yet confirmed.
-
-  Point to commits, Issues and documents; do not copy code, logs or anything
-  the repository already records.
+  - `关键决定`: decisions taken and approaches ruled out on the task in
+    flight, each with its reason, until they are recorded in the code, the
+    Issue or an ADR.
+  - `未验证`: checks the task in flight still needs before delivery, host
+    acceptance included.
+- State as fact only what this session observed or verified itself. A claim
+  taken over from an earlier note, a subagent's report or a guess is either
+  verified first or left out; do not pass it on, marked or unmarked.
+- It does not hold: the history of merged work, descriptions of code or the
+  protocol (those belong in the code and documents), lessons about how to
+  work (project-wide ones go to this file or docs/workflow.md; a tool's own
+  go to that tool's memory), or secrets and machine-specific paths.
+- Keep it within about 40 lines while a task is in flight, and about 15 when
+  none is: branch, last commit and `下一步`.
 - At the start of a session, if `HANDOFF.md` exists, read it before anything
   else and compare it with `git status` and the recent log. Where they
   disagree, the repository is right: correct the note. Then continue from
@@ -98,8 +113,8 @@ times by a fresh session that has only the repository and `HANDOFF.md`.
 - When the user asks to continue interrupted work, continue from
   `HANDOFF.md` in the current session; do not ask them to reopen the earlier
   conversation.
-- When the task is delivered, delete the note or cut it down to the one line
-  of state that still matters. A stale note misleads the next session.
+- When the task is delivered, cut the note down to branch, last commit and
+  `下一步`. A stale note misleads the next session.
 
 ## Documentation and delivery
 
@@ -111,14 +126,18 @@ times by a fresh session that has only the repository and `HANDOFF.md`.
   docs/roadmap.md, version changes in CHANGELOG.md and selected evidence in
   docs/history/ under its retention rules. Write documents, issues and
   comments as the current state; rewrite an outdated decision in place once
-  the user agrees.
+  the user agrees. Each kind of content has one owner (the reading map) and
+  other places link to it; a change that makes a document's statement untrue
+  rewrites that document in the same change.
 - Follow docs/workflow.md for Issue/PR work: `feature/<topic>` or
   `fix/<topic>` branches cut from the integration branch in progress (`main`
   when none is) with a PR back to it, `Refs #<issue>` (never closing
   keywords), full base/head SHAs, AC and R- finding IDs, a published review of
   the exact head SHA before every merge, `--match-head-commit` merges, and
   issue comments that each end with a `当前状态` footer, generated and checked
-  with `tools/issue_report.py` for status comments. A PR branch holds only
+  with `tools/issue_report.py` for status comments. Comments stay short: one
+  conclusion comment per review round, and a comment a later one supersedes
+  is deleted. A PR branch holds only
   its PR's change; small documentation and rule edits go directly on the
   integration branch as docs/workflow.md defines.
 - Never publish machine-specific paths, credentials or private asset contents

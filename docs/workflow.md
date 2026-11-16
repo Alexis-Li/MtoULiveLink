@@ -150,7 +150,12 @@ The PR owns the implementation diff, review findings and check results.
    the named commits, inspect affected callers, and check acceptance,
    compatibility, failure paths and unrelated changes. Verify delivery claims
    against code and evidence. Publish the review on the PR with its full base
-   and head SHAs, scope, conclusion, blockers and evidence.
+   and head SHAs, scope, conclusion, blockers and evidence. Each review round
+   publishes one comment: the reviewed commits, the conclusion, the check
+   results, and for each blocker its trigger, smallest reproduction and
+   completion condition. How an experiment was built, data tables and
+   derivations stay out of it; what must last goes into code comments, tests
+   or documents.
 5. **Integrate the reviewed result.** Every merge requires a published review
    of the latest PR head SHA. The user's merge authorization does not replace
    that review. Recheck the head and target branch, assess changes since review
@@ -220,6 +225,15 @@ Agree a changed decision with the user, then rewrite it in place in its issue
 body, ADR, document or comment, replacing the old wording. Keep decisions in
 force until a replacement is agreed.
 
+Each kind of content has one owner, listed in the reading map of
+[AGENTS.md](../AGENTS.md); other places link to it instead of repeating it.
+A conclusion reached in an issue or PR discussion about terms, architecture,
+the wire contract, product scope or host procedures is written into its
+owning document in the same change, and the issue keeps one line pointing to
+it. Task requirements and acceptance stay in the issue body. A change that
+makes a document's statement untrue rewrites that document in the same
+change, and the review checks it as part of the change.
+
 | Surface | Content |
 | --- | --- |
 | Issue body | Requirements, acceptance criteria, dependencies and agreed scope |
@@ -234,10 +248,26 @@ Edit incorrect or outdated content in one's own comment in place; a new comment
 carries new facts only. Readers start from the newest comment, so every new
 comment ends with a footer of one to three lines, `**当前状态**：…`, giving the
 state of the whole issue (not only that comment's topic) and the next step with
-who takes it. Between tidies the last comment is therefore the current state;
-earlier comments and an earlier status comment are not edited just to keep them
-current. An open issue accumulates comments until the user asks to tidy it or
-it closes.
+who takes it. The last comment is therefore the current state.
+
+Keep comments short and delete the ones a later comment supersedes. People
+and tools that take over an issue or PR read every comment, including those
+collapsed on the web page, so each comment left in place must still hold.
+
+- Once a new progress, review or status comment is saved, delete the earlier
+  comments it fully replaces: a previous progress note, or a review round
+  whose findings the new review lists by ID with their results.
+- Comments that state an approach, a decision or evidence still relied on
+  stay, and are rewritten in place as that content changes.
+- Before deleting, confirm that anything needed later is in the newer
+  comment, a document, an ADR, a test or the issue that takes it over, and
+  replace links to the comment being removed. Delete by exact comment ID
+  under [Publishing safely](#publishing-safely).
+- At merge, a PR keeps its description, the final review of the merged head
+  and any comment still in force.
+
+Consolidating a whole issue into one status comment still happens only when
+the user asks to tidy it or it closes.
 
 ### Status comments
 
