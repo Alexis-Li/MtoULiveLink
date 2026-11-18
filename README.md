@@ -11,7 +11,7 @@ object beside the main character, without creating animation or preview assets.
 ## Compatibility
 
 - Windows 64-bit
-- Autodesk Maya 2024 (current workflow); Maya 2022.4 remains supported
+- Autodesk Maya 2024
 - Stock Unreal Editor 5.7.4
 - Editor use only; Play In Editor (PIE) is not supported.
 
@@ -53,8 +53,10 @@ earlier version, restart Maya when prompted.
 
 **Upgrade, rollback and removal**
 
-Maya and Unreal components upgrade and roll back as a pair: both hosts speak
-the same protocol version and refuse a mixed pair before touching a scene.
+Maya and Unreal components upgrade and roll back as a pair. Protocol v12
+development snapshots also require the same build of both components: the same
+protocol number alone does not make these unreleased snapshots compatible.
+Missing required identity fields stop negotiation and require updating both hosts.
 End the current session first, then:
 
 - Upgrade: drag the new Maya component's `install.mel` into Maya, replace the
@@ -76,6 +78,13 @@ End the current session first, then:
   those mappings. Unused exported branches do not prevent connection, but one
   Unreal bone is driven by exactly one Maya bone: rename a Maya bone when two of
   them publish the same name under the same parent.
+- Select the deformation root and use **Set Character**; a Display controller
+  is optional. The outfit is the current visible set of meshes skinned to that
+  skeleton. Hidden meshes, including those hidden by an ancestor, LOD visibility
+  or a visibility override, do not contribute BlendShapes. Visible Template and
+  Reference meshes do. A unique recognised Display enum keeps its outfit label;
+  otherwise the panel uses sorted mesh names. **选择 Display 控制器** optionally
+  chooses a label; it does not choose the participating meshes.
 - For garment preview, prepare a **Preview Static Mesh** aligned with the
   Primary Driver garment. Keep garment and non-garment geometry in separate
   imported material slots.
@@ -96,15 +105,16 @@ on the Binding. All enabled parts pose and display under one connection:
   A part's own secondary bones receive Maya animation even when the Primary
   does not contain them. Disabled parts add no bone requirements.
 - After adding clothing and secondary bones, import the new clothing, update
-  the enabled parts, and reconnect. Update older meshes only if their own bind
+  the enabled parts. A connected session renegotiates automatically for the same
+  character and targets. Update older meshes only if their own bind
   pose or weights changed. A missing required Maya bone or an incompatible
   shared bone blocks connection and names the affected part and bone.
 - A Morph Target that only a part owns still streams, and a name owned by
   several parts receives the same value on each of them.
-- Adding, removing, enabling, disabling, or replacing a part ends the current
-  connection, so reconnect in Maya afterwards. A generated garment preview
-  survives. Run **Refresh Preview** after changing the Primary
-  Driver, the Preview Static Mesh, the **Driver Garment Slot Override**, or
+- Adding, removing, enabling, disabling, or replacing a part ends the old
+  session and automatically negotiates a new one for the same character and
+  targets. A generated garment preview survives. Run **Refresh Preview** after
+  changing the Primary Driver, the Preview Static Mesh, the **Driver Garment Slot Override**, or
   relevant imported data.
 - Renaming a part or reordering the list needs no reconnect.
 
@@ -121,7 +131,8 @@ on the Binding. All enabled parts pose and display under one connection:
    details, for a problem report. An empty diagnostic does not
    occupy the daily view.
    The connection reads 未连接 before the first session, 已连接 while streaming,
-   and 连接已中断 after a session ends; reconnect in Maya after an interruption.
+   正在重新连接 during input-change negotiation, and 连接已中断 after stopping.
+   Read the reason and use **Connect** in Maya after a stop.
 3. In Maya, click the **MtoU** shelf button, select the deformation root joint, and click
    **Set Character** (设置角色). Switch between **Animation** (动画) and **Model**
    (模型) at the top. Below are Connection Controls (set character, connect,
@@ -144,6 +155,40 @@ is in front. The running status shows **连接期间 UE 在后台保持更新**.
 restores normal background throttling and viewport realtime behavior. Your
 **Use Less CPU when in Background** preference and viewport Realtime setting
 stay unchanged. A minimized editor does not draw its viewport.
+
+## Changes while connected
+
+For the same captured Maya character and Unreal targets, changing the visible
+outfit mesh set, **Animation/Model**, **Transfer BS**, or **Additional Parts**
+ends the old session and automatically negotiates the latest inputs. This
+also applies to Undo/Redo and relevant Driver or Preview input/reimport changes.
+The old cache is cleared and camera linkage resources are restored; a successful
+new session returns to realtime preview, so enter linkage again when needed.
+A label-only rename, a part reorder, a Template/Reference style change with the
+same visible mesh set, and garment comparison keep the current session.
+
+Both hosts show **正在重新连接**. Repeated Connect is disabled; **Disconnect**
+cancels the operation. Usable differences and failures appear in status and
+diagnostics without a Maya confirmation dialog. Old-session preparation has a
+5-second limit and the whole automatic operation has a 32-second limit; ongoing
+edits do not extend them. A failure or timeout stops the operation without retries.
+
+The targets must remain the same instances. Setting another Maya character,
+deleting or unloading its root, opening or creating a scene, closing the panel,
+replacing/removing the Unreal Source, changing or closing the level, deleting or
+replacing a participating Actor, changing its Binding instance, or changing
+pairing stops the connection. Recreating an object with the same name does not
+resume it. Manual disconnect, transport loss, refused negotiation and resource
+restoration failure also stop it; later edits do not connect a stopped tool.
+Inspect the reason on the surviving Maya panel, Unreal Source or Actor Details,
+correct the input and click **Connect** explicitly. An Unreal restart requires
+that explicit connection too.
+
+Model still needs **Refresh Preview** after a Primary Driver, Preview Static Mesh,
+**Driver Garment Slot Override** or relevant imported-data change. Automatic
+negotiation stops if Preview is not ready; it never refreshes it for you. An
+explicit refresh also ends streaming and requires **Connect** afterwards.
+Animation does not require a ready garment Preview.
 
 ## Animation preview
 
@@ -238,8 +283,8 @@ object, every workflow stays as described above.
    **配对为副对象** under **镜头联动**. The main character's actor must be paired
    with **配对为主角色**.
 2. In Maya, click **打开对象配对窗口** on the **镜头联动** card, select the
-   object's root joint (add its Display controller when it has several) and
-   click **设为副对象**. A prop without a Display controller works too.
+   object's root joint and click **设为副对象**. Its Display controller is optional
+   and supplies only an outfit label.
 3. Connect as usual. Unreal shows both objects from the same Maya time; in
    camera linkage it shows a new pose only when every display of both objects
    holds it.
@@ -248,10 +293,13 @@ object, every workflow stays as described above.
    back to the sequence and its actor stops following Maya; the main character
    keeps going without reconnecting.
 
-Setting a different second object, changing either object's skeleton, outfit,
-Binding or parts, pairing or unpairing an actor of the connected set, or
-deleting a paired actor ends the connection; connect again. Other Binding
-Actors in the level do not follow Maya. A second actor at another placement, or one moved during linkage, is
+Setting a different second object, replacing either Actor's Binding instance,
+pairing or unpairing an Actor of the connected set, or deleting a paired Actor
+stops the connection; connect again. Input changes on the same objects end the
+old set and may automatically negotiate a new realtime session as described
+under [Changes while connected](#changes-while-connected). Other Binding Actors
+in the level do not follow Maya. A second actor at another placement, or one
+moved during linkage, is
 refused with 副对象与主角色在 UE 中的放置不一致. Cached Playback and the Model
 workflow support one character: remove the second object first. If removing
 the object cannot restore its tracks, the connection ends and both hosts name
@@ -288,13 +336,13 @@ what to restore by hand.
 | Auto garment selection rejects an intentionally reduced mesh | Inspect the source for duplicates or mixed garment/body slots. If the reduction is intentional, set **Driver Garment Slot Override** on the Binding to the garment's separate slots, then refresh and inspect the result. |
 | BlendShapes do not appear | Check **Transfer BS**, matching names, the selected outfit, and the connection diagnostics. Refresh the Model preview after changing its source assets. |
 | Camera linkage often shows Maya 跟不上 with a lag | In Maya open **Windows > Settings/Preferences > Plug-in Manager** (Chinese UI: **窗口 > 设置/首选项 > 插件管理器**), clear **Auto load** for the plug-ins you do not use, for example MASH, XGen (`xgenToolkit`), GPU Cache, Scene Assembly, LookdevX and Type, then restart Maya. Plug-ins a scene needs are still loaded when you open it. |
-| Connection ends after a change | Reconnect after changing the outfit, mode, **Transfer BS**, or the character parts. Only refreshing an actor that takes part in the connection disconnects it; while Maya is still connecting and the object set is being negotiated, a change to any Binding Actor ends that connection and you reconnect. After changing or reimporting the Primary Driver or the Preview Static Mesh, or changing **Driver Garment Slot Override**, refresh the Model preview and reconnect. Undo/Redo of these changes follows the same rule. |
+| Connection stops after a change | Same-subject input changes normally negotiate automatically; read the stopped reason if they fail. Model requires a ready Preview: refresh after changing or reimporting its inputs, then click **Connect**. Explicit Refresh, subject replacement, manual disconnect and failures require **Connect**; later edits do not resume them. See [Changes while connected](#changes-while-connected). |
 
 Keep the Binding Actor that takes part in the connection and its level loaded
 while previewing; deleting that actor or unloading its level ends the connection.
-Placing, refreshing or deleting a Binding Actor that does not take part does not,
-except while Maya is still connecting and the object set is being negotiated: then a
-change to any Binding Actor ends that connection, so reconnect.
+Placing, refreshing or deleting a Binding Actor that does not take part leaves
+the connected targets unchanged. A new negotiation never substitutes a different
+Actor for a target that was replaced or removed.
 
 ## License
 

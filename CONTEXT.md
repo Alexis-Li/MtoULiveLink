@@ -6,18 +6,26 @@ editor-time Animation preview or Model preview.
 ## Language
 
 **Character scene**:
-The currently captured Maya character: one deformation root together with the
-Display and outfit context that determines which evaluated meshes belong to it.
+The currently captured Maya character: one deformation root and the evaluated,
+visible meshes skinned to its skeleton. Visibility, LOD visibility and enabled
+visibility overrides determine membership; Template and Reference display styles
+do not exclude a mesh. An optional Display enum supplies an outfit label, not
+membership. Without one unambiguous label, sorted mesh names identify the outfit.
+The outfit's identity is its deduplicated set of Maya mesh objects, independent
+of labels, names or DAG paths.
 _Avoid_: Role, Maya selection, character cache
 
 **Character snapshot**:
-A stable description of one character scene revision, including its outfit,
-ordered skeleton, bind-local pose, and streamable curve names. The skeleton
+A stable description of one character scene revision, including its outfit
+mesh identities and current paths, ordered skeleton, bind-local pose, and
+streamable curve names from those meshes. The skeleton
 contains every joint below the selected root and the intermediate transform
 nodes needed to preserve their real DAG parentage; branches without joints are
 excluded. Connection
 negotiation uses one snapshot and does not silently adopt topology changes
-during streaming.
+during streaming. A real input change ends the old session and requires full
+negotiation of a new snapshot; an outfit label or path-only change does not
+create a new input revision.
 _Avoid_: Scene state, init payload, role data
 
 **Streaming session**:

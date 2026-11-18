@@ -5,8 +5,7 @@
 //
 // It finds the folder it was extracted to and runs
 // scripts/mtou_livelink/install.py from there, which registers that folder
-// as the MtoULiveLink Maya module. Keep this file ASCII: Maya 2022 does not
-// read UTF-8 text in MEL files, so the messages use Python escapes.
+// as the MtoULiveLink Maya module.
 
 global proc mtouInstallLocator() {}
 

@@ -10,6 +10,9 @@ after panel lifecycle changes, and a separate port for a test editor beside a
 person's own. [workflow.md](workflow.md) defines how much verification a change
 needs.
 
+Maya 2024 is the supported Maya host and the development/verification baseline.
+Run Maya host suites and GUI acceptance with that version.
+
 Paths are placeholders: `<Maya2024>` is a Maya 2024 install, `<project>` a
 UE 5.7 project that loads `unreal/`, `<scratch>` the task scratch directory and
 `<fixtures>` the shared acceptance fixtures and `<evidence>` the `evidence`
@@ -246,11 +249,37 @@ Both tests fail on any Maya dialog the scenario did not expect. The driver
 records each dialog with the stage (`stage` command) that was current; the
 test lists what each stage may show:
 
-- `BLENDSHAPE_MISMATCH` on every connect of the fixture character;
+- `BLENDSHAPE_MISMATCH` on manual initial connects of the fixture character;
 - `STREAM_INTERRUPTED` where the exit ends the session: `destroy_target`,
   `close_world`, and Refresh Preview in `GuiRegression`.
 
-A new expected dialog is added to that list, not skipped.
+Automatic input-change negotiation must have an empty expected-dialog list:
+usable differences and failures are read from status and diagnostics. A new
+expected dialog for another stage is added to that stage's list, not skipped.
+
+### Input-change acceptance
+
+Use real Maya 2024 GUI edits and Unreal Binding transactions for input-change
+acceptance, including Undo/Redo. Record the old and new session identities,
+connection-attempt counts and state events so a brief reconnecting state is
+observable. Do not issue Connect to complete an automatic-negotiation case.
+Verify at least two distinct oracle poses on the actual display components;
+Ready text alone is insufficient. Explicit Refresh remains a separate case
+that ends streaming and requires manual Connect.
+
+Include root-only characters, actual visibility/LOD/override changes and visible
+Template/Reference meshes. For same-subject input changes during linkage, prove
+the old linkage set ended and resources were restored before a new realtime
+session; automatic negotiation does not continue the old linkage takeover.
+For subject replacement or failure, observe the surviving host's reason and
+prove no additional connection attempts occur until an explicit Connect.
+Editor exit/restart needs an external launcher to observe that interval.
+
+Use the existing file-command acknowledgement and component snapshots; extend
+the driver and the fixture together for a control or lifecycle case they do
+not yet exercise. Missing driver coverage or a fixture is an acceptance gap,
+not a passing mock or baseline experiment. Record fixture and preference hashes
+with the executed evidence; keep production scenes and assets unsaved.
 
 ### Maya preferences
 

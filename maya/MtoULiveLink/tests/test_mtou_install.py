@@ -300,8 +300,8 @@ class InstallTests(unittest.TestCase):
         self.assertFalse(legacy.exists())
         self.assertEqual([], dialogs)
 
-    def test_install_mel_is_ascii_and_loads_the_packaged_installer(self):
-        text = (COMPONENT / "install.mel").read_bytes().decode("ascii")
+    def test_install_mel_loads_the_packaged_installer(self):
+        text = (COMPONENT / "install.mel").read_text(encoding="utf-8")
         self.assertIn("whatIs mtouInstallLocator", text)
         self.assertIn("global proc mtouInstallLocator", text)
         self.assertIn("'scripts', 'mtou_livelink', 'install.py'", text)

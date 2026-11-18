@@ -25,9 +25,9 @@ Maya 与 Unreal 分别安装，只通过线上协议协作，不读取另一端�
 | 入口 | 职责与排查方向 |
 | --- | --- |
 | `MtoULiveLink.py` | 用户启动入口 |
-| `mtou_livelink/controller.py` | 面板、会话与场景状态的产品控制入口；查操作触发和生命周期 |
+| `mtou_livelink/controller.py` | 面板、会话与场景状态的产品控制入口；拥有用户连接意图与一次输入变更的协调操作 |
 | `mtou_livelink/scene.py` | Character scene 与角色快照相关逻辑 |
-| `mtou_livelink/session.py` | 实时 Streaming session、发送线程和协商事件 |
+| `mtou_livelink/session.py` | 一条实际连接的 Streaming session、采样和资源；发送线程处理协议、协商及独立截止检查 |
 | `mtou_livelink/protocol.py` | Maya 端消息构造与验证；契约正文在 protocol/ |
 | `mtou_livelink/cache.py` | Cached Playback |
 | `mtou_livelink/linkage.py`、`timecontrol.py`、`camera.py` | 联动会话、时间控制和相机相关行为 |
@@ -42,7 +42,7 @@ Maya 与 Unreal 分别安装，只通过线上协议协作，不读取另一端�
 
 | 模块 / 文件 | 职责与排查方向 |
 | --- | --- |
-| `MtoULiveLink` / `MtoULiveLinkSource.*` | Live Link Source、连接与收流；Source 和 Actor 共用会话终止边界 |
+| `MtoULiveLink` / `MtoULiveLinkSource.*` | Live Link Source、连接与收流；拥有终止原因、双端协调、一次性重连许可及新连接主体准入 |
 | `MtoULiveLink` / `MtoUConnectionNegotiator.*` | Character snapshot 与目标的连接协商 |
 | `MtoULiveLink` / `MtoULiveLinkProtocol.*` | UE 端线上消息与验证 |
 | `MtoULiveLink` / `MtoULiveLinkBinding.cpp`、`MtoULiveLinkActor.cpp` | Binding 配置及 Actor 的预览显示与生命周期 |
@@ -53,7 +53,9 @@ Maya 与 Unreal 分别安装，只通过线上协议协作，不读取另一端�
 | `MtoULiveLinkEditor` / `MtoULiveLinkActorDetails.*` | Actor Details 界面 |
 
 修改状态前核对调用者、线程边界和资源所有者；不要在面板或下游显示处复制会话
-状态或绕过统一终止路径。Public 头文件仅承载有意提供的接口。
+状态或绕过统一终止路径。Actor/Binding 分类输入变化与主体更换并请求终止；
+缓存与联动各自恢复资源，Source 在两端准备完成后才授权新连接。Maya 面板与 UE
+Details 读取所有者的协调状态，不另建重连计时器。Public 头文件仅承载有意提供的接口。
 
 ## 常用决定与验证入口
 
