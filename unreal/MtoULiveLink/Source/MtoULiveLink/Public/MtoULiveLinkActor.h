@@ -78,8 +78,6 @@ enum class EMtoUConnectionState : uint8
     Disconnected,
     /** Inputs changed; the bounded automatic negotiation is in flight. */
     Reconnecting,
-    /** Inputs changed; the bounded automatic negotiation is in flight. */
-    Reconnecting,
     /** A connection is negotiating this actor's Binding. */
     Validating,
     /** The actor streams as the primary character. */
@@ -423,6 +421,9 @@ private:
      * tells the restored composition apart from the one a session negotiated.
      */
     TArray<FMtoUAppliedPart> AppliedParts;
+    // Raw enabled inputs, kept outside transactions so Undo/Redo fences the
+    // old stream before resolving new required skeletal dependencies.
+    TArray<FMtoUAppliedPart> ObservedPartInputs;
 
     FString CharacterPartDiagnostics;
     FString CharacterPartSummary;

@@ -48,7 +48,7 @@ bool FMtoULiveLinkSource::ValidateSubjectsOnGameThread() const
         const AMtoULiveLinkActor* Actor = Subject.Actor.Get();
         const FMtoULinkagePairing* Pairing = LinkageSession.FindPairing(Subject.ObjectId);
         if (!Actor || !Subject.World.IsValid() || Actor->GetWorld() != Subject.World.Get()
-            || Actor->GetBinding() != Subject.Binding.Get()
+            || TWeakObjectPtr<UMtoULiveLinkBinding>(Actor->GetBinding()) != Subject.Binding
             || (Pairing ? Pairing->Generation : FString()) != Subject.PairingGeneration
             || (Pairing && Pairing->Actor.Get() != Actor))
         {
@@ -74,15 +74,32 @@ void FMtoULiveLinkSource::ReflectRestartOnGameThread()
         bRestartStatusDirty = false;
         Copy = Restart;
     }
+    if (Copy.Phase == FMtoURestartOperation::EPhase::Ready && Copy.ActiveSession == GameThreadSession)
+    {
+        SetStatus(TEXT("Connected to Maya"));
+        for (const FMtoUSessionObject& Object : SessionObjects)
+        {
+            if (AMtoULiveLinkActor* Actor = Object.Actor.Get())
+            {
+                Actor->SetConnectionState(Object.NegotiatedState);
+                Actor->NoteSessionStreaming();
+            }
+        }
+        return;
+    }
     const bool bStopped = Copy.Phase == FMtoURestartOperation::EPhase::Stopped;
-    const FString Detail = bStopped ? Copy.Code + TEXT(": ") + Copy.Detail
+    FString Detail = bStopped ? Copy.Code + TEXT(": ") + Copy.Detail
         : TEXT("Reconnecting after inputs changed...");
+    const FString Residual = LinkageSession.GetView().RecoveryResidual;
+    if (!Residual.IsEmpty() && !Detail.Contains(Residual))
+    { Detail += TEXT("\nRecovery residual: ") + Residual; }
     SetStatus(Detail);
     for (const FProtectedSubject& Subject : ProtectedSubjects)
     {
         if (AMtoULiveLinkActor* Actor = Subject.Actor.Get())
         {
-            Actor->SetConnectionState(bStopped ? EMtoUConnectionState::Error
+            Actor->SetConnectionState(bStopped
+                ? (Copy.Code == TEXT("RESTART_CANCELLED") ? EMtoUConnectionState::Disconnected : EMtoUConnectionState::Error)
                 : EMtoUConnectionState::Reconnecting, Detail);
         }
     }
@@ -136,4 +153,13 @@ void FMtoULiveLinkSource::TickRestartOnGameThread()
         }
     }
     ReflectRestartOnGameThread();
+}
+
+bool FMtoULiveLinkSource::IsRestartBlocked(uint64 SessionId)
+{
+    FScopeLock Lock(&RestartMutex);
+    if (Restart.Expire(RestartNow())) { bRestartStatusDirty = true; }
+    return Restart.ActiveSession == SessionId
+        && (Restart.Phase == FMtoURestartOperation::EPhase::Stopped
+            || Restart.Phase == FMtoURestartOperation::EPhase::Ending);
 }

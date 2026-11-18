@@ -442,7 +442,12 @@ bool PollUntil(TFunctionRef<bool()> Predicate, double TimeoutSeconds = 1.0)
 
 bool WaitForStatus(const TSharedRef<FMtoULiveLinkSource>& Source, const FString& Text)
 {
-    return PollUntil([&]() { return Source->GetSourceStatus().ToString().Contains(Text); });
+    return PollUntil([&]()
+    {
+        const FString Status = Source->GetSourceStatus().ToString();
+        return Status.Contains(Text) || (Text == TEXT("Listening on")
+            && (Status.Contains(TEXT("RESTART_")) || Status.Contains(TEXT("SUBJECT_CHANGED"))));
+    });
 }
 
 int32 ListeningPort(const TSharedRef<FMtoULiveLinkSource>& Source)
@@ -513,7 +518,7 @@ FSocket* ConnectGreetedLoopback(ISocketSubsystem& SocketSubsystem, uint16 Port)
 bool ReceivePacket(
     FSocket& Socket,
     TArray<uint8>& OutPayload,
-    TFunctionRef<void()> Pump = []() {})
+    TFunctionRef<void()> Pump = []() {}, bool bIncludeHello = false)
 {
     FMtoUFrameDecoder Decoder;
     FString Error;
@@ -529,7 +534,7 @@ bool ReceivePacket(
         while (Decoder.Pop(OutPayload, Error) == EMtoUDecodeResult::Message)
         {
             FString Type, TypeError;
-            if (!FMtoUProtocol::PeekType(OutPayload, Type, TypeError) || Type != TEXT("hello_ack")) { return true; }
+            if (!FMtoUProtocol::PeekType(OutPayload, Type, TypeError) || bIncludeHello || Type != TEXT("hello_ack")) { return true; }
         }
         return false;
     });
@@ -542,7 +547,7 @@ bool WaitForClose(FSocket& Socket)
         uint8 Buffer[1024];
         int32 Read = 0;
         return !Socket.Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read);
-    });
+    }, 6.0);
 }
 
 AMtoULiveLinkActor* AddBoundActor(UWorld& World)
@@ -4732,7 +4737,7 @@ bool FMtoUSourceSocketFlowTest::RunTest(const FString& Parameters)
         && FromUtf8(Payload).Contains(TEXT("\"accepted_morph_count\":0")));
     TestTrue(TEXT("complete negotiation requests background updates"), Source->GetTimeControlView().bConnected);
 
-    FSocket* Second = ConnectGreetedLoopback(*SocketSubsystem, Port);
+    FSocket* Second = ConnectLoopback(*SocketSubsystem, Port);
     TestNotNull(TEXT("second TCP client reaches listener"), Second);
     Payload.Reset();
     TestTrue(TEXT("second client receives a framed rejection"),
@@ -6276,7 +6281,9 @@ bool FMtoUCacheSessionReconnectTest::RunTest(const FString& Parameters)
         return PollUntil([&]()
         {
             Source->Update();
-            return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+            return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("SUBJECT_CHANGED")));
         });
     };
     auto WaitNoSubject = [&]() -> bool
@@ -8550,12 +8557,15 @@ bool FMtoUSessionTerminationBoundaryTest::RunTest(const FString& Parameters)
     const bool bReturnedToListening = PollUntil([&]()
     {
         Source->Update();
-        return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+        return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("SUBJECT_CHANGED")))
             && !Source->GetTimeControlView().bConnected;
     });
     TestTrue(TEXT("source returns to listening after the boundary termination"), bReturnedToListening);
     TestTrue(TEXT("terminated actor shows the true disconnected state"),
-        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Disconnected
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Error
+            && Actor->GetConnectionDetail().Contains(TEXT("RESTART_TIMEOUT"))
             && Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
     const FMtoUPreviewReadiness AfterReimport = Actor->GetPreviewReadiness();
     TestTrue(TEXT("reimport invalidates the previous revision without a new Preview"),
@@ -8594,7 +8604,9 @@ bool FMtoUSessionTerminationBoundaryTest::RunTest(const FString& Parameters)
         Source->Update();
         LiveLinkClient.ForceTick();
         FLiveLinkSubjectFrameData StaleFrame;
-        return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+        return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("SUBJECT_CHANGED")))
             && !LiveLinkClient.EvaluateFrameFromSource_AnyThread(
                 SubjectKey, ULiveLinkAnimationRole::StaticClass(), StaleFrame);
     });
@@ -8719,7 +8731,9 @@ bool FMtoUPieTargetPolicyTest::RunTest(const FString& Parameters)
         PollUntil([&]()
         {
             Source->Update();
-            return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+            return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("SUBJECT_CHANGED")));
         }));
 
     // Discovery still fails closed for a genuine second editor target.
@@ -8907,18 +8921,7 @@ bool FMtoUWorldUnloadTerminationTest::RunTest(const FString& Parameters)
     // close signals readable and then reports zero bytes.
     auto IsSocketClosed = [](FSocket* Client) -> bool
     {
-        if (!Client)
-        {
-            return false;
-        }
-        if (!Client->Wait(
-                ESocketWaitConditions::WaitForRead, FTimespan::FromMilliseconds(150)))
-        {
-            return false;
-        }
-        uint8 Probe[16];
-        int32 Read = 0;
-        return !Client->Recv(Probe, UE_ARRAY_COUNT(Probe), Read) && Read == 0;
+        return Client && WaitForClose(*Client);
     };
 
     FLiveLinkSubjectFrameData KeptFrame;
@@ -8944,13 +8947,16 @@ bool FMtoUWorldUnloadTerminationTest::RunTest(const FString& Parameters)
         Source->Update();
         LiveLinkClient.ForceTick();
         FLiveLinkSubjectFrameData StaleFrame;
-        return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+        return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("SUBJECT_CHANGED")))
             && !LiveLinkClient.EvaluateFrameFromSource_AnyThread(
                 SubjectKey, ULiveLinkAnimationRole::StaticClass(), StaleFrame);
     });
     TestTrue(TEXT("the world unload leaves no active subject"), bUnloadCleanup);
     TestTrue(TEXT("the unloaded actor shows the true disconnected state"),
-        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
+        Actor && Actor->GetConnectionState() == EMtoUConnectionState::Error
+            && Actor->GetConnectionDetail().Contains(TEXT("SUBJECT_CHANGED")));
 
     // Late duplicate termination requests stay idempotent, and once the
     // editor reaps the unloaded world the stale actor leaves no target.
@@ -12698,7 +12704,7 @@ bool FMtoULinkagePairingTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("greeting is sent"), SendBytes(*Client, Hello.GetData(), Hello.Num()));
     TArray<uint8> Payload;
     TestTrue(TEXT("the greeting is answered"), ReceivePacket(
-        *Client, Payload, [&]() { Source->Update(); }));
+        *Client, Payload, [&]() { Source->Update(); }, true));
     TSharedPtr<FJsonObject> HelloAck;
     TestTrue(TEXT("the greeting answer is JSON"), JsonObjectFromBytes(Payload, HelloAck));
     int32 SessionId = 1;
@@ -12952,7 +12958,8 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
         // Both packets are drained in one worker pass. The init has been
         // received, but bReady cannot change until the next reply-drain pass.
         AddInfo(TEXT("versioned frame after init, before ready"));
-        TArray<uint8> Opening = Init;
+        TArray<uint8> Opening = LinkageHelloPacket();
+        Opening.Append(Init);
         Opening.Append(MismatchedFrame);
         ExpectRefusal(Opening, TEXT("PROTOCOL_VERSION_MISMATCH"));
         Pump();
@@ -12963,7 +12970,7 @@ bool FMtoULinkageMixedVersionTest::RunTest(const FString& Parameters)
         Hooks.Install();
         MtoUSetLinkageHooks(Hooks.Hooks);
         const TArray<uint8> Hello = Packet(
-            TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD ",\"host\":\"maya\","
+            TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD ",\"maya_subject_id\":\"automation-subject\",\"host\":\"maya\","
                  "\"maya_version\":\"2024\",\"plugin_version\":\"1.1.0\","
                  "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1.0,\"fps\":24.0},"
                  "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
@@ -16727,8 +16734,8 @@ bool FMtoULinkageObjectSetTest::RunTest(const FString& Parameters)
             MtoURequestLinkageEnter(MtoUGetLinkageView().Identity.ModeRevision + 1, EnterError));
         MtoUClearLinkageTarget(*Prop);
         TestTrue(TEXT("the idle actor pairs as the second object"), PairLinkageTarget(Idle, TEXT("secondary")));
-        TestTrue(TEXT("the changed pairing ends the set"), SecondReader.Next(*Second, TEXT("error"), Payload, Pump));
-        TestTrue(TEXT("the refusal asks for a new connection"), FromUtf8(Payload).Contains(TEXT("PAIRING_REQUIRED")));
+        TestTrue(TEXT("the changed pairing ends the set"), SecondReader.Next(*Second, TEXT("restart_state"), Payload, Pump));
+        TestTrue(TEXT("the refusal names the changed subject"), FromUtf8(Payload).Contains(TEXT("SUBJECT_CHANGED")));
         TestTrue(TEXT("the takeover is handed back"), PollUntil([&]()
         {
             Pump();
@@ -16830,6 +16837,20 @@ public:
     static FMtoURestartOperation Operation(FMtoULiveLinkSource& Source)
     { FScopeLock Lock(&Source.RestartMutex); return Source.Restart; }
     static bool ValidSubjects(FMtoULiveLinkSource& Source) { return Source.ValidateSubjectsOnGameThread(); }
+    static void SmallSendBuffer(FMtoULiveLinkSource& Source) { Source.RestartTestSendBuffer.Store(4096); }
+    static void Backpressure(FMtoULiveLinkSource& Source)
+    {
+        const uint64 Session = Source.GreetedSession;
+        for (int32 Index = 0; Index < 2; ++Index)
+        {
+            FMtoUOutgoing Reply;
+            Reply.SessionId = Session;
+            Reply.Packet.SetNumZeroed(16 * 1024 * 1024);
+            Reply.bControl = true;
+            Source.AdmitOutgoingControl();
+            Source.OutgoingReplies.Enqueue(MoveTemp(Reply));
+        }
+    }
 };
 
 namespace
@@ -17389,7 +17410,8 @@ bool FMtoUSessionEndSourceRemovedTest::RunTest(const FString& Parameters)
         Ended.RecoveryResidual.IsEmpty() && Ended.ErrorCode.IsEmpty());
     TestTrue(TEXT("the display's own tick is given back"), Display->IsComponentTickEnabled());
     TestTrue(TEXT("the actor shows the true disconnected state"),
-        F.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected);
+        F.Actor->GetConnectionState() == EMtoUConnectionState::Error
+            && F.Actor->GetConnectionDetail().Contains(TEXT("SUBJECT_CHANGED")));
     TestTrue(TEXT("the actor knows its session ended"),
         F.Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
     TestFalse(TEXT("the actor leaves the Live Link set"), F.Actor->IsInLiveLinkSet());
@@ -17448,10 +17470,11 @@ bool FMtoUSessionEndSourceRemovedTest::RunTest(const FString& Parameters)
         && Closed.Mode == TEXT("realtime"));
     TestEqual(TEXT("no hook was left to call"), Closing.Hooks.RestoreCalls, 0);
     TestTrue(TEXT("the actor shows the true disconnected state"),
-        Closing.Actor->GetConnectionState() == EMtoUConnectionState::Disconnected
+        Closing.Actor->GetConnectionState() == EMtoUConnectionState::Error
+        && Closing.Actor->GetConnectionDetail().Contains(TEXT("SUBJECT_CHANGED"))
         && Closing.Actor->GetLinkSessionState() == EMtoULinkSessionState::Ended);
-    TestEqual(TEXT("the source reports a plain stop"),
-        Closing.Source->GetSourceStatus().ToString(), FString(TEXT("Stopped")));
+    TestTrue(TEXT("the source retains the observed subject stop"),
+        Closing.Source->GetSourceStatus().ToString().Contains(TEXT("SUBJECT_CHANGED")));
     TestEqual(TEXT("ending a session without hooks logs no warning"), Warnings.Count(), 0);
     return true;
 }
@@ -17849,7 +17872,7 @@ bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
     }
 
-    // ---- while the set is still being negotiated, any actor ends it -------
+    // ---- greeting pins subjects even before the complete set is Ready ----
     {
         FMtoUSessionEndMaya Maya(F);
         if (!Maya.Connect(*this, false))
@@ -17861,7 +17884,9 @@ bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("the set is not complete yet"), Maya.StaysOpen(0.2));
         AMtoULiveLinkActor* Outsider = F.Place();
         TestNotNull(TEXT("an actor that takes no part is placed"), Outsider);
-        TestTrue(TEXT("a change while the set is negotiated ends the negotiation"), Maya.PeerClosed());
+        TestTrue(TEXT("unrelated actor construction leaves pinned negotiation alone"), Maya.StaysOpen());
+        StartAndFailRefresh(*F.Actor);
+        TestTrue(TEXT("refreshing the actual pinned subject ends negotiation"), Maya.PeerClosed());
         TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
     }
     {
@@ -17873,7 +17898,9 @@ bool FMtoUSessionEndRequestIdentityTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("a greeted connection stays open"), Maya.StaysOpen(0.2));
         AMtoULiveLinkActor* Outsider = F.Place();
         TestNotNull(TEXT("an actor that takes no part is placed"), Outsider);
-        TestTrue(TEXT("a change after the greeting ends the negotiation"), Maya.PeerClosed());
+        TestTrue(TEXT("unrelated actor construction leaves the greeted subject alone"), Maya.StaysOpen());
+        StartAndFailRefresh(*F.Actor);
+        TestTrue(TEXT("refreshing the greeted subject ends negotiation"), Maya.PeerClosed());
         TestTrue(TEXT("the end reaches the game thread"), F.WaitSessionOver());
     }
 
@@ -18210,7 +18237,8 @@ bool FMtoURestartPermitTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Ready completes the bounded intent"), PollUntil([&]()
     { return FMtoURestartTestAccess::Operation(*F.Source).Phase == FMtoURestartOperation::EPhase::Ready; }));
     Next.Drop();
-    F.Pump();
+    TestTrue(TEXT("the completed automatic transport releases admission"), PollUntil([&]()
+    { F.Pump(); return !F.Source->GetTimeControlView().bConnected; }, 2.0));
     FMtoUSessionEndMaya Replay(F);
     Replay.Socket = ConnectLoopback(*F.Sockets, F.Port);
     TestTrue(TEXT("spent token can be delivered"), Replay.Socket && SendBytes(*Replay.Socket, Hello.GetData(), Hello.Num()));
@@ -18241,6 +18269,314 @@ bool FMtoURestartIdentityTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("changing Binding between hello and init closes transport"), Maya.PeerClosed());
     F.Pump();
     TestTrue(TEXT("surviving actor records subject change"), F.Actor->GetConnectionDetail().Contains(TEXT("SUBJECT_CHANGED")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartOperationTransitionsTest,
+    "MtoULiveLink.Source.Restart.OperationTransitions",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMtoURestartOperationTransitionsTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoURestartOperation Operation;
+    TestTrue(TEXT("first actual input starts one intent"), Operation.Begin(4, 10));
+    Operation.SourceRevision = 2;
+    Operation.Phase = FMtoURestartOperation::EPhase::Permitted;
+    Operation.bPermitDelivered = true;
+    Operation.Token = TEXT("one-use");
+    Operation.Phase = FMtoURestartOperation::EPhase::Reconnecting;
+    Operation.ActiveSession = 5;
+    TestTrue(TEXT("a real new input after init ends that transport"), Operation.Begin(5, 13));
+    TestEqual(TEXT("new transport retains original total deadline"), Operation.OperationDeadline, 42.0);
+    TestEqual(TEXT("continuous editing retains original coordination deadline"), Operation.CoordinationDeadline, 15.0);
+    TestTrue(TEXT("an old permit never survives the new input"), Operation.Token.IsEmpty());
+    Operation.Stop(TEXT("SUBJECT_CHANGED"), TEXT("actor instance replaced"));
+    TestFalse(TEXT("late input cannot revive a stopped intent"), Operation.Begin(5, 14));
+    TestFalse(TEXT("timeout cannot replace the concrete cause"), Operation.Expire(100));
+    TestEqual(TEXT("specific subject reason remains"), Operation.Code, FString(TEXT("SUBJECT_CHANGED")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartImplicitIdentityTest,
+    "MtoULiveLink.Source.Restart.ImplicitActorReplacement",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMtoURestartImplicitIdentityTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    MtoUClearLinkageTarget(*F.Actor);
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, true)) { return false; }
+    FMtoURestartTestAccess::Clock(*F.Source, 300);
+    MtoURequestStreamingSessionEnd(*F.Actor);
+    F.Pump();
+    const FString OldPath = F.Actor->GetPathName();
+    const FName OldName = F.Actor->GetFName();
+    F.Actor->Rename(TEXT("RetiredMtoUActor"), nullptr, REN_DontCreateRedirectors);
+    F.Actor->Destroy();
+    FActorSpawnParameters Spawn;
+    Spawn.Name = OldName;
+    AMtoULiveLinkActor* Replacement = F.World->SpawnActor<AMtoULiveLinkActor>(Spawn);
+    TestNotNull(TEXT("same-path replacement exists"), Replacement);
+    if (!Replacement) { return false; }
+    Replacement->SetBinding(F.Actor->GetBinding());
+    F.Placed.Add(Replacement);
+    TestEqual(TEXT("replacement has exactly the old object path"), Replacement->GetPathName(), OldPath);
+    const TArray<uint8> Prepared = Packet(FString::Printf(
+        TEXT("{\"type\":\"restart_prepared\",\"session_id\":%d,\"source_revision\":2}"), Maya.SessionId));
+    SendBytes(*Maya.Socket, Prepared.GetData(), Prepared.Num());
+    TestTrue(TEXT("replacing the implicit actor closes coordination"), Maya.PeerClosed());
+    F.Pump();
+    const FMtoURestartOperation Op = FMtoURestartTestAccess::Operation(*F.Source);
+    TestEqual(TEXT("the actual instance change is reported"), Op.Code, FString(TEXT("SUBJECT_CHANGED")));
+    TestTrue(TEXT("replacement receives no permission or subject"), Op.Token.IsEmpty() && !Replacement->IsInLiveLinkSet());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartRecoveryRefusalTest,
+    "MtoULiveLink.Source.Restart.RecoveryRefusal",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMtoURestartRecoveryRefusalTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    AddExpectedMessagePlain(TEXT("could not be restored"), ELogVerbosity::Warning,
+        EAutomationExpectedMessageFlags::Contains, 1);
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, true)) { return false; }
+    FString Error;
+    if (!TestTrue(TEXT("linkage borrows real boundary writers"), MtoURequestLinkageEnter(1, Error))
+        || !Maya.ConfirmLinkage(*this, 1)) { return false; }
+    F.Hooks.bRestoreSucceeds = false;
+    FMtoURestartTestAccess::Clock(*F.Source, 400);
+    MtoURequestStreamingSessionEnd(*F.Actor);
+    F.Pump();
+    TestTrue(TEXT("failed resource recovery closes without granting permission"), Maya.PeerClosed());
+    F.Pump();
+    const FMtoURestartOperation Op = FMtoURestartTestAccess::Operation(*F.Source);
+    TestEqual(TEXT("recovery refusal stays specific"), Op.Code, FString(TEXT("RECOVERY_REFUSED")));
+    TestTrue(TEXT("residual never creates a permit"), Op.Token.IsEmpty());
+    TestEqual(TEXT("the linkage residual is retained"), F.Source->GetLinkageSession().GetView().RecoveryResidual,
+        F.Hooks.RestoreResidual);
+    TestTrue(TEXT("surviving Details keep concrete recovery reason"), F.Actor->GetConnectionDetail().Contains(TEXT("RECOVERY_REFUSED")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartTransportDeadlineTest,
+    "MtoULiveLink.Source.Restart.TransportDeadline",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMtoURestartTransportDeadlineTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    // Exercise all three places the intent can outlive its original TCP:
+    // no replacement socket, an accepted socket without hello, and a new
+    // greeting whose complete object set never reaches Ready.
+    for (int32 Scenario = 0; Scenario < 5; ++Scenario)
+    {
+        FMtoUSessionEndFixture F;
+        ON_SCOPE_EXIT { F.Close(); };
+        if (!F.Open(*this)) { return false; }
+        const bool bTwoObjects = Scenario == 2;
+        if (bTwoObjects)
+        {
+            AMtoULiveLinkActor* Secondary = F.Place();
+            FString Error;
+            if (!TestTrue(TEXT("the second actual target is paired"),
+                MtoUPairLinkageTarget(*Secondary, TEXT("secondary"), Error))) { return false; }
+        }
+        FMtoUSessionEndMaya Maya(F);
+        if (!Maya.Connect(*this, !bTwoObjects)) { return false; }
+        const TArray<uint8> Primary = F.InitPacket(TEXT("[\"character\",\"secondary\"]"));
+        if (bTwoObjects)
+        {
+            TArray<uint8> Body = Primary;
+            Body.RemoveAt(0, 8);
+            const TArray<uint8> Secondary = Packet(FromUtf8(Body).Replace(
+                TEXT("\"object_id\":\"character\""), TEXT("\"object_id\":\"secondary\"")));
+            SendBytes(*Maya.Socket, Primary.GetData(), Primary.Num());
+            SendBytes(*Maya.Socket, Secondary.GetData(), Secondary.Num());
+            TArray<uint8> Ready;
+            TestTrue(TEXT("old primary is ready"), Maya.Reader.Next(*Maya.Socket, TEXT("ready"), Ready, [&]() { F.Pump(); }));
+            TestTrue(TEXT("old secondary is ready"), Maya.Reader.Next(*Maya.Socket, TEXT("ready"), Ready, [&]() { F.Pump(); }));
+            TestTrue(TEXT("old full group streamed"), F.Source->GetTimeControlView().bConnected);
+        }
+        FMtoURestartTestAccess::Clock(*F.Source, 1000);
+        MtoURequestStreamingSessionEnd(*F.Actor);
+        F.Pump();
+        const TArray<uint8> Prepared = Packet(FString::Printf(
+            TEXT("{\"type\":\"restart_prepared\",\"session_id\":%d,\"source_revision\":2}"), Maya.SessionId));
+        SendBytes(*Maya.Socket, Prepared.GetData(), Prepared.Num());
+        FString Token;
+        for (int32 State = 0; State < 2 && Token.IsEmpty(); ++State)
+        {
+            TArray<uint8> Payload;
+            if (!TestTrue(TEXT("coordination is observed on actual TCP"), Maya.Reader.Next(*Maya.Socket,
+                TEXT("restart_state"), Payload, [&]() { F.Pump(); }, 2.0))) { return false; }
+            TSharedPtr<FJsonObject> Json;
+            if (JsonObjectFromBytes(Payload, Json) && Json->GetStringField(TEXT("state")) == TEXT("permitted"))
+            { Token = Json->GetStringField(TEXT("restart_token")); }
+        }
+        if (!TestTrue(TEXT("the socket received exactly one usable permit"), !Token.IsEmpty())) { return false; }
+        TestTrue(TEXT("coordination TCP is closed"), Maya.PeerClosed());
+        Maya.Drop();
+        FMtoUSessionEndMaya Next(F);
+        if (Scenario == 3) { FMtoURestartTestAccess::SmallSendBuffer(*F.Source); }
+        if (Scenario > 0)
+        {
+            Next.Socket = ConnectLoopback(*F.Sockets, F.Port);
+            TestNotNull(TEXT("replacement TCP is accepted"), Next.Socket);
+            TestTrue(TEXT("the real worker owns the replacement before advancing its deadline"), PollUntil([&]()
+            { const FMtoURestartOperation Op = FMtoURestartTestAccess::Operation(*F.Source);
+              return Op.ActiveSession != Op.OldSession; }, 2.0));
+        }
+        if (Scenario == 4)
+        {
+            Next.Drop();
+            TestTrue(TEXT("aborting the single replacement clears its intent without the game thread"), PollUntil([&]()
+            { return FMtoURestartTestAccess::Operation(*F.Source).Phase == FMtoURestartOperation::EPhase::Stopped; }, 2.0));
+            const FMtoURestartOperation Aborted = FMtoURestartTestAccess::Operation(*F.Source);
+            TestTrue(TEXT("failed replacement never leaves a reusable permit"), Aborted.Token.IsEmpty());
+            TestEqual(TEXT("no retry is disguised as a new input"), Aborted.Code, FString(TEXT("RESTART_CANCELLED")));
+            F.Pump();
+            continue;
+        }
+        if (Scenario >= 2)
+        {
+            const TArray<uint8> Hello = Packet(FString::Printf(TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD
+                ",\"maya_subject_id\":\"automation-subject\",\"restart_token\":\"%s\",\"host\":\"maya\",\"maya_version\":\"2024\","
+                "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1,\"fps\":24},\"capabilities\":{}}"), *Token));
+            TArray<uint8> Payload;
+            SendBytes(*Next.Socket, Hello.GetData(), Hello.Num());
+            TestTrue(TEXT("the replacement hello is acknowledged"), Next.Reader.Next(*Next.Socket,
+                TEXT("hello_ack"), Payload, [&]() { F.Pump(); }, 2.0));
+            if (Scenario == 2)
+            {
+                SendBytes(*Next.Socket, Primary.GetData(), Primary.Num());
+                TestTrue(TEXT("one object can become ready while the other is withheld"), Next.Reader.Next(*Next.Socket,
+                    TEXT("ready"), Payload, [&]() { F.Pump(); }, 2.0));
+                TestFalse(TEXT("partial Ready does not reopen publishing"), F.Source->GetTimeControlView().bConnected);
+                TestTrue(TEXT("partial Ready retains reconnecting in the first Actor Details"),
+                    F.Actor->GetConnectionState() == EMtoUConnectionState::Reconnecting);
+            }
+            else
+            {
+                int32 ReceiveBuffer = 0;
+                TestTrue(TEXT("the real client accepts a bounded receive buffer"), Next.Socket->SetReceiveBufferSize(4096, ReceiveBuffer));
+                FMtoURestartTestAccess::Backpressure(*F.Source);
+                TestTrue(TEXT("the worker is inside a real backpressured socket write"), PollUntil([&]()
+                    {
+                        uint32 Arrived = 0;
+                        return Next.Socket->HasPendingData(Arrived) && Arrived > 0
+                            && Arrived < 32 * 1024 * 1024
+                            && FMtoUControlBudgetTestAccess::OutgoingQueued(*F.Source) < 2;
+                    }, 2.0));
+            }
+        }
+        FMtoURestartTestAccess::Clock(*F.Source, 1032);
+        if (Next.Socket)
+        {
+            int64 ReceivedBeforeClose = 0;
+            TestTrue(TEXT("total deadline closes replacement without game-thread progress"), PollUntil([&]()
+            {
+                uint8 Buffer[65536];
+                int32 Read = 0;
+                bool bOpen = true;
+                do
+                {
+                    bOpen = Next.Socket->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read);
+                    if (bOpen && Read > 0) { ReceivedBeforeClose += Read; }
+                }
+                while (bOpen && Read > 0);
+                return !bOpen;
+            }, 2.0));
+            if (Scenario == 3)
+            { TestTrue(TEXT("deadline interrupted a partially sent packet"), ReceivedBeforeClose < 32 * 1024 * 1024); }
+        }
+        else
+        { TestTrue(TEXT("token-only intent also expires on the worker"), PollUntil([&]()
+            { return FMtoURestartTestAccess::Operation(*F.Source).Phase == FMtoURestartOperation::EPhase::Stopped; }, 2.0)); }
+        const FMtoURestartOperation Stopped = FMtoURestartTestAccess::Operation(*F.Source);
+        TestEqual(TEXT("new TCP and partial Ready never renew total deadline"), Stopped.OperationDeadline, 1032.0);
+        TestEqual(TEXT("every stalled phase retains the timeout reason"), Stopped.Code, FString(TEXT("RESTART_TIMEOUT")));
+        TestTrue(TEXT("the permit cannot survive expiry"), Stopped.Token.IsEmpty());
+        F.Pump();
+        TestFalse(TEXT("late game-thread work cannot reopen the stream"), F.Source->GetTimeControlView().bConnected);
+    }
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartPeerStopTest,
+    "MtoULiveLink.Source.Restart.PeerStop",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMtoURestartPeerStopTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, true)) { return false; }
+    const TArray<uint8> Cancel = Packet(FString::Printf(
+        TEXT("{\"type\":\"restart_cancel\",\"session_id\":%d,\"code\":\"SUBJECT_CHANGED\",\"detail\":\"Maya scene replaced\"}"), Maya.SessionId));
+    SendBytes(*Maya.Socket, Cancel.GetData(), Cancel.Num());
+    TestTrue(TEXT("ordinary Ready accepts a concrete peer subject stop"), Maya.PeerClosed());
+    F.Pump();
+    TestTrue(TEXT("UE Details retain the peer-observed reason"), F.Actor->GetConnectionDetail().Contains(TEXT("Maya scene replaced")));
+    TestTrue(TEXT("peer stop never leaves a permit"), FMtoURestartTestAccess::Operation(*F.Source).Token.IsEmpty());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartSourceInstanceTest,
+    "MtoULiveLink.Source.Restart.SourceInstance",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FMtoURestartSourceInstanceTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    FMtoUSessionEndMaya Maya(F);
+    if (!Maya.Connect(*this, true)) { return false; }
+    FMtoURestartTestAccess::Clock(*F.Source, 600);
+    MtoURequestStreamingSessionEnd(*F.Actor);
+    F.Pump();
+    const TArray<uint8> Prepared = Packet(FString::Printf(
+        TEXT("{\"type\":\"restart_prepared\",\"session_id\":%d,\"source_revision\":2}"), Maya.SessionId));
+    SendBytes(*Maya.Socket, Prepared.GetData(), Prepared.Num());
+    FString Token;
+    for (int32 State = 0; State < 2 && Token.IsEmpty(); ++State)
+    {
+        TArray<uint8> Payload;
+        if (!Maya.Reader.Next(*Maya.Socket, TEXT("restart_state"), Payload, [&]() { F.Pump(); }, 2.0)) { return false; }
+        TSharedPtr<FJsonObject> Json;
+        if (JsonObjectFromBytes(Payload, Json) && Json->GetStringField(TEXT("state")) == TEXT("permitted"))
+        { Token = Json->GetStringField(TEXT("restart_token")); }
+    }
+    if (!TestTrue(TEXT("the old Source issued a real permit"), !Token.IsEmpty())) { return false; }
+    TestTrue(TEXT("old coordination closed"), Maya.PeerClosed());
+    Maya.Drop();
+    F.Source->StopListener();
+    F.LiveLink->RemoveSource(F.Source.ToSharedRef());
+    F.Source = MakeShared<FMtoULiveLinkSource>(0);
+    F.SourceGuid = F.LiveLink->AddSource(F.Source.ToSharedRef());
+    MtoUSetActiveSource(F.Source);
+    TestTrue(TEXT("the replacement Source listens independently"), WaitForStatus(F.Source.ToSharedRef(), TEXT("Listening on")));
+    F.Port = static_cast<uint16>(ListeningPort(F.Source.ToSharedRef()));
+    FMtoUSessionEndMaya Replay(F);
+    Replay.Socket = ConnectLoopback(*F.Sockets, F.Port);
+    const TArray<uint8> Hello = Packet(FString::Printf(TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD
+        ",\"maya_subject_id\":\"automation-subject\",\"restart_token\":\"%s\",\"host\":\"maya\",\"maya_version\":\"2024\","
+        "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1,\"fps\":24},\"capabilities\":{}}"), *Token));
+    TArray<uint8> Payload;
+    TestTrue(TEXT("the former permit can be delivered to a recreated Source"), Replay.Socket && SendBytes(*Replay.Socket, Hello.GetData(), Hello.Num()));
+    TestTrue(TEXT("new Source refuses the former instance's permit"), Replay.Socket && Replay.Reader.Next(*Replay.Socket,
+        TEXT("error"), Payload, [&]() { F.Pump(); }, 2.0));
+    TestTrue(TEXT("Source identity refusal uses the stable subject code"), FromUtf8(Payload).Contains(TEXT("SUBJECT_CHANGED")));
+    TestTrue(TEXT("the former token cannot initialize the replacement"), Replay.PeerClosed() && !F.Actor->IsInLiveLinkSet());
     return true;
 }
 #endif

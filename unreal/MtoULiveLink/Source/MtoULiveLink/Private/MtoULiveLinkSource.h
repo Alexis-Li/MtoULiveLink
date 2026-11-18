@@ -8,7 +8,6 @@
 #include "ILiveLinkSource.h"
 #include "MtoUCacheCommandQueue.h"
 #include "MtoURestartOperation.h"
-#include "MtoURestartOperation.h"
 #include "MtoUCacheSession.h"
 #include "MtoULiveLinkActor.h"
 #include "MtoULinkageSession.h"
@@ -207,6 +206,7 @@ struct FMtoUSessionObject
     // The object was negotiated through an explicit pairing, not as the one
     // placed actor of the single-character workflow.
     bool bPairedAtNegotiation = false;
+    EMtoUConnectionState NegotiatedState = EMtoUConnectionState::Connected;
     int32 ExpectedBoneCount = 0;
     int32 ExpectedCurveCount = 0;
     int32 NegotiatedRevision = 0;
@@ -352,7 +352,6 @@ private:
     friend class FMtoUControlBudgetTestAccess;
     friend class FMtoUSessionEndTestAccess;
     friend class FMtoURestartTestAccess;
-    friend class FMtoURestartTestAccess;
     // Editor integration coverage for explicit refresh during a session.
     friend class FMtoURefreshEndsSessionTestAccess;
 #endif
@@ -465,6 +464,7 @@ private:
     void RequestSessionEndOnGameThread(uint64 SessionId,
         EMtoUSessionEndReason Reason = EMtoUSessionEndReason::Failure);
     void TickRestartOnGameThread();
+    bool IsRestartBlocked(uint64 SessionId);
     void StopRestart(const FString& Code, const FString& Detail);
     bool ValidateSubjectsOnGameThread() const;
     void CaptureSubjectsOnGameThread();
@@ -515,8 +515,6 @@ private:
         FString PairingGeneration;
         FString InstanceId;
     };
-    // Weak object references are only examined on the game thread. These
-    // records survive old-stream cleanup and never resolve by object path.
     TArray<FProtectedSubject> ProtectedSubjects;
     uint64 GreetedSession = 0;
     FString MayaSubjectId;
@@ -524,33 +522,17 @@ private:
     mutable FCriticalSection RestartMutex;
     FMtoURestartOperation Restart;
     bool bRestartStatusDirty = false;
+#if WITH_DEV_AUTOMATION_TESTS
     TAtomic<double> RestartTestClock{-1.0};
+    TAtomic<int32> RestartTestSendBuffer{0};
+#endif
     double RestartNow() const
     {
+#if WITH_DEV_AUTOMATION_TESTS
         const double Override = RestartTestClock.Load();
-        return Override >= 0 ? Override : FPlatformTime::Seconds();
-    }
-    struct FProtectedSubject
-    {
-        FString ObjectId;
-        TWeakObjectPtr<AMtoULiveLinkActor> Actor;
-        TWeakObjectPtr<UMtoULiveLinkBinding> Binding;
-        TWeakObjectPtr<UWorld> World;
-        FString PairingGeneration;
-        FString InstanceId;
-    };
-    TArray<FProtectedSubject> ProtectedSubjects;
-    uint64 GreetedSession = 0;
-    FString MayaSubjectId;
-    const FString SourceInstanceId = FGuid::NewGuid().ToString(EGuidFormats::Digits);
-    mutable FCriticalSection RestartMutex;
-    FMtoURestartOperation Restart;
-    bool bRestartStatusDirty = false;
-    TAtomic<double> RestartTestClock{-1.0};
-    double RestartNow() const
-    {
-        const double Override = RestartTestClock.Load();
-        return Override >= 0 ? Override : FPlatformTime::Seconds();
+        if (Override >= 0) { return Override; }
+#endif
+        return FPlatformTime::Seconds();
     }
     const uint16 ConfiguredPort;
     TAtomic<bool> bStopRequested{false};
