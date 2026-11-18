@@ -1857,12 +1857,8 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     check(IsInGameThread());
     const uint64 SessionId = GameThreadSession;
     if (IsRestartBlocked(SessionId)) { return false; }
-    if (!LinkageSession.GetView().RecoveryResidual.IsEmpty())
-    {
-        EnqueueErrorOnGameThread(TEXT("RECOVERY_REFUSED"), TEXT("Previous linkage resources still need recovery."),
-            LinkageSession.GetView().RecoveryResidual);
-        return false;
-    }
+    // Automatic reconnect requires a permit granted after successful recovery.
+    // A manual connection carries the previous recovery report into the new session.
     if (GreetedSession != SessionId || (!ProtectedSubjects.IsEmpty() && !ValidateSubjectsOnGameThread()))
     {
         EnqueueErrorOnGameThread(TEXT("SUBJECT_CHANGED"), TEXT("The greeted target instance changed before init."));
