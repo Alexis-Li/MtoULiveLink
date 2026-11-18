@@ -116,8 +116,12 @@ class MockUnrealPeer(object):
         if hello.get("version") != PROTOCOL_VERSION:
             self.errors.append("hello version {0!r}".format(hello.get("version")))
             return
+        if not hello.get("maya_subject_id"):
+            self.errors.append("hello has no Maya subject identity")
+            return
         self._send(sock, {
             "type": "hello_ack",
+            "source_instance_id": "mock-linkage-source",
             "version": PROTOCOL_VERSION,
             "session_id": self.session_id,
             "capabilities": {"linkage": True},
@@ -136,6 +140,7 @@ class MockUnrealPeer(object):
             self.errors.append("init object id {0!r}".format(init.get("object_id")))
         self._send(sock, {
             "type": "ready",
+            "target_instance_id": "mock-linkage-target",
             "session_id": self.session_id,
             "object_id": self.object_id,
             "set_revision": init.get("set_revision", 1),

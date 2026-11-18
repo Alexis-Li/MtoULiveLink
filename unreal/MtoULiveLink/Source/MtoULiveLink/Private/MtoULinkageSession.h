@@ -127,7 +127,7 @@ public:
     void EndSession();
 
     /** The greeting arrived; the answer names the current pairing and space. */
-    void NoteHello(const FMtoUHelloMessage& Hello);
+    void NoteHello(const FMtoUHelloMessage& Hello, const FString& SourceInstanceId = FString());
     /** Maya's authority statement after one transition. */
     void NoteMode(const FMtoUModeMessage& Message, double NowSeconds);
     /** Maya confirms it restored its own timeline, view and gate. */

@@ -25,7 +25,7 @@ OUTPUT_PATH = (
 # ``unknown_type`` is a message whose ``type`` the protocol does not define: a
 # retired type belongs here.
 OPERATIONS = {
-    "framing", "init", "frame", "ready", "error",
+    "framing", "init", "frame", "ready", "ready_set", "error",
     "cache_enter",
     "cache_begin", "cache_frame", "cache_end",
     "cache_clear",
@@ -34,6 +34,7 @@ OPERATIONS = {
     "cache_loop_changed",
     "cache_stopped", "cache_cleared",
     "hello", "hello_ack",
+    "restart_request", "restart_prepared", "restart_cancel", "restart_state",
     "mode", "mode_state", "leave_linkage",
     "camera_time",
     "group",
@@ -57,14 +58,14 @@ LIMIT_KEYS = (
 # Stable rejection codes from protocol/README.md; the message text is diagnostic
 # only, so a rejected corpus case must name one of these.
 ERROR_CODES = {
-    "PROTOCOL_VERSION_MISMATCH", "INVALID_MESSAGE",
+    "PROTOCOL_VERSION_MISMATCH", "INVALID_MESSAGE", "INVALID_BINDING",
     "PAIRING_REQUIRED", "TARGET_UNKNOWN", "TARGET_ALREADY_PAIRED",
     "WRITER_NOT_ISOLATABLE", "SHARED_WRITER", "MOVING_SOCKET",
     "ANCHOR_MISMATCH", "OBJECT_SET_UNSUPPORTED",
     "MODE_CONFLICT", "CACHE_NOT_CLEARED",
     "SET_REVISION_STALE", "SPACE_REVISION_STALE", "EVAL_STALE",
     "RESOURCE_LIMIT",
-    "RECOVERY_REFUSED",
+    "RECOVERY_REFUSED", "SUBJECT_CHANGED", "RESTART_TIMEOUT", "RESTART_CANCELLED",
     "LINKAGE_NOT_ACTIVE",
     "CACHE_METADATA_INVALID", "CACHE_PAYLOAD_TOO_LARGE",
     "CACHE_FRAME_INDEX_INVALID", "CACHE_FRAME_CONTENTS_INVALID",

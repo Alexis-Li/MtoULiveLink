@@ -181,6 +181,15 @@ class FakeStreamingSession(object):
     def _resume(self):
         self.resumed += 1
 
+    def restart_status(self):
+        return None, None, None
+
+    def fence_for_disconnect(self, diagnostic):
+        self.time_control.terminate()
+
+    def release_restart_leases(self):
+        self.time_control.terminate()
+
     def stop(self):
         self.stopped = True
 

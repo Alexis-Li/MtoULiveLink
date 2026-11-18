@@ -787,14 +787,14 @@ class LinkageProtocolTests(unittest.TestCase):
 
     def test_hello_message_declares_units_and_capabilities(self):
         message = mtou_protocol.make_hello_message(
-            "2024", "cm", 1.0, 24.0)
+            "2024", "cm", 1.0, 24.0, maya_subject_id="maya-subject")
         self.assertEqual(mtou_config.PROTOCOL_VERSION, message["version"])
         self.assertEqual("cm", message["scene"]["linear_unit"])
         self.assertTrue(message["capabilities"]["linkage"])
         with self.assertRaises(ValueError):
-            mtou_protocol.make_hello_message("2024", "cm", 0.0, 24.0)
+            mtou_protocol.make_hello_message("2024", "cm", 0.0, 24.0, maya_subject_id="maya-subject")
         with self.assertRaises(ValueError):
-            mtou_protocol.make_hello_message("2024", "cm", 1.0, float("inf"))
+            mtou_protocol.make_hello_message("2024", "cm", 1.0, float("inf"), maya_subject_id="maya-subject")
 
 
 if __name__ == "__main__":

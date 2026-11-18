@@ -376,6 +376,11 @@ class CharacterSceneTests(unittest.TestCase):
 
         class FakeNodeMessage(object):
             kAttributeSet = 1
+            kConnectionMade = 2
+            kConnectionBroken = 4
+            kAttributeAdded = 8
+            kAttributeRemoved = 16
+            kAttributeRenamed = 32
 
             @staticmethod
             def addNodeDestroyedCallback(node, callback):
@@ -417,6 +422,17 @@ class CharacterSceneTests(unittest.TestCase):
         }
         display = {"attribute": "clothes", "entries": ["Clothes01", "Clothes02"],
                    "plug": "|Group|Display_ctrl.clothes"}
+
+        def register(scene):
+            scene._callback_ids.extend([
+                FakeNodeMessage.addNodeDestroyedCallback(None, scene._on_root_destroyed),
+                FakeNodeMessage.addNodeDestroyedCallback(None, scene._on_display_destroyed),
+                FakeNodeMessage.addAttributeChangedCallback(None, scene._on_input_changed)])
+
+        def visible_inputs(scene):
+            return (subject["meshes"], tuple(subject["meshes"]),
+                    mtou_scene.current_enum_label(display))
+
         patches = [
             patch_global("cmds", fake_cmds),
             patch_global("om", fake_om),
@@ -425,6 +441,10 @@ class CharacterSceneTests(unittest.TestCase):
             mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
                               return_value=("|Group|Display_ctrl", "clothes")),
             patch_global("capture_subject", return_value=subject),
+            mock.patch.object(mtou_scene.CharacterScene, "_register_callbacks", register),
+            mock.patch.object(mtou_scene.CharacterScene, "_visible_inputs", visible_inputs),
+            mock.patch.object(mtou_scene.CharacterScene, "_rebuild_input_observers"),
+            patch_global("mesh_identities", side_effect=tuple),
             patch_global("enum_attributes", return_value=[display]),
             patch_global("current_enum_label", return_value="Clothes01"),
             patch_global("dag_path", return_value=FakeDagPath()),
@@ -454,7 +474,7 @@ class CharacterSceneTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             snapshot.revision = 2
 
-    def test_display_change_pauses_sampling_and_coalesces_refresh(self):
+    def test_display_label_change_coalesces_without_changing_revision(self):
         events = []
         scene, callbacks, deferred, _, _ = self._capture(events.append)
 
@@ -468,19 +488,11 @@ class CharacterSceneTests(unittest.TestCase):
         with patch_global("current_enum_label", return_value="Clothes02"):
             changed(1, FakePlug(), None, None)
             changed(1, FakePlug(), None, None)
-
-        self.assertEqual(["character_change_started"], [event.kind for event in events])
-        with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
-            scene.sample()
-        self.assertEqual("CHARACTER_SCENE_REFRESHING", caught.exception.code)
-        self.assertEqual(2, len(deferred))
-
-        deferred[0]()
-        self.assertEqual(["character_change_started"], [event.kind for event in events])
-        deferred[1]()
-        self.assertEqual(
-            ["character_change_started", "outfit_changed"],
-            [event.kind for event in events])
+            self.assertEqual(1, scene.sample().revision)
+            self.assertEqual(1, len(deferred))
+            deferred[0]()
+        self.assertEqual(["display_changed"], [event.kind for event in events])
+        self.assertEqual("Clothes02", scene.snapshot().outfit)
         self.assertEqual(1, scene.snapshot().revision)
 
     def test_sampling_failure_does_not_terminate_scene(self):
@@ -507,6 +519,21 @@ class CharacterSceneTests(unittest.TestCase):
         scene.close()
         self.assertEqual([1, 2, 101], removed)
 
+    def test_synchronous_sample_retires_its_queued_refresh(self):
+        scene, _, deferred, _, _ = self._capture()
+        scene._on_graph_changed()
+        self.assertEqual(1, scene.sample().revision)
+
+        scene._on_graph_changed()
+        scene._on_graph_changed()
+        self.assertEqual(2, len(deferred))
+        with mock.patch.object(scene, "_visible_inputs", wraps=scene._visible_inputs) as inputs:
+            deferred[0]()
+            inputs.assert_not_called()
+            deferred[1]()
+            inputs.assert_called_once()
+        self.assertEqual(1, scene.snapshot().revision)
+
     def test_close_invalidates_deferred_refresh(self):
         scene, callbacks, deferred, removed, _ = self._capture()
 
@@ -528,7 +555,8 @@ class CharacterSceneTests(unittest.TestCase):
 
     def test_refresh_failure_enters_terminal_state(self):
         events = []
-        scene, callbacks, deferred, removed, _ = self._capture(events.append)
+        scene, callbacks, deferred, removed, subject = self._capture(events.append)
+        subject["meshes"] = ["|Group|replacement"]
 
         class FakePlug(object):
             @staticmethod
@@ -555,6 +583,7 @@ class CharacterSceneTests(unittest.TestCase):
     def test_event_consumer_failure_does_not_break_scene(self):
         scene, callbacks, _, _, _ = self._capture(
             lambda event: (_ for _ in ()).throw(RuntimeError("consumer failed")))
+        scene._subject["meshes"] = ["|Group|replacement"]
 
         class FakePlug(object):
             @staticmethod
@@ -594,6 +623,10 @@ class CharacterSceneTests(unittest.TestCase):
 
         fake_om = type("FakeOpenMaya", (), {
             "MNodeMessage": FailingNodeMessage,
+            "MDagMessage": type("FailingDagMessage", (), {
+                "addAllDagChangesCallback": staticmethod(
+                    lambda callback: (_ for _ in ()).throw(RuntimeError("registration failed"))),
+            }),
             "MMessage": type("FakeMessage", (), {
                 "removeCallback": staticmethod(removed.append),
             }),
@@ -617,6 +650,7 @@ class CharacterSceneTests(unittest.TestCase):
              mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
                                return_value=("|Group|Display_ctrl", "clothes")), \
              patch_global("capture_subject", return_value=subject), \
+             patch_global("mesh_identities", return_value=("body-uuid",)), \
              patch_global("enum_attributes", return_value=[display]), \
              patch_global("current_enum_label", return_value="Clothes01"), \
              patch_global("dag_path", return_value=FakeDagPath()):
@@ -755,6 +789,9 @@ class StreamingSessionTests(unittest.TestCase):
             def start(self):
                 pass
 
+            def restart_status(self):
+                return None, None, None
+
             def status(self):
                 return ("ready", "Connected", {
                     "missing_in_unreal": [], "missing_in_maya": [],
@@ -885,6 +922,9 @@ class StreamingSessionTests(unittest.TestCase):
             def start(self):
                 pass
 
+            def restart_status(self):
+                return None, None, None
+
             def status(self):
                 return ("error", "connection lost", None, diagnostic)
 
@@ -961,6 +1001,9 @@ class StreamingSessionTests(unittest.TestCase):
 
             def start(self):
                 pass
+
+            def restart_status(self):
+                return None, None, None
 
             def status(self):
                 return ("ready", "Connected", {
@@ -1152,6 +1195,9 @@ class StreamingSessionTests(unittest.TestCase):
             def start(self):
                 pass
 
+            def restart_status(self):
+                return None, None, None
+
             def status(self):
                 return ("disconnected", "peer closed", None, None)
 
@@ -1201,6 +1247,9 @@ class StreamingSessionTests(unittest.TestCase):
 
             def start(self):
                 pass
+
+            def restart_status(self):
+                return None, None, None
 
             def status(self):
                 return (state["value"], "peer closed", None, None)
@@ -1348,25 +1397,41 @@ class StreamingSessionTests(unittest.TestCase):
         worker.join.assert_called_once_with(1.0)
         self.assertEqual(["stopped"], [event.kind for event in events])
 
-    def test_revision_change_fails_after_ready_and_requires_recapture(self):
-        events = []
-        timers = []
-        deferred = []
+    def test_revision_change_fails_while_the_session_is_still_ready(self):
+        for edited_object in ("character", "secondary"):
+            with self.subTest(edited_object=edited_object):
+                self._assert_ready_session_rejects_revision_change(edited_object)
+
+    def _assert_ready_session_rejects_revision_change(self, edited_object):
+        events, timers, deferred = [], [], []
         worker = mock.Mock()
         worker.status.return_value = ("ready", "Connected", None, None)
         fake_om, fake_cmds, scene = self._runtime(timers, deferred)
-        scene.sample.return_value = mtou_scene.CharacterFrame(8, [], [])
+        changed_frame = mtou_scene.CharacterFrame(8, [], [])
+        secondary = None
+        if edited_object == "character":
+            scene.sample.return_value = changed_frame
+        else:
+            scene.sample.return_value = mtou_scene.CharacterFrame(7, [], [])
+            secondary = mock.Mock()
+            secondary.snapshot.return_value = character_snapshot(
+                7, "|secondary", "Clothes01", [("secondary", -1)], [])
+            secondary.sample.return_value = changed_frame
 
         with patch_global("om", fake_om), \
              patch_global("cmds", fake_cmds), \
              patch_global("SenderWorker", return_value=worker):
-            mtou_session.StreamingSession.start(scene, 24.0, events.append)
+            mtou_session.StreamingSession.start(
+                scene, 24.0, events.append, secondary_scene=secondary)
             timers[0](0.0, 0.0, None)
             deferred[0]()
 
         self.assertEqual(["ready", "failed"], [event.kind for event in events])
         self.assertEqual("SAMPLING_FAILED", events[1].diagnostic["code"])
-        self.assertTrue(events[1].recapture_scene)
+        self.assertEqual(edited_object + " scene revision changed from 7 to 8",
+                         events[1].diagnostic["details"])
+        self.assertEqual(edited_object == "character", events[1].recapture_scene)
+        worker.submit.assert_not_called()
 
     def test_rate_timer_creation_failure_keeps_old_timer_until_terminal_cleanup(self):
         events = []
@@ -1441,7 +1506,7 @@ class SenderLifecycleTests(unittest.TestCase):
         class MismatchSocket(object):
             def __init__(self):
                 self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 8,
+                    "type": "ready", "target_instance_id": "hero-target", "object_id": "character", "revision": 8,
                     "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0,
@@ -1488,7 +1553,7 @@ class SenderLifecycleTests(unittest.TestCase):
             class ReadySocket(object):
                 def __init__(self):
                     self.reply = mtou_protocol.encode_message({
-                        "type": "ready", "revision": 7,
+                        "type": "ready", "target_instance_id": "hero-target", "revision": 7,
                         "object_id": init_message["object_id"],
                         "set_revision": init_message["set_revision"],
                         "space_revision": init_message["space_revision"],
@@ -1505,8 +1570,8 @@ class SenderLifecycleTests(unittest.TestCase):
                     chunk, self.reply = self.reply[:size], self.reply[size:]
                     return chunk
 
-                def sendall(self, packet):
-                    pass
+                def send(self, packet):
+                    return len(packet)
 
                 def close(self):
                     pass
@@ -1545,7 +1610,7 @@ class SenderLifecycleTests(unittest.TestCase):
     def test_ready_reply_must_echo_the_negotiated_identity(self):
         identity = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
         ready_reply = {
-            "type": "ready", "revision": 7,
+            "type": "ready", "target_instance_id": "hero-target", "revision": 7,
             "object_id": "character", "set_revision": 1, "space_revision": 1,
             "session_id": 4242,
             "missing_in_unreal": [], "missing_in_maya": [],
@@ -1553,7 +1618,7 @@ class SenderLifecycleTests(unittest.TestCase):
             "target_morph_count": 0, "accepted_morph_count": 0,
         }
         greeting = {
-            "type": "hello_ack", "version": mtou_config.PROTOCOL_VERSION,
+            "type": "hello_ack", "source_instance_id": "ue-source", "version": mtou_config.PROTOCOL_VERSION,
             "session_id": 4242,
             "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
             "targets": [{"object_id": "character", "kind": "skeletal_mesh",
@@ -1563,13 +1628,13 @@ class SenderLifecycleTests(unittest.TestCase):
                                  "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]}},
         }
 
-        def run_with_ready_reply(reply, greeting=None):
+        def run_with_ready_reply(reply, greeting=greeting):
             init_message = mtou_protocol.make_init_message(
                 [["root", -1, identity]], ["Smile"], 7,
                 mtou_config.WORKFLOW_MODEL, True, "character", 1, 1)
             worker = mtou_session.SenderWorker(
                 init_message,
-                mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0))
+                mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0, maya_subject_id="maya-subject"))
             stream = b""
             if greeting is not None:
                 stream += mtou_protocol.encode_message(greeting)
@@ -1586,8 +1651,8 @@ class SenderLifecycleTests(unittest.TestCase):
                     chunk, self.reply = self.reply[:size], self.reply[size:]
                     return chunk
 
-                def sendall(self, packet):
-                    pass
+                def send(self, packet):
+                    return len(packet)
 
                 def close(self):
                     pass
@@ -1635,7 +1700,7 @@ class SenderLifecycleTests(unittest.TestCase):
     def _ready_then(*messages):
         """A socket that answers the handshake with ready, then ``messages``."""
         packet = mtou_protocol.encode_message({
-            "type": "ready", "revision": 7,
+            "type": "ready", "target_instance_id": "hero-target", "object_id": "character", "revision": 7,
             "missing_in_unreal": [], "missing_in_maya": [],
             "bone_name_remaps": [], "workflow": "animation",
             "target_morph_count": 0, "accepted_morph_count": 0,
@@ -1825,7 +1890,7 @@ class SenderLifecycleTests(unittest.TestCase):
             def __init__(self):
                 self.sent = []
                 self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
+                    "type": "ready", "target_instance_id": "hero-target", "object_id": "character", "revision": 7,
                     "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0})
@@ -1839,8 +1904,9 @@ class SenderLifecycleTests(unittest.TestCase):
                 chunk, self.reply = self.reply[:size], self.reply[size:]
                 return chunk or b"\x00"
 
-            def sendall(self, packet):
+            def send(self, packet):
                 self.sent.append(bytes(packet))
+                return len(packet)
 
             def close(self):
                 pass
@@ -1879,7 +1945,7 @@ class SenderLifecycleTests(unittest.TestCase):
             def __init__(self):
                 self.sent = []
                 self._reply = mtou_protocol.encode_message({
-                    "type": "ready", "missing_in_unreal": [], "missing_in_maya": [],
+                    "type": "ready", "target_instance_id": "hero-target", "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0})
 
@@ -1949,7 +2015,7 @@ class SenderLifecycleTests(unittest.TestCase):
             def __init__(self):
                 self.sent = []
                 self._reply = mtou_protocol.encode_message({
-                    "type": "ready", "missing_in_unreal": [], "missing_in_maya": [],
+                    "type": "ready", "target_instance_id": "hero-target", "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0})
 
@@ -2027,9 +2093,6 @@ class SenderLifecycleTests(unittest.TestCase):
             def close(self):
                 pass
 
-            def sendall(self, packet):
-                self.sent.append(bytes(packet))
-
             def send(self, packet):
                 if not resume_write.is_set():
                     raise OSError(errno.EWOULDBLOCK, "send would block")
@@ -2062,7 +2125,7 @@ class SenderLifecycleTests(unittest.TestCase):
         class BlockingSendSocket(object):
             def __init__(self):
                 self._reply = mtou_protocol.encode_message({
-                    "type": "ready", "missing_in_unreal": [], "missing_in_maya": [],
+                    "type": "ready", "target_instance_id": "hero-target", "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0})
                 self.closed = False
@@ -2123,7 +2186,7 @@ class SenderLifecycleTests(unittest.TestCase):
         class FakeClock(object):
             now = 0.0
 
-            def time(self):
+            def monotonic(self):
                 return self.now
 
         clock = FakeClock()
@@ -2134,7 +2197,8 @@ class SenderLifecycleTests(unittest.TestCase):
                 return 1
 
         worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
-        with mock.patch.object(time, "time", side_effect=clock.time):
+        with mock.patch.object(time, "monotonic", side_effect=clock.monotonic):
+            worker._init_deadline = 5.0
             with self.assertRaisesRegex(socket.timeout,
                                         "timed out sending init message"):
                 worker._send_initial(PartialSendSocket())
@@ -2190,7 +2254,7 @@ class VersionMismatchHandshakeTests(unittest.TestCase):
 
     def hello_ack(self, version):
         return {
-            "type": "hello_ack", "version": version, "session_id": 4242,
+            "type": "hello_ack", "source_instance_id": "ue-source", "version": version, "session_id": 4242,
             "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
             "targets": [],
             "space": {"space_revision": 1,
@@ -2202,7 +2266,7 @@ class VersionMismatchHandshakeTests(unittest.TestCase):
         identity = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
         init_message = mtou_protocol.make_init_message(
             [["root", -1, identity]], [], 7)
-        hello_message = mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0)
+        hello_message = mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0, maya_subject_id="maya-subject")
         worker = mtou_session.SenderWorker(init_message, hello_message)
         peer = _ScriptedPeerSocket(replies)
         states = []
@@ -2220,9 +2284,9 @@ class VersionMismatchHandshakeTests(unittest.TestCase):
              mock.patch.object(worker, "_set_status", side_effect=record):
             worker.run()
         # The refusal is final: the session never became ready, and nothing
-        # but the opening packet (hello, then init) went to the peer.
+        # but hello went to the peer.
         self.assertEqual(["error"], states)
-        self.assertEqual(worker._initial_packet, peer.sent)
+        self.assertEqual(mtou_protocol.encode_message(hello_message), peer.sent)
         self.assertEqual([], peer.send_all_calls)
         self.assertTrue(peer.closed)
         state, _, _, diagnostic = worker.status()
@@ -4023,6 +4087,7 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_disconnecting_discards_cached_state_before_stopping_session(self):
         controller = mtou_controller.Controller()
         controller._session = mock.Mock()
+        controller._session.restart_status.return_value = (None, None, None)
         controller._discard_cached_playback = mock.Mock()
         controller._set_connected = mock.Mock()
 
@@ -4217,6 +4282,7 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_same_warning_signature_does_not_interrupt_twice(self):
         controller = mtou_controller.Controller()
+        controller._warning_checkbox = 'showWarnings'
         session = object()
         controller._session = session
         controller._workflow = mtou_config.WORKFLOW_ANIMATION
@@ -4417,7 +4483,9 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller._capture_scene = mock.Mock(return_value=scene)
         controller._set_connected = mock.Mock()
 
-        controller.set_display_controller()
+        with mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
+                               return_value=("|Display_ctrl", "clothes")):
+            controller.set_display_controller()
 
         status = controller._set_connected.call_args[0][1]
         self.assertIn("已按绑定姿势解析 2 处蒙皮绑定矩阵冲突", status)
@@ -4442,6 +4510,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         calls = []
         session = mock.Mock()
         session.is_ready = True
+        session.restart_status.return_value = (None, None, None)
         session.stop.side_effect = lambda: calls.append("stop")
         snapshot = character_snapshot(
             1, "|root", "Clothes01", [("root", -1)], [])
@@ -4462,10 +4531,33 @@ class ControllerLifecycleTests(unittest.TestCase):
 
         controller._clear_scene = clear_scene
         controller._capture_scene = capture_scene
-        with patch_global("cmds", fake_cmds):
+        with patch_global("cmds", fake_cmds), \
+             mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
+                               return_value=("|Display_ctrl", "clothes")):
             controller.set_display_controller()
 
         self.assertEqual(["stop", "clear", "capture"], calls)
+
+    def test_display_label_selection_keeps_live_session_and_scene(self):
+        controller = mtou_controller.Controller()
+        scene = mock.Mock()
+        scene.snapshot.return_value = character_snapshot(
+            1, "|root", "outfit", [("root", -1)], [])
+        controller._scene = scene
+        controller._session = mock.Mock()
+        controller._selected_display = mock.Mock(return_value="|Display_ctrl")
+        controller._set_connected = mock.Mock()
+        controller.disconnect = mock.Mock()
+        controller._capture_scene = mock.Mock()
+        fake_cmds = mock.Mock()
+        fake_cmds.ls.return_value = ["display-uuid"]
+        with patch_global("cmds", fake_cmds), \
+             mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
+                               return_value=("|Display_ctrl", "wardrobe")):
+            controller.set_display_controller()
+        scene.set_display_controller.assert_called_once_with("|Display_ctrl", "wardrobe")
+        controller.disconnect.assert_not_called()
+        controller._capture_scene.assert_not_called()
 
     def test_invalid_display_selection_keeps_live_session_and_scene(self):
         fake_cmds = mock.MagicMock()
@@ -4603,31 +4695,45 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(model_visibility[controller._cache_text])
         self.assertTrue(model_visibility[controller._bs_checkbox])
 
-    def test_switching_workflow_disconnects_and_clears_cached_playback(self):
+    def test_workflow_change_fences_then_releases_cached_playback_before_prepared(self):
         controller = mtou_controller.Controller()
         session, lease = cached_session()
+        window = mtou_session.RestartWindow()
+        session.request_restart.return_value = window
+        session.restart_status.return_value = (window, "coordinating", None)
+        session.release_restart_leases.side_effect = session.time_control.terminate
+        session.secondary_scene = None
+        session.removal_pending = False
         cached = mock.Mock()
-        cached.discard.side_effect = lease.release
+        cached.discard.return_value = None
         controller._session = session
         controller._cached_playback = cached
         snapshot = character_snapshot(
             3, "|Group|root", "Clothes01", [("root", -1)], ["Smile"])
         scene = mock.Mock()
-        scene.snapshot.return_value = snapshot
+        scene.refresh_for_restart.return_value = snapshot
         controller._scene = scene
+        session.object_scenes.return_value = {session.object_id: scene}
         controller._set_connected = mock.Mock()
-        controller._show_error = mock.Mock()
+        queued = []
+        controller._defer_ui = queued.append
+        fake_cmds = mock.Mock()
+        fake_cmds.currentUnit.return_value = "film"
 
-        controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
+        with patch_global("cmds", fake_cmds):
+            controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
+            session.request_restart.assert_called_once_with(2)
+            self.assertTrue(lease.active)
+            session.prepare_restart.assert_not_called()
+            queued.pop(0)()
 
         self.assertEqual(mtou_config.WORKFLOW_MODEL, controller._workflow)
         self.assertEqual(mtou_config.REALTIME_MODE, controller._mode)
-        session.stop.assert_called_once_with()
-        cached.discard.assert_called_once_with()
+        session.stop.assert_not_called()
+        cached.discard.assert_called_once_with(verify_restoration=True)
+        session.prepare_restart.assert_called_once_with(2)
         self.assertIs(scene, controller._scene)
-        self.assertIs(snapshot, controller._scene.snapshot())
-        self.assertEqual("Clothes01", controller._scene.snapshot().outfit)
-        self.assertEqual("|Group|root", controller._scene.snapshot().root)
+        scene.refresh_for_restart.assert_called_once_with()
 
     def test_switching_back_to_animation_keeps_model_disconnected_state(self):
         controller = mtou_controller.Controller()
@@ -4643,6 +4749,8 @@ class WorkflowTests(unittest.TestCase):
         controller = mtou_controller.Controller()
         controller._bs_checkbox = "bsCheckBox"
         controller._session = mock.Mock()
+        controller._session.request_restart.return_value = mtou_session.RestartWindow()
+        controller._defer_ui = mock.Mock()
         controller._blendshapes_enabled = True
 
         fake_cmds.checkBox.side_effect = None
@@ -4651,7 +4759,8 @@ class WorkflowTests(unittest.TestCase):
             controller._on_blendshapes_toggled()
 
         self.assertFalse(controller._blendshapes_enabled)
-        controller._session.stop.assert_called_once_with()
+        controller._session.request_restart.assert_called_once_with(2)
+        controller._session.stop.assert_not_called()
 
     def test_toggling_blendshapes_while_disconnected_keeps_state_only(self):
         fake_cmds = self._fake_ui_cmds()
@@ -4710,7 +4819,7 @@ class WorkflowTests(unittest.TestCase):
         worker = mock.Mock()
         worker.status.return_value = ("connecting", "Connecting", None, None)
 
-        def worker_factory(init_messages, hello_message=None, on_reply=None):
+        def worker_factory(init_messages, hello_message=None, on_reply=None, **kwargs):
             # One init per object of the set; a one-character set sends one.
             self.assertEqual(1, len(init_messages))
             captured["init"] = init_messages[0]
@@ -4805,11 +4914,12 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertEqual("INVALID_MESSAGE", caught.exception.code)
 
-    def test_clothes_change_disconnects_session_and_refreshes_outfit_manifest(self):
+    def test_clothes_change_fences_session_and_refreshes_outfit_manifest(self):
         controller = mtou_controller.Controller()
         session = mock.Mock()
         controller._session = session
-        controller._outfit_change_was_connected = True
+        session.request_restart.return_value = mtou_session.RestartWindow()
+        controller._defer_ui = mock.Mock()
         before = character_snapshot(
             1, "|root", "Clothes01", [("root", -1)], ["OldSmile"])
         after = character_snapshot(
@@ -4823,7 +4933,8 @@ class WorkflowTests(unittest.TestCase):
         controller._on_character_scene_event(
             mtou_scene.CharacterSceneEvent("character_change_started", snapshot=before))
 
-        session.stop.assert_called_once_with()
+        session.request_restart.assert_called_once_with(2)
+        session.stop.assert_not_called()
 
         controller._on_character_scene_event(
             mtou_scene.CharacterSceneEvent("outfit_changed", snapshot=after))
@@ -4835,7 +4946,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual("Clothes02", rendered.outfit)
         self.assertEqual(("NewSmile",), rendered.curve_names)
         status = controller._set_connected.call_args[0][1]
-        self.assertIn("Clothes02", status)
+        self.assertIn("正在重新连接", status)
 
 
 class _LinkageHost(object):
@@ -4919,6 +5030,23 @@ class ProtocolTests(unittest.TestCase):
     def _assert_maya_conformance_case(self, case):
         operation = case["operation"]
         expected = case["expected"]
+        if operation == "ready_set":
+            if expected["accepted"]:
+                actual = mtou_protocol.validate_ready_identities(case["payloads"], case["negotiated_set"])
+                self.assertEqual({row["object_id"]: row["target_instance_id"] for row in case["payloads"]}, actual)
+            else:
+                with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                    mtou_protocol.validate_ready_identities(case["payloads"], case["negotiated_set"])
+            return
+        if operation.startswith("restart_"):
+            if expected["accepted"]:
+                self.assertEqual(case["payload"], mtou_protocol.validate_restart_message(case["payload"]))
+                if operation == "restart_state":
+                    self.assertEqual(case["payload"], mtou_protocol.validate_reply(case["payload"]))
+            else:
+                with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                    mtou_protocol.validate_restart_message(case["payload"])
+            return
         if operation == "framing":
             if "raw_hex" in case:
                 raw = bytes.fromhex(case["raw_hex"])
@@ -5147,7 +5275,9 @@ class ProtocolTests(unittest.TestCase):
             actual = mtou_protocol.make_hello_message(
                 payload["maya_version"], scene["linear_unit"],
                 scene["unit_scale_cm"], scene["fps"],
-                plugin_version=payload.get("plugin_version"))
+                plugin_version=payload.get("plugin_version"),
+                maya_subject_id=payload.get("maya_subject_id"),
+                restart_token=payload.get("restart_token"))
             self.assertEqual(payload, actual)
             self.assertEqual(1.0, mtou_space.centimeters_per_unit(scene["linear_unit"]))
             self.assertEqual(
@@ -5155,6 +5285,12 @@ class ProtocolTests(unittest.TestCase):
                 scene["unit_scale_cm"])
             self.assertEqual(scene["fps"], mtou_space.validate_frame_rate(scene["fps"]))
             self.assertTrue(mtou_protocol.encode_message(actual))
+            return
+        if "maya_subject_id" in expected.get("keywords", []) or "restart_token" in expected.get("keywords", []):
+            with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                mtou_protocol.make_hello_message(
+                    payload["maya_version"], scene["linear_unit"], scene["unit_scale_cm"], scene["fps"],
+                    maya_subject_id=payload.get("maya_subject_id"), restart_token=payload.get("restart_token"))
             return
         if scene["linear_unit"] != "cm":
             # A peer whose scene is not the common centimetre space is refused
@@ -5487,6 +5623,7 @@ class CharacterPartDiscoveryTests(unittest.TestCase):
                 parents[current] = [parent] if parent else []
                 current = parent
         parents["|Group"] = []
+        parents.update((shape, [path]) for path, shape in shapes.items())
 
         def list_relatives(path, **kwargs):
             if kwargs.get("parent"):
@@ -5526,6 +5663,8 @@ class CharacterPartDiscoveryTests(unittest.TestCase):
             return list(self.ALIASES.get(node, ()))
 
         def ls(*names, **kwargs):
+            if kwargs.get("uuid"):
+                return [name + "-uuid" for name in names if name in self.ALIASES]
             known = set(shapes.values()) | set(self.MESHES)
             return [name for name in names if name in known]
 

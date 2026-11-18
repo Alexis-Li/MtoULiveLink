@@ -442,7 +442,8 @@ class MayaDriverCommandTests(unittest.TestCase):
                 state = driver_functions()
                 state.update({name: mock.Mock() for name in (
                     "write_result", "open_scene", "key_test_motion", "key_test_morphs",
-                    "install_callback_census", "connect_role", "fail", "tick")})
+                    "install_callback_census", "install_session_census", "attach_panel_census",
+                    "connect_role", "fail", "tick")})
                 state["FIXTURE"]["start_disconnected"] = disconnected
                 state["TIMER"] = [None]
                 qt_core = types.ModuleType("PySide2.QtCore")

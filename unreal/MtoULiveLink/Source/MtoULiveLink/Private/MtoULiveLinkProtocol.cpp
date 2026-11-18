@@ -842,6 +842,14 @@ bool FMtoUProtocol::ParseHello(
         return false;
     }
 
+    if (!GetStringField(Object, TEXT("maya_subject_id"), OutMessage.MayaSubjectId, OutError)
+        || OutMessage.MayaSubjectId.IsEmpty()
+        || !GetOptionalString(Object, TEXT("restart_token"), OutMessage.RestartToken, OutError)
+        || (Object->HasField(TEXT("restart_token")) && OutMessage.RestartToken.IsEmpty()))
+    {
+        OutError = TEXT("Fields 'maya_subject_id' and optional 'restart_token' must be non-empty strings; update both hosts together.");
+        return false;
+    }
     if (!GetStringField(Object, TEXT("host"), OutMessage.Host, OutError)
         || !GetStringField(Object, TEXT("maya_version"), OutMessage.MayaVersion, OutError)
         || !GetOptionalString(Object, TEXT("plugin_version"), OutMessage.PluginVersion, OutError))
@@ -908,6 +916,175 @@ bool FMtoUProtocol::ParseHello(
         return false;
     }
     return true;
+}
+
+bool FMtoUProtocol::IsRestartStopCode(const FString& Code)
+{
+    static const TSet<FString> Codes = {
+        TEXT("ANCHOR_MISMATCH"),
+        TEXT("BIND_POSE_INVALID"),
+        TEXT("CACHED_PLAYBACK_PERFORMANCE"),
+        TEXT("CACHE_FRAME_CONTENTS_INVALID"),
+        TEXT("CACHE_FRAME_INDEX_INVALID"),
+        TEXT("CACHE_INVALID_STATE"),
+        TEXT("CACHE_METADATA_INVALID"),
+        TEXT("CACHE_NOT_CLEARED"),
+        TEXT("CACHE_NOT_READY"),
+        TEXT("CACHE_PAYLOAD_TOO_LARGE"),
+        TEXT("CACHE_REVISION_MISMATCH"),
+        TEXT("CACHE_SEEK_FAILED"),
+        TEXT("CACHE_SEEK_INVALID"),
+        TEXT("EVAL_STALE"),
+        TEXT("INTERNAL_ERROR"),
+        TEXT("INVALID_BINDING"),
+        TEXT("INVALID_MESSAGE"),
+        TEXT("LINKAGE_APPLY_FAILED"),
+        TEXT("LINKAGE_NOT_ACTIVE"),
+        TEXT("MODE_CONFLICT"),
+        TEXT("MOVING_SOCKET"),
+        TEXT("MULTIPLE_BINDING_ACTORS"),
+        TEXT("NO_BINDING_ACTOR"),
+        TEXT("OBJECT_SET_UNSUPPORTED"),
+        TEXT("PAIRING_REQUIRED"),
+        TEXT("PREVIEW_MORPH_MISMATCH"),
+        TEXT("PREVIEW_NOT_READY"),
+        TEXT("PROTOCOL_VERSION_MISMATCH"),
+        TEXT("RECOVERY_REFUSED"),
+        TEXT("RESOURCE_LIMIT"),
+        TEXT("RESTART_CANCELLED"),
+        TEXT("RESTART_TIMEOUT"),
+        TEXT("SECOND_CLIENT_REJECTED"),
+        TEXT("SET_REVISION_STALE"),
+        TEXT("SHARED_WRITER"),
+        TEXT("SKELETON_MISMATCH"),
+        TEXT("SPACE_REVISION_STALE"),
+        TEXT("SUBJECT_CHANGED"),
+        TEXT("TARGET_ALREADY_PAIRED"),
+        TEXT("TARGET_UNKNOWN"),
+        TEXT("WRITER_NOT_ISOLATABLE")
+    };
+    return Codes.Contains(Code);
+}
+
+namespace
+{
+bool ParseRestart(const TArray<uint8>& Payload, const TCHAR* ExpectedType,
+    FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode)
+{
+    OutMessage = FMtoURestartMessage();
+    OutError.Reset();
+    if (OutErrorCode) { *OutErrorCode = TEXT("INVALID_MESSAGE"); }
+    TSharedPtr<FJsonObject> Object;
+    if (!ParseObject(Payload, Object, OutError)) { return false; }
+    FString Type;
+    if (!GetStringField(Object, TEXT("type"), Type, OutError) || Type != ExpectedType)
+    {
+        OutError = FString::Printf(TEXT("Message type must be '%s'."), ExpectedType);
+        return false;
+    }
+    const auto PositiveIdentity = [&](const TCHAR* Name, int32& Value)
+    {
+        if (!GetIdentityInt(Object, Name, Value, OutError) || Value < 1)
+        {
+            OutError = FString::Printf(TEXT("Field '%s' must be a positive int32."), Name);
+            return false;
+        }
+        return true;
+    };
+    if (!PositiveIdentity(TEXT("session_id"), OutMessage.SessionId)) { return false; }
+    if ((Type == TEXT("restart_request") || Type == TEXT("restart_prepared"))
+        && !PositiveIdentity(TEXT("source_revision"), OutMessage.SourceRevision)) { return false; }
+    if (Type == TEXT("restart_request")
+        && (!GetStringField(Object, TEXT("reason"), OutMessage.Reason, OutError)
+            || OutMessage.Reason != TEXT("input_changed")))
+    {
+        OutError = TEXT("Restart reason must be 'input_changed'.");
+        return false;
+    }
+    if (Type == TEXT("restart_cancel") || Type == TEXT("restart_state"))
+    {
+        if (!GetStringField(Object, TEXT("detail"), OutMessage.Detail, OutError)
+            || !GetStringField(Object, TEXT("code"), OutMessage.Code, OutError)) { return false; }
+        if (Type == TEXT("restart_state")
+            && (!GetStringField(Object, TEXT("state"), OutMessage.State, OutError)
+                || (OutMessage.State != TEXT("ending") && OutMessage.State != TEXT("permitted")
+                    && OutMessage.State != TEXT("stopped"))))
+        {
+            OutError = TEXT("Restart state must be 'ending', 'permitted' or 'stopped'.");
+            return false;
+        }
+        const bool bStopped = Type == TEXT("restart_cancel") || OutMessage.State == TEXT("stopped");
+        if ((bStopped && !FMtoUProtocol::IsRestartStopCode(OutMessage.Code))
+            || (!bStopped && !OutMessage.Code.IsEmpty()))
+        {
+            OutError = TEXT("Restart code must be a defined stable stop code, or empty for ending/permitted.");
+            return false;
+        }
+    }
+    if (Type == TEXT("restart_state"))
+    {
+        if (OutMessage.State == TEXT("permitted"))
+        {
+            if (!GetStringField(Object, TEXT("restart_token"), OutMessage.RestartToken, OutError)
+                || OutMessage.RestartToken.IsEmpty())
+            {
+                OutError = TEXT("Field 'restart_token' must be a non-empty string.");
+                return false;
+            }
+        }
+        else if (Object->HasField(TEXT("restart_token")))
+        {
+            OutError = TEXT("restart_token is only defined for permitted state.");
+            return false;
+        }
+    }
+    return true;
+}
+}
+
+bool FMtoUProtocol::ParseRestartRequest(const TArray<uint8>& Payload,
+    FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode)
+{
+    return ParseRestart(Payload, TEXT("restart_request"), OutMessage, OutError, OutErrorCode);
+}
+
+bool FMtoUProtocol::ParseRestartPrepared(const TArray<uint8>& Payload,
+    FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode)
+{
+    return ParseRestart(Payload, TEXT("restart_prepared"), OutMessage, OutError, OutErrorCode);
+}
+
+bool FMtoUProtocol::ParseRestartCancel(const TArray<uint8>& Payload,
+    FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode)
+{
+    return ParseRestart(Payload, TEXT("restart_cancel"), OutMessage, OutError, OutErrorCode);
+}
+
+bool FMtoUProtocol::ParseRestartState(const TArray<uint8>& Payload,
+    FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode)
+{
+    return ParseRestart(Payload, TEXT("restart_state"), OutMessage, OutError, OutErrorCode);
+}
+
+TArray<uint8> FMtoUProtocol::EncodeRestartState(int32 SessionId, const FString& State,
+    const FString& Code, const FString& Detail, const FString& RestartToken)
+{
+    const bool bPermitted = State == TEXT("permitted");
+    const bool bStopped = State == TEXT("stopped");
+    if (SessionId < 1 || (!bPermitted && !bStopped && State != TEXT("ending"))
+        || (bStopped ? !IsRestartStopCode(Code) : !Code.IsEmpty())
+        || (bPermitted ? RestartToken.IsEmpty() : !RestartToken.IsEmpty()))
+    {
+        return {};
+    }
+    const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+    Object->SetStringField(TEXT("type"), TEXT("restart_state"));
+    Object->SetNumberField(TEXT("session_id"), SessionId);
+    Object->SetStringField(TEXT("state"), State);
+    Object->SetStringField(TEXT("code"), Code);
+    Object->SetStringField(TEXT("detail"), Detail);
+    if (bPermitted) { Object->SetStringField(TEXT("restart_token"), RestartToken); }
+    return EncodeObject(Object);
 }
 
 bool FMtoUProtocol::ParseMode(
@@ -1380,6 +1557,7 @@ bool FMtoUProtocol::IsDefinedMessageType(const FString& Type)
     // the protocol never had.
     static const TCHAR* const Defined[] = {
         TEXT("hello"), TEXT("init"), TEXT("frame"),
+        TEXT("restart_request"), TEXT("restart_prepared"), TEXT("restart_cancel"),
         TEXT("cache_enter"), TEXT("cache_begin"), TEXT("cache_frame"),
         TEXT("cache_end"), TEXT("cache_clear"),
         TEXT("mode"), TEXT("group"), TEXT("leave_linkage"), TEXT("remove_object")};
@@ -1822,7 +2000,8 @@ TArray<uint8> FMtoUProtocol::EncodeReady(
     int32 SessionId,
     const FString& ObjectId,
     int32 SetRevision,
-    int32 SpaceRevision)
+    int32 SpaceRevision,
+    const FString& TargetInstanceId)
 {
     auto EncodeNames = [](const TArray<FName>& Names)
     {
@@ -1836,6 +2015,7 @@ TArray<uint8> FMtoUProtocol::EncodeReady(
     };
     const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetStringField(TEXT("type"), TEXT("ready"));
+    Object->SetStringField(TEXT("target_instance_id"), TargetInstanceId);
     Object->SetNumberField(TEXT("revision"), NegotiatedRevision);
     // v10 echoes the negotiated identity so a peer can refuse a reply that
     // belongs to another session, object set or common space.
@@ -1877,10 +2057,12 @@ TArray<uint8> FMtoUProtocol::EncodeHelloAck(
     bool bModel,
     const TArray<FMtoUHelloTarget>& Targets,
     int32 SpaceRevision,
-    const TSharedPtr<FJsonObject>& Anchor)
+    const TSharedPtr<FJsonObject>& Anchor,
+    const FString& SourceInstanceId)
 {
     const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetStringField(TEXT("type"), TEXT("hello_ack"));
+    Object->SetStringField(TEXT("source_instance_id"), SourceInstanceId);
     Object->SetNumberField(TEXT("version"), FMtoUProtocol::Version);
     Object->SetNumberField(TEXT("session_id"), SessionId);
 

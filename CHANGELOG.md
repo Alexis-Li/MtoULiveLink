@@ -9,6 +9,8 @@ repository's issues.
 
 ### Upgrade notes
 
+- Maya 2024 is now required; Maya 2022 is no longer supported. Update the Maya
+  and Unreal components together for input-change reconnection. (#46)
 - Update the Maya and Unreal components together: protocol v12 refuses a mixed
   pair before it touches either scene. (#14)
 - The scene reference is removed: Unreal's **场景参考** group in the Binding Actor
@@ -25,12 +27,18 @@ repository's issues.
 
 ### Changed
 
+- Set Character now needs only the deformation root. Visible skinned meshes
+  determine the outfit; Display supplies an optional label. (#46)
+- Changes to the outfit, workflow, Transfer BS or character parts reconnect
+  automatically for the same character and targets; stops and failures require Connect. (#46)
 - A refused protocol version now reads 连接失败 · 插件协议版本不匹配 and lists the plugin and
   protocol version that Maya and Unreal each have loaded (未知（对端未提供） for an item the
   other side did not provide), with the advice to reinstall both from one release. (#34)
 
 ### Fixed
 
+- Visible Template and Reference meshes now contribute BlendShapes; hidden
+  meshes are excluded, including LOD and visibility overrides. (#46)
 - Unreal keeps updating while connected with Maya in front, and restores normal
   background behavior after disconnect without changing your editor preferences. (#44)
 

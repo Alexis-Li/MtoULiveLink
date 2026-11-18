@@ -44,6 +44,15 @@ DIAGNOSTICS = {
     "STREAM_INTERRUPTED": (
         "Live Link 连接已中断",
         "请确认 UE 仍在运行且 Binding Actor 有效，然后重新连接。"),
+    "SUBJECT_CHANGED": (
+        "连接对象已变更，连接已停止",
+        "请确认当前 Maya 角色和 UE 目标，然后手动连接。"),
+    "RESTART_TIMEOUT": (
+        "自动重新连接超时，连接已停止",
+        "请查看诊断中的等候阶段，然后手动连接。"),
+    "RESTART_CANCELLED": (
+        "已取消自动重新连接",
+        "可在确认当前角色和目标后手动连接。"),
     "SAMPLING_FAILED": (
         "Maya 动画采样失败",
         "请检查骨架、BlendShape 和当前服装是否在连接期间被修改。"),

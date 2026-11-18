@@ -10,6 +10,9 @@ after panel lifecycle changes, and a separate port for a test editor beside a
 person's own. [workflow.md](workflow.md) defines how much verification a change
 needs.
 
+Maya 2024 is the supported Maya host and the development/verification baseline.
+Run Maya host suites and GUI acceptance with that version.
+
 Paths are placeholders: `<Maya2024>` is a Maya 2024 install, `<project>` a
 UE 5.7 project that loads `unreal/`, `<scratch>` the task scratch directory and
 `<fixtures>` the shared acceptance fixtures and `<evidence>` the `evidence`
@@ -246,11 +249,71 @@ Both tests fail on any Maya dialog the scenario did not expect. The driver
 records each dialog with the stage (`stage` command) that was current; the
 test lists what each stage may show:
 
-- `BLENDSHAPE_MISMATCH` on every connect of the fixture character;
+- `BLENDSHAPE_MISMATCH` on manual initial connects of the fixture character;
 - `STREAM_INTERRUPTED` where the exit ends the session: `destroy_target`,
   `close_world`, and Refresh Preview in `GuiRegression`.
 
-A new expected dialog is added to that list, not skipped.
+Automatic input-change negotiation must have an empty expected-dialog list:
+usable differences and failures are read from status and diagnostics. A new
+expected dialog for another stage is added to that stage's list, not skipped.
+
+### Input-change acceptance
+
+Use real Maya 2024 GUI edits and Unreal Binding transactions for input-change
+acceptance, including Undo/Redo. Record the old and new session identities,
+connection-attempt counts and state events so a brief reconnecting state is
+observable. Do not issue Connect to complete an automatic-negotiation case.
+Verify at least two distinct oracle poses on the actual display components;
+Ready text alone is insufficient. Explicit Refresh remains a separate case
+that ends streaming and requires manual Connect.
+
+Include root-only characters, actual visibility/LOD/override changes and visible
+Template/Reference meshes. For same-subject input changes during linkage, prove
+the old linkage set ended and resources were restored before a new realtime
+session; automatic negotiation does not continue the old linkage takeover.
+For subject replacement or failure, observe the surviving host's reason and
+prove no additional connection attempts occur until an explicit Connect.
+Editor exit/restart needs an external launcher to observe that interval.
+
+Run `GuiRegression` with `-MtoUGuiWorkflowFixture=<fixtures>/workflow-reconnect.json`
+on `/Engine/Maps/Entry`. The fixture adds a `reconnect` object to the ordinary
+GUI workflow. Set `oracle_frames` to two different displayed poses, `part_name`
+to a compatible part already listed in `parts`, and `incompatible_mesh` to an
+asset from another Skeleton. `failure_code` is the expected diagnostic for
+that negotiation. The test also enables `part_name` with its mesh cleared in
+an unsaved Binding transaction. It reads Maya's 诊断详情 window and checks that
+both hosts report `INVALID_BINDING`, name the part and describe the missing
+Skeletal Mesh. It then undoes the edit and explicitly connects.
+Each `visibility_cases` and `outfit_cases` entry gives a
+stage name, editable Maya plugs and values in `edits`, and one `present` and
+one `absent` mesh path to check. Visibility cases also specify whether the
+visible set changes in `restarts`. Each outfit edit is repeated through Maya
+Undo and Redo. `maya.legacy_display`, `maya.legacy_enum` and `legacy_outfit`
+describe the rig's original clothing label. The driver keeps its DG
+connections and changes the naming and labels in memory to exercise root-only
+discovery. `maya.initial_edits` sets the initial Template state.
+Use a distinct `maya.secondary_root` for the role change. `new_joint` creates
+a skinned root in the open test scene. `maya.keyed_morphs` names matching
+non-zero Maya and Unreal weights for the displayed-component oracle.
+
+In a two-object `ProductionSequence` fixture, add `composition_reconnect` to
+`scenarios` to apply its first `composition_swaps` entry during linkage.
+The test checks that the old set ends, the Sequencer writers and Maya camera
+and time are restored, and both objects negotiate realtime on a new session.
+The existing `destroy_target` and `close_world` cases exercise subject exits
+during linkage.
+
+Run the separate Editor exit and relaunch with the launcher. It keeps the
+original Maya open across both Editor processes and records the stop reason
+and unchanged Maya attempt count through the restart window.
+
+```text
+python tools/verify_editor_restart.py --editor <UnrealEditor-Cmd> --project <Project.uproject> --fixture <fixtures>/workflow-reconnect.json --evidence <scratch>/editor-restart --port <dedicated-test-port>
+```
+
+Keep production scenes and assets unsaved. Record the run fixture hash and
+Maya preference hash along with the automation report, pose comparisons and
+connection events under the evidence directory.
 
 ### Maya preferences
 

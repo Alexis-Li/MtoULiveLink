@@ -45,9 +45,9 @@ when module responsibilities or state ownership change.
   modules with one `__version__`. Use Maya's bundled Python and Qt and guard
   version-specific APIs. Repeated launches must not duplicate windows or
   callbacks; closing removes the nodes, callbacks, scriptJobs and UI the tool
-  created, and importing runs no Maya commands. `install.mel` stays ASCII
-  (Maya 2022 misreads UTF-8 MEL) and handles Maya ignoring a `.mod` path with
-  non-ASCII characters.
+  created, and importing runs no Maya commands. The Maya development and
+  verification baseline is Maya 2024. `install.mel` handles Maya ignoring a
+  `.mod` path with non-ASCII characters.
 - Unreal: runtime behavior lives in the runtime module and editor-only
   behavior in the editor module; public headers expose intentional APIs only.
   Declare plugin and module dependencies in `.uplugin` and `.Build.cs`.
@@ -157,8 +157,7 @@ times by a fresh session that has only the repository and `HANDOFF.md`.
   change. Update a template when its fixture's fields change.
 
 Commands run from the repository root. `<mayapy>` is Maya 2024
-`bin/mayapy.exe`; also use Maya 2022.4 when a change touches Maya API usage or
-Python syntax that 2022 could reject.
+`bin/mayapy.exe`; use Maya 2024 for Maya API, Python syntax and GUI verification.
 
 ## Default checks
 

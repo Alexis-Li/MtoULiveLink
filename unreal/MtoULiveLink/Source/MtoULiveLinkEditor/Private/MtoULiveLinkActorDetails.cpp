@@ -171,6 +171,9 @@ FText ConnectionHeadline(
 {
     switch (State)
     {
+    case EMtoUConnectionState::Reconnecting:
+        OutSeverity = ESeverity::Info;
+        return LOCTEXT("ConnectionReconnecting", "正在重新连接");
     case EMtoUConnectionState::Validating:
         OutSeverity = ESeverity::Info;
         return LOCTEXT("ConnectionValidating", "连接中");

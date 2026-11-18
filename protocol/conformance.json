@@ -3707,7 +3707,9 @@
         ],
         "workflow": "animation",
         "target_morph_count": 5,
-        "accepted_morph_count": 3
+        "accepted_morph_count": 3,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": true,
@@ -3731,7 +3733,9 @@
         "bone_name_remaps": [],
         "workflow": "model",
         "target_morph_count": 12,
-        "accepted_morph_count": 7
+        "accepted_morph_count": 7,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": true,
@@ -3756,7 +3760,9 @@
         "workflow": "model",
         "target_morph_count": 0,
         "accepted_morph_count": 0,
-        "future": true
+        "future": true,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": true,
@@ -3776,7 +3782,9 @@
         "missing_in_maya": [],
         "workflow": "animation",
         "target_morph_count": 0,
-        "accepted_morph_count": 0
+        "accepted_morph_count": 0,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": false,
@@ -3801,7 +3809,9 @@
         "bone_name_remaps": [],
         "workflow": "animation",
         "target_morph_count": 0,
-        "accepted_morph_count": 0
+        "accepted_morph_count": 0,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": false,
@@ -3825,7 +3835,9 @@
         "missing_in_maya": [],
         "bone_name_remaps": [],
         "target_morph_count": 0,
-        "accepted_morph_count": 0
+        "accepted_morph_count": 0,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": false,
@@ -3849,7 +3861,9 @@
         "missing_in_maya": [],
         "bone_name_remaps": [],
         "workflow": "model",
-        "accepted_morph_count": 0
+        "accepted_morph_count": 0,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": false,
@@ -3874,7 +3888,9 @@
         "bone_name_remaps": [],
         "workflow": "model",
         "target_morph_count": "many",
-        "accepted_morph_count": 0
+        "accepted_morph_count": 0,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": false,
@@ -3898,7 +3914,9 @@
         "bone_name_remaps": [],
         "workflow": "animation",
         "target_morph_count": 0,
-        "accepted_morph_count": 0
+        "accepted_morph_count": 0,
+        "target_instance_id": "target-character",
+        "object_id": "character"
       },
       "expected": {
         "accepted": false,
@@ -4917,7 +4935,8 @@
           "linkage": true,
           "cache": true,
           "model": true
-        }
+        },
+        "maya_subject_id": "maya-subject"
       },
       "expected": {
         "accepted": true,
@@ -4944,7 +4963,8 @@
           "linkage": true,
           "cache": true,
           "model": true
-        }
+        },
+        "maya_subject_id": "maya-subject"
       },
       "expected": {
         "accepted": false,
@@ -4975,7 +4995,8 @@
           "linkage": true,
           "cache": true,
           "model": true
-        }
+        },
+        "maya_subject_id": "maya-subject"
       },
       "expected": {
         "accepted": false,
@@ -5007,7 +5028,8 @@
           "linkage": true,
           "cache": true,
           "model": true
-        }
+        },
+        "maya_subject_id": "maya-subject"
       },
       "expected": {
         "accepted": false,
@@ -5041,7 +5063,8 @@
           "cache": true,
           "model": true
         },
-        "plugin_version": "0.0.0-example"
+        "plugin_version": "0.0.0-example",
+        "maya_subject_id": "maya-subject"
       },
       "expected": {
         "accepted": true,
@@ -5069,7 +5092,8 @@
           "cache": true,
           "model": true
         },
-        "plugin_version": 7
+        "plugin_version": 7,
+        "maya_subject_id": "maya-subject"
       },
       "expected": {
         "accepted": false,
@@ -5084,7 +5108,8 @@
       "id": "hello-ack-paired-target-is-accepted",
       "operation": "hello_ack",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
         "type": "hello_ack",
@@ -5123,7 +5148,8 @@
             "binding_path": "/Game/Characters/Hero",
             "generation": "1"
           }
-        ]
+        ],
+        "source_instance_id": "source-instance"
       },
       "expected": {
         "accepted": true,
@@ -5134,7 +5160,8 @@
       "id": "hello-ack-empty-target-before-pairing",
       "operation": "hello_ack",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
         "type": "hello_ack",
@@ -5166,7 +5193,8 @@
             ]
           }
         },
-        "targets": []
+        "targets": [],
+        "source_instance_id": "source-instance"
       },
       "expected": {
         "accepted": true,
@@ -5177,7 +5205,8 @@
       "id": "hello-ack-two-paired-targets-is-accepted",
       "operation": "hello_ack",
       "applies_to": [
-        "maya"
+        "maya",
+        "unreal"
       ],
       "payload": {
         "type": "hello_ack",
@@ -5222,7 +5251,8 @@
             "binding_path": "/Game/Props/Sword",
             "generation": "2"
           }
-        ]
+        ],
+        "source_instance_id": "source-instance"
       },
       "expected": {
         "accepted": true,
@@ -7659,6 +7689,2487 @@
         "keywords": [
           "set_revision"
         ]
+      }
+    },
+    {
+      "id": "hello-maya_subject_id-missing",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": "0.0.0-example"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "maya_subject_id"
+        ]
+      }
+    },
+    {
+      "id": "hello-maya_subject_id-empty",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": "0.0.0-example",
+        "maya_subject_id": ""
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "maya_subject_id"
+        ]
+      }
+    },
+    {
+      "id": "hello-maya_subject_id-wrong-type",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": "0.0.0-example",
+        "maya_subject_id": 7
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "maya_subject_id"
+        ]
+      }
+    },
+    {
+      "id": "hello_ack-source_instance_id-missing",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": []
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_instance_id"
+        ]
+      }
+    },
+    {
+      "id": "hello_ack-source_instance_id-empty",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [],
+        "source_instance_id": ""
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_instance_id"
+        ]
+      }
+    },
+    {
+      "id": "hello_ack-source_instance_id-wrong-type",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [],
+        "source_instance_id": 7
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_instance_id"
+        ]
+      }
+    },
+    {
+      "id": "ready-target_instance_id-missing",
+      "operation": "ready",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "ready",
+        "revision": 7,
+        "missing_in_unreal": [
+          "Blink_R"
+        ],
+        "missing_in_maya": [
+          "Corrective"
+        ],
+        "bone_name_remaps": [
+          "hair/tip -> tip1"
+        ],
+        "workflow": "animation",
+        "target_morph_count": 5,
+        "accepted_morph_count": 3,
+        "object_id": "character"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "target_instance_id"
+        ]
+      }
+    },
+    {
+      "id": "ready-target_instance_id-empty",
+      "operation": "ready",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "ready",
+        "revision": 7,
+        "missing_in_unreal": [
+          "Blink_R"
+        ],
+        "missing_in_maya": [
+          "Corrective"
+        ],
+        "bone_name_remaps": [
+          "hair/tip -> tip1"
+        ],
+        "workflow": "animation",
+        "target_morph_count": 5,
+        "accepted_morph_count": 3,
+        "target_instance_id": "",
+        "object_id": "character"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "target_instance_id"
+        ]
+      }
+    },
+    {
+      "id": "ready-target_instance_id-wrong-type",
+      "operation": "ready",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "ready",
+        "revision": 7,
+        "missing_in_unreal": [
+          "Blink_R"
+        ],
+        "missing_in_maya": [
+          "Corrective"
+        ],
+        "bone_name_remaps": [
+          "hair/tip -> tip1"
+        ],
+        "workflow": "animation",
+        "target_morph_count": 5,
+        "accepted_morph_count": 3,
+        "target_instance_id": 7,
+        "object_id": "character"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "target_instance_id"
+        ]
+      }
+    },
+    {
+      "id": "hello-permitted-restart-token",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": "0.0.0-example",
+        "maya_subject_id": "maya-subject",
+        "restart_token": "one-use-permit"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "hello-restart-token-empty",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": "0.0.0-example",
+        "maya_subject_id": "maya-subject",
+        "restart_token": ""
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "restart_token"
+        ]
+      }
+    },
+    {
+      "id": "hello-restart-token-wrong-type",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "plugin_version": "0.0.0-example",
+        "maya_subject_id": "maya-subject",
+        "restart_token": false
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "restart_token"
+        ]
+      }
+    },
+    {
+      "id": "ready-object-id-unknown",
+      "operation": "ready",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "ready",
+        "revision": 7,
+        "missing_in_unreal": [
+          "Blink_R"
+        ],
+        "missing_in_maya": [
+          "Corrective"
+        ],
+        "bone_name_remaps": [
+          "hair/tip -> tip1"
+        ],
+        "workflow": "animation",
+        "target_morph_count": 5,
+        "accepted_morph_count": 3,
+        "target_instance_id": "target-character",
+        "object_id": "unknown"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "object_id"
+        ]
+      }
+    },
+    {
+      "id": "ready-object-id-empty",
+      "operation": "ready",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "ready",
+        "revision": 7,
+        "missing_in_unreal": [
+          "Blink_R"
+        ],
+        "missing_in_maya": [
+          "Corrective"
+        ],
+        "bone_name_remaps": [
+          "hair/tip -> tip1"
+        ],
+        "workflow": "animation",
+        "target_morph_count": 5,
+        "accepted_morph_count": 3,
+        "target_instance_id": "target-character",
+        "object_id": ""
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "object_id"
+        ]
+      }
+    },
+    {
+      "id": "hello-ack-object-id-duplicate",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [
+          {
+            "object_id": "character",
+            "kind": "skeletal_mesh",
+            "binding_path": "/Game/Characters/Hero",
+            "generation": "1"
+          },
+          {
+            "object_id": "character",
+            "kind": "binding_actor",
+            "binding_path": "/Game/Props/Sword",
+            "generation": "2"
+          }
+        ],
+        "source_instance_id": "source-instance"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "duplicate"
+        ]
+      }
+    },
+    {
+      "id": "hello-ack-object-id-unknown",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [
+          {
+            "object_id": "character",
+            "kind": "skeletal_mesh",
+            "binding_path": "/Game/Characters/Hero",
+            "generation": "1"
+          },
+          {
+            "object_id": "unknown",
+            "kind": "binding_actor",
+            "binding_path": "/Game/Props/Sword",
+            "generation": "2"
+          }
+        ],
+        "source_instance_id": "source-instance"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-valid",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": 7,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_request-future-field",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": 7,
+        "reason": "input_changed",
+        "future": {
+          "ignored": true
+        }
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_request-missing-session_id",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "source_revision": 7,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-wrong-type-session_id",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": false,
+        "source_revision": 7,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-missing-source_revision",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-wrong-type-source_revision",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": false,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-missing-reason",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": 7
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "reason"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-wrong-type-reason",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": 7,
+        "reason": 42
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "reason"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-session_id-zero",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 0,
+        "source_revision": 7,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-session_id-negative",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": -1,
+        "source_revision": 7,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-session_id-fractional",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 1.5,
+        "source_revision": 7,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-session_id-overflow",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 2147483648,
+        "source_revision": 7,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-source_revision-zero",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": 0,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-source_revision-negative",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": -1,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-source_revision-fractional",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": 1.5,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-source_revision-overflow",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": 2147483648,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-valid",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41,
+        "source_revision": 8
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_prepared-future-field",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41,
+        "source_revision": 8,
+        "future": {
+          "ignored": true
+        }
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_prepared-missing-session_id",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "source_revision": 8
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-wrong-type-session_id",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": false,
+        "source_revision": 8
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-missing-source_revision",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-wrong-type-source_revision",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41,
+        "source_revision": false
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-session_id-zero",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 0,
+        "source_revision": 8
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-session_id-negative",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": -1,
+        "source_revision": 8
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-session_id-fractional",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 1.5,
+        "source_revision": 8
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-session_id-overflow",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 2147483648,
+        "source_revision": 8
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-source_revision-zero",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41,
+        "source_revision": 0
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-source_revision-negative",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41,
+        "source_revision": -1
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-source_revision-fractional",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41,
+        "source_revision": 1.5
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_prepared-source_revision-overflow",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41,
+        "source_revision": 2147483648
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "source_revision"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-valid",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 41,
+        "code": "RESTART_CANCELLED",
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_cancel-future-field",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 41,
+        "code": "RESTART_CANCELLED",
+        "detail": "User disconnected.",
+        "future": {
+          "ignored": true
+        }
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_cancel-missing-session_id",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "code": "RESTART_CANCELLED",
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-wrong-type-session_id",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": false,
+        "code": "RESTART_CANCELLED",
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-missing-code",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 41,
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-wrong-type-code",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 41,
+        "code": 42,
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-missing-detail",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 41,
+        "code": "RESTART_CANCELLED"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "detail"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-wrong-type-detail",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 41,
+        "code": "RESTART_CANCELLED",
+        "detail": 42
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "detail"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-session_id-zero",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 0,
+        "code": "RESTART_CANCELLED",
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-session_id-negative",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": -1,
+        "code": "RESTART_CANCELLED",
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-session_id-fractional",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 1.5,
+        "code": "RESTART_CANCELLED",
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_cancel-session_id-overflow",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 2147483648,
+        "code": "RESTART_CANCELLED",
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-valid",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_state-future-field",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed.",
+        "future": {
+          "ignored": true
+        }
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_state-missing-session_id",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-wrong-type-session_id",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": false,
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-missing-state",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "state"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-wrong-type-state",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": 42,
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "state"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-missing-code",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ending",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-wrong-type-code",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ending",
+        "code": 42,
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-missing-detail",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ending",
+        "code": ""
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "detail"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-wrong-type-detail",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ending",
+        "code": "",
+        "detail": 42
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "detail"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-session_id-zero",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 0,
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-session_id-negative",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": -1,
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-session_id-fractional",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 1.5,
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart_state-session_id-overflow",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 2147483648,
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-permitted-token",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "permitted",
+        "code": "",
+        "detail": "Inputs changed.",
+        "restart_token": "one-use-permit"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart-state-stopped-subject_changed",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "stopped",
+        "code": "SUBJECT_CHANGED",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart-state-stopped-restart_timeout",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "stopped",
+        "code": "RESTART_TIMEOUT",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart-state-stopped-recovery_refused",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "stopped",
+        "code": "RECOVERY_REFUSED",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart-state-unknown-state",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ready",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "state"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-unknown-stop-code",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "stopped",
+        "code": "FUTURE_CODE",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-nonempty-ending-code",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ending",
+        "code": "RESTART_TIMEOUT",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-forbidden-ending-token",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "ending",
+        "code": "",
+        "detail": "Inputs changed.",
+        "restart_token": "permit"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "restart_token"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-missing-permitted-token",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "permitted",
+        "code": "",
+        "detail": "Inputs changed."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "restart_token"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-empty-permitted-token",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "permitted",
+        "code": "",
+        "detail": "Inputs changed.",
+        "restart_token": ""
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "restart_token"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-wrong-permitted-token",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "permitted",
+        "code": "",
+        "detail": "Inputs changed.",
+        "restart_token": 4
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "restart_token"
+        ]
+      }
+    },
+    {
+      "id": "restart-request-subject-change-is-not-input",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41,
+        "source_revision": 7,
+        "reason": "subject_changed"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "reason"
+        ]
+      }
+    },
+    {
+      "id": "restart-cancel-empty-code",
+      "operation": "restart_cancel",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_cancel",
+        "session_id": 41,
+        "code": "",
+        "detail": "User disconnected."
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "restart_request-integral-number",
+      "operation": "restart_request",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_request",
+        "session_id": 41.0,
+        "source_revision": 7.0,
+        "reason": "input_changed"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart_prepared-integral-number",
+      "operation": "restart_prepared",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_prepared",
+        "session_id": 41.0,
+        "source_revision": 7.0
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "restart-state-nonempty-permitted-code",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "permitted",
+        "code": "RESTART_TIMEOUT",
+        "detail": "Inputs changed.",
+        "restart_token": "token"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "code"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-forbidden-stopped-token",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "stopped",
+        "code": "SUBJECT_CHANGED",
+        "detail": "Inputs changed.",
+        "restart_token": "token"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "restart_token"
+        ]
+      }
+    },
+    {
+      "id": "ready-set-complete",
+      "operation": "ready_set",
+      "applies_to": [
+        "maya"
+      ],
+      "payloads": [
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-A",
+          "object_id": "character"
+        },
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-B",
+          "object_id": "secondary"
+        }
+      ],
+      "negotiated_set": [
+        "character",
+        "secondary"
+      ],
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "ready-set-missing",
+      "operation": "ready_set",
+      "applies_to": [
+        "maya"
+      ],
+      "payloads": [
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-A",
+          "object_id": "character"
+        }
+      ],
+      "negotiated_set": [
+        "character",
+        "secondary"
+      ],
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "complete"
+        ]
+      }
+    },
+    {
+      "id": "ready-set-duplicate-object",
+      "operation": "ready_set",
+      "applies_to": [
+        "maya"
+      ],
+      "payloads": [
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-A",
+          "object_id": "character"
+        },
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-A",
+          "object_id": "character"
+        }
+      ],
+      "negotiated_set": [
+        "character",
+        "secondary"
+      ],
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "duplicate"
+        ]
+      }
+    },
+    {
+      "id": "ready-set-duplicate-target",
+      "operation": "ready_set",
+      "applies_to": [
+        "maya"
+      ],
+      "payloads": [
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-A",
+          "object_id": "character"
+        },
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-A",
+          "object_id": "secondary"
+        }
+      ],
+      "negotiated_set": [
+        "character",
+        "secondary"
+      ],
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "duplicate"
+        ]
+      }
+    },
+    {
+      "id": "ready-set-unknown-object",
+      "operation": "ready_set",
+      "applies_to": [
+        "maya"
+      ],
+      "payloads": [
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-A",
+          "object_id": "character"
+        },
+        {
+          "type": "ready",
+          "revision": 7,
+          "missing_in_unreal": [
+            "Blink_R"
+          ],
+          "missing_in_maya": [
+            "Corrective"
+          ],
+          "bone_name_remaps": [
+            "hair/tip -> tip1"
+          ],
+          "workflow": "animation",
+          "target_morph_count": 5,
+          "accepted_morph_count": 3,
+          "target_instance_id": "target-B",
+          "object_id": "unknown"
+        }
+      ],
+      "negotiated_set": [
+        "character",
+        "secondary"
+      ],
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "unknown"
+        ]
+      }
+    },
+    {
+      "id": "restart-state-invalid-binding",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "stopped",
+        "code": "INVALID_BINDING",
+        "detail": "Additional Part 'Sleeves': is enabled but has no Skeletal Mesh."
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
       }
     }
   ],

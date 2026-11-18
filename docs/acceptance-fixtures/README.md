@@ -8,6 +8,7 @@ Placeholder templates of the fixtures in `<fixtures>`
 | Template | Test | Placeholders |
 | --- | --- | --- |
 | [production-sequence.json](production-sequence.json) | `MtoUOptIn.Editor.Linkage.ProductionSequence`, one object | `<Level>`, `<MainSequence>`, `<ShotSequence>` (the same asset when the sequence binds its characters itself), `<OtherSequenceOfTheSameAct>` (for `switch_sequence`), `<MtoUBindingAsset>`, `<SequenceCharacterBinding>` (the character binding the Binding Actor replaces), `<MayaScene.ma>`, `<CharacterRootJoint>`, `<SkinnedJoint>` (skin-cluster influences that move between the oracle frames) and `<CharacterNamespace>` |
+| [workflow-reconnect.json](workflow-reconnect.json) | `MtoUOptIn.Editor.Workflow.GuiRegression` and `tools/verify_editor_restart.py` | Real Maya outfit, visibility and keyed Morph inputs, compatible and incompatible Unreal displays, moving oracle joints and dedicated evidence paths |
 | [background-updates.json](background-updates.json) | Ordinary Editor background-update cadence and session exits | `<PrimarySkeletalMesh>`, `<MayaScene.ma>`, `<CharacterRootJoint>`, checkout and host paths, moving oracle bones and explicit measurement limits with their rationale |
 
 The values that are not placeholders are the ones the last acceptance used.

@@ -1,0 +1,135 @@
+{
+  "evidence": "<scratch>/workflow-reconnect",
+  "binding": "<MtoUBindingAsset>",
+  "primary_mesh": "<PrimarySkeletalMesh>",
+  "preview_mesh": "<PreviewStaticMesh>",
+  "driver_garment_slots": [
+    "<ImportedGarmentSlot>"
+  ],
+  "parts": [
+    {
+      "name": "Head",
+      "mesh": "<HeadSkeletalMesh>"
+    },
+    {
+      "name": "Hair",
+      "mesh": "<CompatibleHairSkeletalMesh>"
+    }
+  ],
+  "realtime_frames": [
+    300,
+    900
+  ],
+  "cache_range": [
+    100,
+    160
+  ],
+  "cache_seek": 130,
+  "model_frame": 450,
+  "world_tolerance_cm": 0.1,
+  "morph_tolerance": 0.01,
+  "maya": {
+    "exe": "<Maya2024>/bin/maya.exe",
+    "driver": "<repo>/maya/MtoULiveLink/tests/maya_gui_linkage_driver.py",
+    "scripts": "<repo>/maya/MtoULiveLink/scripts",
+    "app_dir_template": "<fixtures>/maya-prefs-minimal",
+    "scene": "<MayaScene.ma>",
+    "root": "<CharacterRootJoint>",
+    "legacy_display": "<LegacyDisplayNode>",
+    "legacy_enum": "<LegacyClothingAttribute>",
+    "secondary_root": "new_joint",
+    "oracle_joints": [
+      "<MovingJoint1>",
+      "<MovingJoint2>",
+      "<MovingJoint3>"
+    ],
+    "keyed_joints": [
+      "<MovingJoint1>"
+    ],
+    "keyed_morphs": [
+      "<HeadMorphAlias>"
+    ],
+    "key_range": [
+      0,
+      1200
+    ],
+    "key_step": 42,
+    "key_degrees": 25,
+    "start_frame": 1,
+    "initial_edits": [
+      {
+        "plug": "<SkinnedHead>.overrideEnabled",
+        "value": true
+      },
+      {
+        "plug": "<SkinnedHead>.overrideDisplayType",
+        "value": 1
+      }
+    ]
+  },
+  "reconnect": {
+    "oracle_frames": [
+      300,
+      336
+    ],
+    "legacy_outfit": "<LegacyOutfitLabel>",
+    "part_name": "Hair",
+    "incompatible_mesh": "<DifferentSkeletonSkeletalMesh>",
+    "failure_code": "SKELETON_MISMATCH",
+    "visibility_cases": [
+      {
+        "name": "reference",
+        "edits": [
+          {
+            "plug": "<SkinnedHead>.overrideDisplayType",
+            "value": 2
+          }
+        ],
+        "restarts": false,
+        "present": "<SkinnedHead>",
+        "absent": "<InitiallyHiddenGarment>"
+      },
+      {
+        "name": "hide-garment",
+        "edits": [
+          {
+            "plug": "<VisibleGarment>.overrideEnabled",
+            "value": true
+          },
+          {
+            "plug": "<VisibleGarment>.overrideVisibility",
+            "value": false
+          }
+        ],
+        "restarts": true,
+        "present": "<SkinnedHead>",
+        "absent": "<VisibleGarment>"
+      },
+      {
+        "name": "show-garment",
+        "edits": [
+          {
+            "plug": "<VisibleGarment>.overrideVisibility",
+            "value": true
+          }
+        ],
+        "restarts": true,
+        "present": "<VisibleGarment>",
+        "absent": "<InitiallyHiddenGarment>"
+      }
+    ],
+    "outfit_cases": [
+      {
+        "name": "outfit",
+        "edits": [
+          {
+            "plug": "<RenamedLegacyDisplay>.<LegacyClothingAttribute>",
+            "value": 4
+          }
+        ],
+        "present": "<InitiallyHiddenGarment>",
+        "absent": "<VisibleGarment>"
+      }
+    ]
+  }
+}

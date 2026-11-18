@@ -6,14 +6,19 @@
 #include "MtoULiveLinkActor.h"
 #include "MtoULiveLinkBinding.h"
 #include "MtoULiveLinkPreview.h"
+#include "MtoULinkage.h"
 
 #include "Components/SkeletalMeshComponent.h"
 #include "Editor.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
+#include "Features/IModularFeatures.h"
+#include "ILiveLinkClient.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
+#include "ScopedTransaction.h"
+#include "UObject/UnrealType.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
 
@@ -61,7 +66,10 @@ public:
 
     ~FGuiWorkflowCommand() override
     {
-        Driver.Terminate();
+        if (!bKeepMaya)
+        {
+            Driver.Terminate();
+        }
     }
 
     bool Update() override
@@ -81,6 +89,7 @@ public:
             StepStarted = Now;
         }
         MayaResult = Driver.Poll();
+        ObserveUnreal();
         if (MayaResult.IsValid())
         {
             const TArray<TSharedPtr<FJsonValue>>* Errors = nullptr;
@@ -101,6 +110,14 @@ public:
                 *CacheStateName(Cache.State), Cache.FrameCount, Cache.CurrentSourceFrame, *MayaPanel());
             Test->AddError(Message);
             Log(TEXT("TIMEOUT ") + Message);
+            if (!LastUnrealState.IsEmpty())
+            {
+                Log(TEXT("Last Unreal observation: ") + LastUnrealState);
+            }
+            if (!LastPoseObservation.IsEmpty())
+            {
+                Log(TEXT("Last oracle observation: ") + LastPoseObservation);
+            }
             Finish();
             return true;
         }
@@ -116,6 +133,7 @@ public:
             StepStarted = 0.0;
             Pending = -1;
             SettleUntil = 0.0;
+            LastPoseObservation.Reset();
         }
         return false;
     }
@@ -213,14 +231,56 @@ private:
         EvidenceDir = Fixture->GetStringField(TEXT("evidence"));
         IFileManager::Get().MakeDirectory(*EvidenceDir, true);
         Fixture->TryGetArrayField(TEXT("details_widths"), DetailsWidths);
+        const TSharedPtr<FJsonObject>* ReconnectObject = nullptr;
+        if (Fixture->TryGetObjectField(TEXT("reconnect"), ReconnectObject))
+        {
+            Reconnect = *ReconnectObject;
+            if (!ValidateReconnectFixture())
+            {
+                return false;
+            }
+        }
+
+        const bool bEditorExit = FParse::Param(FCommandLine::Get(), TEXT("MtoUGuiReconnectEditorExit"));
+        const bool bEditorProbe = FParse::Param(FCommandLine::Get(), TEXT("MtoUGuiReconnectEditorProbe"));
+        if ((bEditorExit && bEditorProbe) || ((bEditorExit || bEditorProbe) && !Reconnect))
+        {
+            Test->AddError(TEXT("The external editor exit and probe modes are exclusive and require a reconnect fixture"));
+            return false;
+        }
 
         Add(TEXT("create the unsaved world and the Binding Actor"), 120.0, [this]() { return BuildScene(); });
+        if (bEditorProbe)
+        {
+            Add(TEXT("announce the replacement Editor's target"), 30.0, [this]()
+            {
+                return WriteEditorMarker(TEXT("editor-probe-ready.json"));
+            });
+            Add(TEXT("external launcher proves Maya did not reconnect"), 90.0, [this]()
+            {
+                return IFileManager::Get().FileExists(*FPaths::Combine(EvidenceDir, TEXT("editor-probe-done.json")));
+            });
+            return true;
+        }
         Add(TEXT("start Maya through the public entry"), 30.0, [this]()
         {
             return Driver.Start(*Test, Fixture->GetObjectField(TEXT("maya")), EvidenceDir)
                 || Abort(TEXT("Maya did not start"));
         });
         Add(TEXT("Maya connects in Animation real time"), 600.0, [this]() { return Connected(); });
+        if (bEditorExit)
+        {
+            Add(TEXT("hand the running Maya to the external launcher before Editor exit"), 30.0, [this]()
+            {
+                if (MayaSessionId() == 0 || AttemptCount() != 1)
+                {
+                    return false;
+                }
+                bKeepMaya = WriteEditorMarker(TEXT("editor-exit-ready.json"));
+                return bKeepMaya;
+            });
+            return true;
+        }
 
         // ---- real-time preview ------------------------------------------
         int32 Index = 0;
@@ -229,6 +289,10 @@ private:
             AddPoseCheck(FString::Printf(TEXT("real time %d"), Index++), Frame->AsNumber());
         }
         AddShots(TEXT("realtime"));
+        if (Reconnect)
+        {
+            AddVisibilityCases();
+        }
 
         // ---- cached playback ----------------------------------------------
         const TArray<TSharedPtr<FJsonValue>>& Range = Fixture->GetArrayField(TEXT("cache_range"));
@@ -361,16 +425,43 @@ private:
         });
 
         // ---- Animation again ------------------------------------------------
-        AddStage(TEXT("animation-again"));
-        Add(TEXT("Maya disconnects"), 60.0, [this]() { return SendOnce(TEXT("disconnect")) && !MayaConnected(); });
-        Add(TEXT("Maya selects 动画"), 30.0, [this]()
+        if (Reconnect)
         {
-            return SendOnce(TEXT("workflow"), Field(TEXT("target"), MakeShared<FJsonValueString>(TEXT("animation"))))
-                && PanelField(TEXT("workflow")) == TEXT("animation");
-        });
-        Add(TEXT("Maya connects in Animation again"), 300.0, [this]() { return SendOnce(TEXT("connect")) && Connected(); });
+            AddMayaRestart(TEXT("bs-off"), TEXT("blendshapes"),
+                Field(TEXT("enabled"), MakeShared<FJsonValueBoolean>(false)), false);
+            AddMayaRestart(TEXT("bs-on"), TEXT("blendshapes"),
+                Field(TEXT("enabled"), MakeShared<FJsonValueBoolean>(true)));
+            AddMayaRestart(TEXT("animation-again"), TEXT("workflow"),
+                Field(TEXT("target"), MakeShared<FJsonValueString>(TEXT("animation"))));
+            Add(TEXT("Maya shows Animation after automatic negotiation"), 30.0, [this]()
+            {
+                Test->TestEqual(TEXT("the panel is in Animation"), PanelField(TEXT("workflow")),
+                    FString(TEXT("animation")));
+                return true;
+            });
+            AddPartCases();
+            AddSubjectCases();
+        }
+        else
+        {
+            AddStage(TEXT("animation-again"));
+            Add(TEXT("Maya disconnects"), 60.0, [this]() { return SendOnce(TEXT("disconnect")) && !MayaConnected(); });
+            Add(TEXT("Maya selects Animation"), 30.0, [this]()
+            {
+                return SendOnce(TEXT("workflow"), Field(TEXT("target"), MakeShared<FJsonValueString>(TEXT("animation"))))
+                    && PanelField(TEXT("workflow")) == TEXT("animation");
+            });
+            Add(TEXT("Maya connects in Animation again"), 300.0, [this]()
+            {
+                return SendOnce(TEXT("connect")) && Connected();
+            });
+        }
         AddPoseCheck(TEXT("animation after Model"), Fixture->GetArrayField(TEXT("realtime_frames"))[0]->AsNumber());
         AddShots(TEXT("animation-again"));
+        if (Reconnect)
+        {
+            AddMayaSceneExit();
+        }
         Add(TEXT("quit Maya"), 120.0, [this]()
         {
             if (Pending < 0)
@@ -380,6 +471,508 @@ private:
             return !Driver.IsRunning();
         });
         return true;
+    }
+
+    bool WriteEditorMarker(const TCHAR* Filename) const
+    {
+        TSharedRef<FJsonObject> Marker = MakeShared<FJsonObject>();
+        Marker->SetNumberField(TEXT("editor_pid"), FPlatformProcess::GetCurrentProcessId());
+        Marker->SetNumberField(TEXT("attempts"), AttemptCount());
+        Marker->SetNumberField(TEXT("session_id"), MayaSessionId());
+        const FString Path = FPaths::Combine(EvidenceDir, Filename);
+        WriteJsonFile(Path, Marker);
+        return IFileManager::Get().FileExists(*Path);
+    }
+
+    bool ValidateReconnectFixture()
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Frames = nullptr;
+        const TArray<TSharedPtr<FJsonValue>>* Outfits = nullptr;
+        const TArray<TSharedPtr<FJsonValue>>* Visibility = nullptr;
+        const TSharedPtr<FJsonObject>& Maya = Fixture->GetObjectField(TEXT("maya"));
+        const TArray<TSharedPtr<FJsonValue>>* Morphs = nullptr;
+        if (!Reconnect->TryGetArrayField(TEXT("oracle_frames"), Frames) || Frames->Num() != 2
+            || (*Frames)[0]->AsNumber() == (*Frames)[1]->AsNumber()
+            || !Reconnect->TryGetArrayField(TEXT("visibility_cases"), Visibility) || Visibility->Num() < 2
+            || !Reconnect->TryGetArrayField(TEXT("outfit_cases"), Outfits) || Outfits->IsEmpty()
+            || !Maya->TryGetArrayField(TEXT("keyed_morphs"), Morphs) || Morphs->IsEmpty()
+            || !Maya->HasTypedField<EJson::String>(TEXT("app_dir_template"))
+            || !Maya->HasTypedField<EJson::String>(TEXT("legacy_display"))
+            || !Maya->HasTypedField<EJson::String>(TEXT("legacy_enum"))
+            || !Maya->HasTypedField<EJson::String>(TEXT("secondary_root"))
+            || !Reconnect->HasTypedField<EJson::String>(TEXT("legacy_outfit"))
+            || !Reconnect->HasTypedField<EJson::String>(TEXT("part_name"))
+            || !Reconnect->HasTypedField<EJson::String>(TEXT("incompatible_mesh"))
+            || !Reconnect->HasTypedField<EJson::String>(TEXT("failure_code")))
+        {
+            Test->AddError(TEXT("Reconnect fixture requires two distinct oracle_frames, visibility_cases, outfit_cases, "
+                "legacy_outfit, part_name, incompatible_mesh, failure_code and Maya app_dir_template, keyed_morphs, "
+                "legacy_display, legacy_enum and secondary_root."));
+            return false;
+        }
+        return true;
+    }
+
+    TSharedPtr<FJsonObject> LatestMayaConnection() const
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Connections = nullptr;
+        return MayaResult && MayaResult->TryGetArrayField(TEXT("connections"), Connections) && !Connections->IsEmpty()
+            ? Connections->Last()->AsObject() : nullptr;
+    }
+
+    int32 AttemptCount() const
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Attempts = nullptr;
+        return MayaResult && MayaResult->TryGetArrayField(TEXT("connection_attempts"), Attempts) ? Attempts->Num() : 0;
+    }
+
+    int32 MayaSessionId() const
+    {
+        const TSharedPtr<FJsonObject> Connection = LatestMayaConnection();
+        int32 Id = 0;
+        if (Connection)
+        {
+            Connection->TryGetNumberField(TEXT("session_id"), Id);
+        }
+        return Id;
+    }
+
+    FString SourceStatus() const
+    {
+        IModularFeatures& Features = IModularFeatures::Get();
+        if (Features.IsModularFeatureAvailable(ILiveLinkClient::ModularFeatureName))
+        {
+            const ILiveLinkClient& Client = Features.GetModularFeature<ILiveLinkClient>(ILiveLinkClient::ModularFeatureName);
+            for (const FGuid& Source : Client.GetSources())
+            {
+                if (Client.GetSourceType(Source).ToString() == TEXT("MtoU_LiveLink"))
+                {
+                    return Client.GetSourceStatus(Source).ToString();
+                }
+            }
+        }
+        return {};
+    }
+
+    void ObserveUnreal()
+    {
+        if (MonitoredStage.IsEmpty())
+        {
+            return;
+        }
+        const FMtoULinkageView Linkage = MtoUGetLinkageView();
+        const FString State = Actor.IsValid() ? UEnum::GetValueAsString(Actor->GetConnectionState()) : TEXT("no actor");
+        const FString Detail = Actor.IsValid() ? Actor->GetConnectionDetail() : FString();
+        const bool bReconnecting = Actor.IsValid()
+            && Actor->GetConnectionState() == EMtoUConnectionState::Reconnecting;
+        bUnrealReconnecting |= bReconnecting;
+        const FString Source = SourceStatus();
+        const FString Observation = FString::Printf(TEXT("%s | %d | %s | %s | %s"), *State,
+            Linkage.Identity.SessionId, *Detail, *Linkage.ErrorCode, *Source);
+        if (Observation == LastUnrealState)
+        {
+            return;
+        }
+        LastUnrealState = Observation;
+        TSharedRef<FJsonObject> Row = MakeShared<FJsonObject>();
+        Row->SetStringField(TEXT("stage"), MonitoredStage);
+        Row->SetNumberField(TEXT("seconds"), FPlatformTime::Seconds());
+        Row->SetNumberField(TEXT("session_id"), Linkage.Identity.SessionId);
+        Row->SetStringField(TEXT("state"), State);
+        Row->SetStringField(TEXT("source_status"), Source);
+        Row->SetStringField(TEXT("detail"), Detail);
+        Row->SetStringField(TEXT("linkage_code"), Linkage.ErrorCode);
+        UnrealHistory.Add(MakeShared<FJsonValueObject>(Row));
+    }
+
+    void BeginProbe(const FString& Stage)
+    {
+        AddStage(Stage);
+        Add(Stage + TEXT(": record both connected hosts"), 30.0, [this, Stage]()
+        {
+            OldSession = MayaSessionId();
+            if (!Connected() || OldSession == 0 || MtoUGetLinkageView().Identity.SessionId != OldSession)
+            {
+                return false;
+            }
+            OldAttempts = AttemptCount();
+            const TSharedPtr<FJsonObject>* Capture = nullptr;
+            OldCapturePaths.Reset();
+            if (MayaResult->TryGetObjectField(TEXT("capture"), Capture) && *Capture)
+            {
+                OldCapturePaths = CapturePaths(*Capture);
+            }
+            MonitoredStage = Stage;
+            LastUnrealState.Reset();
+            bUnrealReconnecting = false;
+            ObserveUnreal();
+            return true;
+        });
+    }
+
+    bool MayaSawReconnecting(const FString& Stage) const
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Connections = nullptr;
+        if (!MayaResult->TryGetArrayField(TEXT("connections"), Connections))
+        {
+            return false;
+        }
+        return Connections->ContainsByPredicate([&Stage](const TSharedPtr<FJsonValue>& Value)
+        {
+            const TSharedPtr<FJsonObject> Event = Value->AsObject();
+            FString Status;
+            return Event->GetStringField(TEXT("stage")) == Stage
+                && Event->GetBoolField(TEXT("reconnecting"))
+                && Event->TryGetStringField(TEXT("status"), Status)
+                && Status.Contains(TEXT("正在重新连接"));
+        });
+    }
+
+    void AddRestartCheck(const FString& Stage, bool bMorphs = true)
+    {
+        Add(Stage + TEXT(": both hosts negotiate a new session"), 40.0, [this, Stage]()
+        {
+            const int32 NewSession = MayaSessionId();
+            if (!Connected() || NewSession == 0 || NewSession == OldSession
+                || MtoUGetLinkageView().Identity.SessionId != NewSession)
+            {
+                return false;
+            }
+            Test->TestEqual(*(Stage + TEXT(": exactly one new Maya connection attempt")), AttemptCount(), OldAttempts + 1);
+            Test->TestTrue(*(Stage + TEXT(": Maya shows reconnecting")), MayaSawReconnecting(Stage));
+            Test->TestTrue(*(Stage + TEXT(": Unreal shows reconnecting")), bUnrealReconnecting);
+            Test->TestEqual(*(Stage + TEXT(": Maya returns to realtime")), PanelField(TEXT("mode")),
+                FString(TEXT("realtime")));
+            Log(FString::Printf(TEXT("%s: session %d -> %d, attempts %d -> %d"),
+                *Stage, OldSession, NewSession, OldAttempts, AttemptCount()));
+            return true;
+        });
+        AddDistinctOracle(Stage, bMorphs);
+    }
+
+    void AddMayaRestart(const FString& Stage, const FString& Action,
+        const TSharedPtr<FJsonObject>& Fields = nullptr, bool bMorphs = true)
+    {
+        BeginProbe(Stage);
+        Add(Stage + TEXT(": Maya applies the input change"), 30.0,
+            [this, Action, Fields]() { return SendOnce(Action, Fields); });
+        AddRestartCheck(Stage, bMorphs);
+    }
+
+    TArray<FString> CapturePaths(const TSharedPtr<FJsonObject>& Capture) const
+    {
+        TArray<FString> Paths;
+        if (Capture)
+        {
+            for (const TSharedPtr<FJsonValue>& Path : Capture->GetArrayField(TEXT("mesh_paths")))
+            {
+                Paths.Add(Path->AsString());
+            }
+        }
+        Paths.Sort();
+        return Paths;
+    }
+
+    void AddCaptureCheck(const FString& Stage, const FString& Present, const FString& Absent, bool bChanges = true)
+    {
+        Add(Stage + TEXT(": verify captured mesh paths"), 20.0, [this, Stage, Present, Absent, bChanges]()
+        {
+            const TArray<FString> Paths = CapturePaths(MayaResult->GetObjectField(TEXT("capture")));
+            Test->TestEqual(*(Stage + TEXT(": mesh membership changes only when expected")), Paths != OldCapturePaths, bChanges);
+            Test->TestTrue(*(Stage + TEXT(": expected visible skinned mesh is captured")), Paths.Contains(Present));
+            Test->TestFalse(*(Stage + TEXT(": expected hidden skinned mesh is omitted")), Paths.Contains(Absent));
+            Log(FString::Printf(TEXT("%s: %d captured meshes"), *Stage, Paths.Num()));
+            return true;
+        });
+    }
+
+    void AddVisibilityCases()
+    {
+        Add(TEXT("legacy label and root-only setup capture the same actual meshes"), 20.0, [this]()
+        {
+            const TSharedPtr<FJsonObject> Legacy = MayaResult->GetObjectField(TEXT("legacy_capture"));
+            const TSharedPtr<FJsonObject> RootOnly = MayaResult->GetObjectField(TEXT("capture"));
+            if (!Legacy || !RootOnly)
+            {
+                return Abort(TEXT("Maya did not report legacy and root-only captures"));
+            }
+            FString Display;
+            Test->TestTrue(TEXT("the old enum determines the legacy label"),
+                Legacy->GetStringField(TEXT("outfit")) == Reconnect->GetStringField(TEXT("legacy_outfit")));
+            Test->TestFalse(TEXT("the root-only capture resolved no Display"), RootOnly->TryGetStringField(TEXT("display"), Display));
+            Test->TestTrue(TEXT("legacy display label does not change mesh membership"),
+                !CapturePaths(RootOnly).IsEmpty() && CapturePaths(Legacy) == CapturePaths(RootOnly));
+            return true;
+        });
+        AddDistinctOracle(TEXT("root-only Template"));
+
+        for (const TSharedPtr<FJsonValue>& Value : Reconnect->GetArrayField(TEXT("visibility_cases")))
+        {
+            const TSharedPtr<FJsonObject> Case = Value->AsObject();
+            const FString Name = Case->GetStringField(TEXT("name"));
+            const auto Fields = Field(TEXT("edits"), MakeShared<FJsonValueArray>(Case->GetArrayField(TEXT("edits"))));
+            if (Case->GetBoolField(TEXT("restarts")))
+            {
+                AddMayaRestart(Name, TEXT("set_attrs"), Fields);
+            }
+            else
+            {
+                BeginProbe(Name);
+                Add(Name + TEXT(": Maya applies display type"), 30.0,
+                    [this, Fields]() { return SendOnce(TEXT("set_attrs"), Fields); });
+                AddDistinctOracle(Name);
+                Add(Name + TEXT(": the same session keeps streaming"), 20.0, [this, Name]()
+                {
+                    Test->TestTrue(*(Name + TEXT(": session and connection attempts unchanged")),
+                        Connected() && MayaSessionId() == OldSession && AttemptCount() == OldAttempts
+                        && !bUnrealReconnecting && !MayaSawReconnecting(Name));
+                    return true;
+                });
+            }
+            AddCaptureCheck(Name, Case->GetStringField(TEXT("present")), Case->GetStringField(TEXT("absent")),
+                Case->GetBoolField(TEXT("restarts")));
+        }
+
+        for (const TSharedPtr<FJsonValue>& Value : Reconnect->GetArrayField(TEXT("outfit_cases")))
+        {
+            const TSharedPtr<FJsonObject> Case = Value->AsObject();
+            const FString Name = Case->GetStringField(TEXT("name"));
+            const FString Shown = Case->GetStringField(TEXT("present"));
+            const FString Hidden = Case->GetStringField(TEXT("absent"));
+            AddMayaRestart(Name, TEXT("set_attrs"),
+                Field(TEXT("edits"), MakeShared<FJsonValueArray>(Case->GetArrayField(TEXT("edits")))));
+            AddCaptureCheck(Name, Shown, Hidden);
+            AddMayaRestart(Name + TEXT("-undo"), TEXT("undo"));
+            AddCaptureCheck(Name + TEXT("-undo"), Hidden, Shown);
+            AddMayaRestart(Name + TEXT("-redo"), TEXT("redo"));
+            AddCaptureCheck(Name + TEXT("-redo"), Shown, Hidden);
+        }
+    }
+
+    bool EditPart(const FString& PartName, bool bEnable, TOptional<USkeletalMesh*> Replacement = {})
+    {
+        FMtoUCharacterPart* Part = Binding->AdditionalParts.FindByPredicate(
+            [&PartName](const FMtoUCharacterPart& Item) { return Item.PartName == PartName; });
+        if (!Part)
+        {
+            return Abort(TEXT("Missing fixture part ") + PartName);
+        }
+        const FScopedTransaction Transaction(NSLOCTEXT("MtoUGuiWorkflow", "EditPart", "Edit MtoU acceptance part"));
+        FProperty* Property = FindFProperty<FProperty>(UMtoULiveLinkBinding::StaticClass(),
+            GET_MEMBER_NAME_CHECKED(UMtoULiveLinkBinding, AdditionalParts));
+        Binding->Modify();
+        Binding->PreEditChange(Property);
+        Part->bEnabled = bEnable;
+        if (Replacement.IsSet())
+        {
+            Part->SkeletalMesh = Replacement.GetValue();
+        }
+        FPropertyChangedEvent Change(Property, EPropertyChangeType::ValueSet);
+        Binding->PostEditChangeProperty(Change);
+        return true;
+    }
+
+    void AddPartCase(const FString& Stage, TFunction<bool()> Apply, bool bShown)
+    {
+        BeginProbe(Stage);
+        Add(Stage + TEXT(": transact the part edit"), 30.0, MoveTemp(Apply));
+        AddRestartCheck(Stage);
+        Add(Stage + TEXT(": verify the actual part component"), 30.0, [this, Stage, bShown]()
+        {
+            const FString Name = Reconnect->GetStringField(TEXT("part_name"));
+            const FMtoUCharacterPart* Part = Binding->AdditionalParts.FindByPredicate(
+                [&Name](const FMtoUCharacterPart& Item) { return Item.PartName == Name; });
+            if (!Part)
+            {
+                return Abort(TEXT("Missing fixture part ") + Name);
+            }
+            const bool bDisplayed = Actor->GetCharacterPartComponents().ContainsByPredicate(
+                [Part](const UMtoUCharacterPartComponent* Component)
+                {
+                    return Component && Component->IsRegistered() && Component->IsVisible()
+                        && Component->GetSkeletalMeshAsset() == Part->SkeletalMesh;
+                });
+            Test->TestEqual(*(Stage + TEXT(": part presence matches the transaction")), bDisplayed, bShown);
+            return true;
+        });
+    }
+
+    void AddPartCases()
+    {
+        const FString Part = Reconnect->GetStringField(TEXT("part_name"));
+        AddPartCase(TEXT("part-off"), [this, Part]() { return EditPart(Part, false); }, false);
+        AddPartCase(TEXT("part-undo"), [this]()
+        {
+            return GEditor->UndoTransaction() || Abort(TEXT("Unreal could not undo the part transaction"));
+        }, true);
+        AddPartCase(TEXT("part-redo"), [this]()
+        {
+            return GEditor->RedoTransaction() || Abort(TEXT("Unreal could not redo the part transaction"));
+        }, false);
+
+        BeginProbe(TEXT("part-missing-mesh"));
+        Add(TEXT("enable a named part without a Skeletal Mesh"), 30.0, [this, Part]()
+        {
+            return EditPart(Part, true, static_cast<USkeletalMesh*>(nullptr));
+        });
+        AddStopped(TEXT("part-missing-mesh"), TEXT("INVALID_BINDING"), 1, true, true,
+            FString::Printf(TEXT("Additional Part '%s': is enabled but has no Skeletal Mesh."), *Part));
+        Add(TEXT("undo the missing Skeletal Mesh edit while stopped"), 30.0, [this]()
+        {
+            return GEditor->UndoTransaction() || Abort(TEXT("Unreal could not undo the missing mesh transaction"));
+        });
+        AddManualConnect(TEXT("missing Skeletal Mesh restored"), 1);
+
+        BeginProbe(TEXT("part-incompatible"));
+        Add(TEXT("enable a part from an incompatible Skeleton"), 30.0, [this, Part]()
+        {
+            USkeletalMesh* Mesh = LoadObject<USkeletalMesh>(nullptr, *Reconnect->GetStringField(TEXT("incompatible_mesh")));
+            if (!Mesh || Mesh->GetSkeleton() == Binding->SkeletalMesh->GetSkeleton())
+            {
+                return Abort(TEXT("Fixture requires a real part from an incompatible Skeleton"));
+            }
+            return EditPart(Part, true, Mesh);
+        });
+        AddStopped(TEXT("part-incompatible"), Reconnect->GetStringField(TEXT("failure_code")), 1, true, true);
+        Add(TEXT("undo the incompatible part edit while stopped"), 30.0, [this]()
+        {
+            return GEditor->UndoTransaction() || Abort(TEXT("Unreal could not undo the incompatible part transaction"));
+        });
+        AddManualConnect(TEXT("part repaired"), 1);
+    }
+
+    void AddStopped(const FString& Stage, const FString& Code, int32 NewAttempts,
+        bool bActorReason, bool bObserveFullWindow = false, const FString& ExpectedDetail = {})
+    {
+        Add(Stage + TEXT(": both hosts stop with their reason and no retries"), 65.0,
+            [this, Stage, Code, NewAttempts, bActorReason, bObserveFullWindow, ExpectedDetail]()
+        {
+            if (AttemptCount() > OldAttempts + NewAttempts)
+            {
+                return Abort(Stage + TEXT(": Maya attempted an unauthorized reconnect"));
+            }
+            const FMtoULinkageView View = MtoUGetLinkageView();
+            const TSharedPtr<FJsonObject> Connection = LatestMayaConnection();
+            const bool bMayaStopped = Connection && !Connection->GetBoolField(TEXT("open"))
+                && !Connection->GetBoolField(TEXT("reconnecting")) && !MayaConnected();
+            if (!bMayaStopped || View.Identity.SessionId != 0 || AttemptCount() != OldAttempts + NewAttempts
+                || (Actor.IsValid() && MtoUActorIsConnected(*Actor)))
+            {
+                return false;
+            }
+            FString MayaCode, MayaStatus;
+            Connection->TryGetStringField(TEXT("code"), MayaCode);
+            Connection->TryGetStringField(TEXT("status"), MayaStatus);
+            const FString ActorDetail = Actor.IsValid() ? Actor->GetConnectionDetail() : FString();
+            const bool bHasReason = MayaCode == Code && !MayaStatus.IsEmpty() && SourceStatus().Contains(Code)
+                && (!bActorReason || ActorDetail.Contains(Code));
+            if (ExpectedDetail.IsEmpty() && !bHasReason)
+            {
+                return false;
+            }
+            // For a rejected negotiation, observe the whole protocol restart window from stop.
+            if (bObserveFullWindow && !Settled(32.0))
+            {
+                return false;
+            }
+            if (!ExpectedDetail.IsEmpty())
+            {
+                if (!SendOnce(TEXT("panel_shot"), Field(TEXT("name"), MakeShared<FJsonValueString>(Stage))))
+                {
+                    return false;
+                }
+                FString MayaDiagnostic;
+                const TSharedPtr<FJsonObject>* Diagnostics = nullptr;
+                if (MayaResult->TryGetObjectField(TEXT("panel_diagnostics"), Diagnostics))
+                {
+                    (*Diagnostics)->TryGetStringField(Stage, MayaDiagnostic);
+                }
+                if (!bHasReason || !MayaDiagnostic.Contains(TEXT("Error code: ") + Code)
+                    || !MayaDiagnostic.Contains(ExpectedDetail) || !ActorDetail.Contains(ExpectedDetail)
+                    || !SourceStatus().Contains(ExpectedDetail))
+                {
+                    return Abort(FString::Printf(TEXT("%s: expected %s and '%s' on both hosts; Maya diagnostics:\n%s"),
+                        *Stage, *Code, *ExpectedDetail, *MayaDiagnostic));
+                }
+            }
+            Log(FString::Printf(TEXT("%s: Maya %s (%s), Source '%s', Actor '%s', attempts %d -> %d"),
+                *Stage, *MayaCode, *MayaStatus, *SourceStatus(), *ActorDetail, OldAttempts, AttemptCount()));
+            return true;
+        });
+    }
+
+    void AddManualConnect(const FString& Reason, int32 PriorAttempts = 0)
+    {
+        AddStage(TEXT("manual-connect"));
+        Add(Reason + TEXT(": explicit Connect starts one attempt"), 90.0, [this, Reason, PriorAttempts]()
+        {
+            if (Pending < 0 && AttemptCount() != OldAttempts + PriorAttempts)
+            {
+                return Abort(Reason + TEXT(": another automatic attempt occurred before explicit Connect"));
+            }
+            if (!SendOnce(TEXT("connect")) || !Connected() || MayaSessionId() == OldSession)
+            {
+                return false;
+            }
+            Test->TestEqual(*(Reason + TEXT(": one manual connection attempt")), AttemptCount(),
+                OldAttempts + PriorAttempts + 1);
+            return true;
+        });
+    }
+
+    void AddSubjectCases()
+    {
+        const FString Changed(TEXT("SUBJECT_CHANGED"));
+        BeginProbe(TEXT("binding-replaced"));
+        Add(TEXT("replace the Binding with another instance"), 30.0, [this]()
+        {
+            const FName Name = MakeUniqueObjectName(GetTransientPackage(), UMtoULiveLinkBinding::StaticClass());
+            Binding.Reset(DuplicateObject<UMtoULiveLinkBinding>(Binding.Get(), GetTransientPackage(), Name));
+            Actor->SetBinding(Binding.Get());
+            return true;
+        });
+        AddStopped(TEXT("binding-replaced"), Changed, 0, true);
+        AddManualConnect(TEXT("new Binding"));
+
+        BeginProbe(TEXT("actor-replaced"));
+        Add(TEXT("destroy the live Actor and place a new Actor"), 30.0, [this]()
+        {
+            UWorld* World = Actor->GetWorld();
+            if (!World->DestroyActor(Actor.Get()))
+            {
+                return Abort(TEXT("Could not destroy the fixture Actor"));
+            }
+            return SpawnTarget(World);
+        });
+        AddStopped(TEXT("actor-replaced"), Changed, 0, false);
+        AddManualConnect(TEXT("new Actor"));
+
+        BeginProbe(TEXT("world-replaced"));
+        Add(TEXT("open an unsaved empty level and place its Actor"), 90.0, [this]()
+        {
+            return SpawnTarget(GEditor->NewMap());
+        });
+        AddStopped(TEXT("world-replaced"), Changed, 0, false);
+        AddManualConnect(TEXT("new level"));
+
+        BeginProbe(TEXT("maya-role-replaced"));
+        Add(TEXT("Maya sets the alternate skinned root"), 30.0, [this]()
+        {
+            return SendOnce(TEXT("set_role"), Field(TEXT("target"), MakeShared<FJsonValueString>(TEXT("alternate"))));
+        });
+        AddStopped(TEXT("maya-role-replaced"), Changed, 0, true);
+        Add(TEXT("Maya sets the original skinned root"), 30.0, [this]()
+        {
+            return SendOnce(TEXT("set_role"), Field(TEXT("target"), MakeShared<FJsonValueString>(TEXT("primary"))));
+        });
+        AddManualConnect(TEXT("original Maya role"));
+    }
+
+    void AddMayaSceneExit()
+    {
+        BeginProbe(TEXT("maya-scene-replaced"));
+        Add(TEXT("Maya opens a new unsaved scene"), 30.0, [this]() { return SendOnce(TEXT("new_scene")); });
+        AddStopped(TEXT("maya-scene-replaced"), TEXT("SUBJECT_CHANGED"), 0, true);
     }
 
     /** Names the stage Maya's dialogs are recorded under from here on. */
@@ -392,15 +985,17 @@ private:
     }
 
     /** Maya's dialogs each stage expects; any other dialog fails the test. */
-    static TArray<MtoUGuiAcceptance::FExpectedDialog> ExpectedDialogs()
+    TArray<MtoUGuiAcceptance::FExpectedDialog> ExpectedDialogs() const
     {
-        return {
+        TArray<MtoUGuiAcceptance::FExpectedDialog> Allowed = {
             // The fixture's Morph names differ between Maya and Unreal.
             {TEXT("startup"), TEXT("BLENDSHAPE_MISMATCH")},
             {TEXT("model"), TEXT("BLENDSHAPE_MISMATCH")},
-            {TEXT("animation-again"), TEXT("BLENDSHAPE_MISMATCH")},
             // Refresh Preview ends the session Maya was connected through.
             {TEXT("refresh"), TEXT("STREAM_INTERRUPTED")}};
+        Allowed.Add({Reconnect ? TEXT("manual-connect") : TEXT("animation-again"),
+            TEXT("BLENDSHAPE_MISMATCH")});
+        return Allowed;
     }
 
     /** Maya moves to one frame; Unreal shows Maya's world pose and Morph weights there. */
@@ -421,13 +1016,41 @@ private:
         });
     }
 
-    void ComparePose(const FString& Name)
+    void AddDistinctOracle(const FString& Stage, bool bMorphs = true)
+    {
+        int32 Index = 0;
+        for (const TSharedPtr<FJsonValue>& FrameValue : Reconnect->GetArrayField(TEXT("oracle_frames")))
+        {
+            const int32 Pose = Index++;
+            const FString Name = Stage + FString::Printf(TEXT(" oracle %d"), Pose + 1);
+            const double Frame = FrameValue->AsNumber();
+            Add(Name + TEXT(": Maya evaluates the frame"), 30.0, [this, Frame]()
+            {
+                const auto Fields = Field(TEXT("frame"), MakeShared<FJsonValueNumber>(Frame));
+                Fields->SetBoolField(TEXT("preserve_undo"), true);
+                return SendOnce(TEXT("time"), Fields);
+            });
+            Add(Name + TEXT(": Unreal displays the evaluated pose"), 30.0, [this, Name, Pose, bMorphs]()
+            {
+                return SendOnce(TEXT("snapshot")) && ComparePose(Name, Pose, bMorphs);
+            });
+        }
+    }
+
+    struct FOracleRotation
+    {
+        FQuat Maya;
+        FQuat Shown;
+    };
+
+    bool ComparePose(const FString& Name, int32 DistinctPose = INDEX_NONE, bool bMorphs = true)
     {
         const TSharedPtr<FJsonObject> Snapshot = MayaResult->GetObjectField(TEXT("snapshot"));
         USkeletalMeshComponent* Primary = Actor->GetSkeletalMeshComponent();
         const FTransform Placement = Actor->GetActorTransform();
         double MaxWorld = 0.0;
         int32 Bones = 0;
+        TMap<FName, FOracleRotation> DisplayedPose;
         for (const TPair<FString, TSharedPtr<FJsonValue>>& Joint : Snapshot->GetObjectField(TEXT("joints"))->Values)
         {
             const FName Bone(*Joint.Key);
@@ -439,7 +1062,16 @@ private:
             // Common space: Maya (x, y, z) is Unreal (x, z, y), placed by the actor.
             const FVector Expected = Placement.TransformPosition(
                 FVector(World[0]->AsNumber(), World[2]->AsNumber(), World[1]->AsNumber()));
-            MaxWorld = FMath::Max(MaxWorld, FVector::Distance(Expected, Primary->GetSocketLocation(Bone)));
+            const FVector Shown = Primary->GetSocketLocation(Bone);
+            MaxWorld = FMath::Max(MaxWorld, FVector::Distance(Expected, Shown));
+            if (DistinctPose != INDEX_NONE)
+            {
+                FQuat Rotation;
+                if (MtoUGuiAcceptance::MayaWorldRotation(Joint.Value->AsObject(), Placement.GetRotation(), Rotation))
+                {
+                    DisplayedPose.Add(Bone, {Rotation, Primary->GetSocketQuaternion(Bone)});
+                }
+            }
             ++Bones;
         }
         double MaxMorph = 0.0;
@@ -453,13 +1085,86 @@ private:
                 const TArray<double> Shown = MtoUGuiAcceptance::DisplayedMorphWeights(*Actor, FName(*Morph.Key));
                 for (const double Weight : Shown)
                 {
-                    MaxMorph = FMath::Max(MaxMorph, FMath::Abs(Weight - Morph.Value->AsNumber()));
+                    const double Expected = bMorphs ? Morph.Value->AsNumber() : 0.0;
+                    MaxMorph = FMath::Max(MaxMorph, FMath::Abs(Weight - Expected));
                 }
                 if (Shown.Num() > 0)
                 {
                     ++Morphs;
                     MaxExpected = FMath::Max(MaxExpected, FMath::Abs(Morph.Value->AsNumber()));
                 }
+            }
+        }
+        const double WorldTolerance = Fixture->GetNumberField(TEXT("world_tolerance_cm"));
+        const double MorphTolerance = Fixture->GetNumberField(TEXT("morph_tolerance"));
+        double ExpectedRotation = 0.0, DisplayedRotation = 0.0, RotationError = 0.0;
+        if (DistinctPose != INDEX_NONE)
+        {
+            constexpr double RotationTolerance = 0.5;
+            double CalibratedError = 0.0;
+            FName CalibratedBone;
+            for (const TPair<FName, FOracleRotation>& Pair : DisplayedPose)
+            {
+                if (const FQuat* Offset = OracleAxisOffsets.Find(Pair.Key))
+                {
+                    const FQuat Expected = Pair.Value.Maya * *Offset;
+                    const double Error = FMath::RadiansToDegrees(Expected.AngularDistance(Pair.Value.Shown));
+                    if (Error > CalibratedError)
+                    {
+                        CalibratedError = Error;
+                        CalibratedBone = Pair.Key;
+                    }
+                }
+            }
+            LastPoseObservation = FString::Printf(TEXT("%s: %d bones, %.4f cm; %d Morphs, %.5f weight error; %s %.4f deg axis error"),
+                *Name, DisplayedPose.Num(), MaxWorld, Morphs, MaxMorph, *CalibratedBone.ToString(), CalibratedError);
+            if (DisplayedPose.Num() < 3 || MaxWorld >= WorldTolerance || Morphs == 0
+                || MaxExpected <= 0.05 || MaxMorph >= MorphTolerance || CalibratedError >= RotationTolerance)
+            {
+                return false;
+            }
+            if (DistinctPose == 0)
+            {
+                FirstOraclePose = DisplayedPose;
+            }
+            else
+            {
+                for (const TPair<FName, FOracleRotation>& Pair : DisplayedPose)
+                {
+                    if (const FOracleRotation* First = FirstOraclePose.Find(Pair.Key))
+                    {
+                        const FQuat MayaChange = Pair.Value.Maya * First->Maya.Inverse();
+                        const FQuat ShownChange = Pair.Value.Shown * First->Shown.Inverse();
+                        ExpectedRotation = FMath::Max(ExpectedRotation,
+                            FMath::RadiansToDegrees(MayaChange.AngularDistance(FQuat::Identity)));
+                        DisplayedRotation = FMath::Max(DisplayedRotation,
+                            FMath::RadiansToDegrees(ShownChange.AngularDistance(FQuat::Identity)));
+                        RotationError = FMath::Max(RotationError,
+                            FMath::RadiansToDegrees(MayaChange.AngularDistance(ShownChange)));
+                    }
+                }
+                LastPoseObservation += FString::Printf(
+                    TEXT("; Maya %.4f deg, displayed %.4f deg, max rotation change error %.4f deg"),
+                    ExpectedRotation, DisplayedRotation, RotationError);
+                if (RotationError >= RotationTolerance)
+                {
+                    return false;
+                }
+                if (OracleAxisOffsets.IsEmpty())
+                {
+                    // The Primary Driver has the same imported local axes throughout
+                    // the run. The first two matching frames establish their offset.
+                    // Subsequent oracle frames wait until the actual rotation reaches
+                    // that frame, even if the position and Morph weights match early.
+                    for (const TPair<FName, FOracleRotation>& Pair : FirstOraclePose)
+                    {
+                        OracleAxisOffsets.Add(Pair.Key, Pair.Value.Maya.Inverse() * Pair.Value.Shown);
+                    }
+                }
+                Test->TestTrue(*(Name + TEXT(": the real display changes between oracle frames")),
+                    ExpectedRotation > RotationTolerance && DisplayedRotation > RotationTolerance);
+                Log(FString::Printf(TEXT("%s: bone rotation Maya %.4f deg, displayed %.4f deg, max error %.4f deg"),
+                    *Name, ExpectedRotation, DisplayedRotation, RotationError));
             }
         }
         double MayaTime = 0.0;
@@ -473,18 +1178,26 @@ private:
         Record->SetNumberField(TEXT("max_morph"), MaxMorph);
         Record->SetNumberField(TEXT("morphs"), Morphs);
         Record->SetObjectField(TEXT("maya_snapshot"), Snapshot);
+        if (DistinctPose == 1)
+        {
+            Record->SetNumberField(TEXT("expected_rotation_deg"), ExpectedRotation);
+            Record->SetNumberField(TEXT("displayed_rotation_deg"), DisplayedRotation);
+            Record->SetNumberField(TEXT("max_rotation_error_deg"), RotationError);
+        }
         WriteJsonFile(FPaths::Combine(EvidenceDir, FString::Printf(TEXT("pose-%02d.json"), PoseIndex++)), Record);
         Test->TestTrue(*(Name + TEXT(": the primary display has the oracle bones")), Bones >= 3);
         Test->TestTrue(*(Name + TEXT(": Unreal shows Maya's world pose")),
-            MaxWorld < Fixture->GetNumberField(TEXT("world_tolerance_cm")));
+            MaxWorld < WorldTolerance);
         const TArray<TSharedPtr<FJsonValue>>* Keyed = nullptr;
         if (Fixture->GetObjectField(TEXT("maya"))->TryGetArrayField(TEXT("keyed_morphs"), Keyed) && Keyed->Num() > 0)
         {
             Test->TestTrue(*(Name + TEXT(": a display shows the keyed Morphs")), Morphs > 0);
             Test->TestTrue(*(Name + TEXT(": the oracle Morph weights are non-zero")), MaxExpected > 0.05);
-            Test->TestTrue(*(Name + TEXT(": the displays show Maya's Morph weights")),
-                MaxMorph < Fixture->GetNumberField(TEXT("morph_tolerance")));
+            Test->TestTrue(*(Name + (bMorphs ? TEXT(": the displays show Maya's Morph weights")
+                                            : TEXT(": the displays clear Morph weights while BS is disabled"))),
+                MaxMorph < MorphTolerance);
         }
+        return true;
     }
 
     /** The Details at the fixture widths and the Maya panel at one stage. */
@@ -543,14 +1256,27 @@ private:
             }
         }
         Binding->EnsureCharacterPartIds();
+        Binding->SetFlags(RF_Transactional);
         if (!Binding->SkeletalMesh || !Binding->PreviewStaticMesh)
         {
             return Abort(TEXT("Fixture Primary Driver or Preview Static Mesh did not load"));
         }
-        World = GEditor->NewMap();
+        return SpawnTarget(GEditor->NewMap());
+    }
+
+    bool SpawnTarget(UWorld* World)
+    {
+        if (!World)
+        {
+            return Abort(TEXT("The fixture's unsaved world did not open"));
+        }
         FActorSpawnParameters Params;
         Params.ObjectFlags |= RF_Transient;
         Actor = World->SpawnActor<AMtoULiveLinkActor>(FVector::ZeroVector, FRotator::ZeroRotator, Params);
+        if (!Actor.IsValid())
+        {
+            return Abort(TEXT("The fixture Binding Actor did not spawn"));
+        }
         Actor->SetActorLabel(TEXT("MtoU GUI Workflow (unsaved)"));
         Actor->SetBinding(Binding.Get());
         return true;
@@ -573,18 +1299,35 @@ private:
             Log(Driver.DescribePreferences(TEXT("playback")));
             WriteJsonFile(FPaths::Combine(EvidenceDir, TEXT("maya-final.json")), MayaResult.ToSharedRef());
         }
-        Driver.Terminate();
+        if (Reconnect)
+        {
+            TSharedRef<FJsonObject> Evidence = MakeShared<FJsonObject>();
+            Evidence->SetArrayField(TEXT("unreal"), UnrealHistory);
+            WriteJsonFile(FPaths::Combine(EvidenceDir, TEXT("reconnect-events.json")), Evidence);
+        }
+        if (!bKeepMaya)
+        {
+            Driver.Terminate();
+        }
     }
 
     FAutomationTestBase* Test;
     FString FixturePath, EvidenceDir;
-    TSharedPtr<FJsonObject> Fixture, MayaResult;
+    TSharedPtr<FJsonObject> Fixture, MayaResult, Reconnect;
+    FString MonitoredStage, LastUnrealState, LastPoseObservation;
+    int32 OldSession = 0, OldAttempts = 0;
+    bool bUnrealReconnecting = false;
+    TArray<TSharedPtr<FJsonValue>> UnrealHistory;
+    TMap<FName, FOracleRotation> FirstOraclePose;
+    TMap<FName, FQuat> OracleAxisOffsets;
+    TArray<FString> OldCapturePaths;
     const TArray<TSharedPtr<FJsonValue>>* DetailsWidths = nullptr;
     TArray<FStep> Steps;
     int32 Step = 0, Pending = -1, ReportedErrors = 0, PoseIndex = 0;
     double StepStarted = 0.0, SettleUntil = 0.0;
     bool bStarted = false;
     bool bAborted = false;
+    bool bKeepMaya = false;
     MtoUGuiAcceptance::FMayaGuiDriver Driver;
     TStrongObjectPtr<UMtoULiveLinkBinding> Binding;
     TWeakObjectPtr<AMtoULiveLinkActor> Actor;

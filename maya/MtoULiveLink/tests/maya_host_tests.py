@@ -2,7 +2,10 @@
 import contextlib
 import importlib.util
 import pathlib
+import socket
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -32,6 +35,9 @@ from mtou_livelink import (
 )
 from mtou_livelink import (
     mayaapi as mtou_mayaapi,
+)
+from mtou_livelink import (
+    protocol as mtou_protocol,
 )
 from mtou_livelink import (
     scene as mtou_scene,
@@ -111,6 +117,7 @@ class MayaHostTests(unittest.TestCase):
         maya.standalone.uninitialize()
 
     def setUp(self):
+        mtou_mayaapi.drain_deferred()
         cmds.file(new=True, force=True)
         cmds.currentUnit(linear="cm")
 
@@ -164,6 +171,487 @@ class MayaHostTests(unittest.TestCase):
         with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
             mtou_scene.CharacterScene.capture(root)
         self.assertEqual("NO_VISIBLE_SKINNED_MESH", caught.exception.code)
+
+    def _skinned_outfit(self, root, name, alias=None):
+        mesh = cmds.polyCube(name=name)[0]
+        if alias:
+            target = cmds.duplicate(mesh, name=name + "Target")[0]
+            blend = cmds.blendShape(target, mesh, name=name + "BS")[0]
+            cmds.aliasAttr(alias, blend + ".weight[0]")
+            cmds.setAttr(blend + ".weight[0]", 0.25)
+        cmds.skinCluster(root, mesh, name=name + "Skin")
+        return cmds.ls(mesh, long=True)[0]
+
+    def test_root_only_capture_and_optional_display_labels(self):
+        group = cmds.createNode("transform", name="character")
+        root = cmds.createNode("joint", name="root", parent=group)
+        mesh = self._skinned_outfit(root, "outfit", "VisibleSmile")
+
+        def capture_label():
+            scene = mtou_scene.CharacterScene.capture(root)
+            try:
+                self.assertEqual((mesh,), scene.snapshot().mesh_paths)
+                self.assertEqual(("VisibleSmile",), scene.snapshot().curve_names)
+                self.assertEqual((0.25,), scene.sample().curves)
+                return scene.snapshot().outfit
+            finally:
+                scene.close()
+
+        self.assertEqual("outfit", capture_label())
+        display = cmds.createNode("transform", name="Display_ctrl", parent=group)
+        display = cmds.ls(display, long=True)[0]
+        cmds.addAttr(display, longName="style", attributeType="enum", enumName="One:Two")
+        self.assertEqual("outfit", capture_label())
+        # Detection depends on option text, not the attribute name.
+        cmds.addAttr(display, longName="wardrobe", attributeType="enum",
+                     enumName="ClothesLegacy:ClothesOther")
+        self.assertEqual("ClothesLegacy", capture_label())
+        other = cmds.createNode("transform", name="controllers", parent=group)
+        other = cmds.createNode("transform", name="Display_ctrl", parent=other)
+        cmds.addAttr(other, longName="wardrobe", attributeType="enum",
+                     enumName="ClothesA:ClothesB")
+        self.assertEqual("outfit", capture_label())
+        cmds.addAttr(display, longName="ambiguous", attributeType="enum",
+                     enumName="ClothesC:ClothesD")
+        explicit = mtou_scene.CharacterScene.capture(
+            root, display=display, display_attribute="wardrobe")
+        self.addCleanup(explicit.close)
+        self.assertEqual("ClothesLegacy", explicit.snapshot().outfit)
+
+    def test_visibility_matrix_includes_template_reference_and_excludes_hidden_curves(self):
+        cases = [("normal", None, None, True)]
+        for owner in ("shape", "transform", "ancestor"):
+            for attribute, value in (("visibility", False), ("lodVisibility", False),
+                                     ("overrideVisibility", False),
+                                     ("overrideDisplayType", 1), ("overrideDisplayType", 2)):
+                cases.append((owner, attribute, value, attribute == "overrideDisplayType"))
+        cases.append(("shape", "intermediateObject", True, False))
+        for attribute, value in (("visibility", False), ("displayType", 1), ("displayType", 2)):
+            cases.append(("layer", attribute, value, attribute == "displayType"))
+        self.assertEqual(20, len(cases))
+        for owner, attribute, value, visible in cases:
+            with self.subTest(owner=owner, attribute=attribute, value=value):
+                cmds.file(new=True, force=True)
+                root = cmds.joint(name="root")
+                # Keep one base mesh so a hidden outfit can still be captured.
+                body = self._skinned_outfit(root, "body", "BodySmile")
+                mesh = self._skinned_outfit(root, "outfit", "OutfitSmile")
+                parent = cmds.group(mesh, name="geometry")
+                mesh = cmds.ls("outfit", long=True)[0]
+                shape = cmds.listRelatives(mesh, shapes=True, noIntermediate=True,
+                                           fullPath=True)[0]
+                if owner != "normal":
+                    node = {"shape": shape, "transform": mesh, "ancestor": parent}.get(owner)
+                    if owner == "layer":
+                        node = cmds.createDisplayLayer(mesh, name="outfitLayer")
+                    if attribute.startswith("override"):
+                        cmds.setAttr(node + ".overrideEnabled", True)
+                    cmds.setAttr(node + "." + attribute, value)
+                scene = mtou_scene.CharacterScene.capture(root)
+                try:
+                    expected = tuple(sorted([body, mesh] if visible else [body]))
+                    self.assertEqual(expected, scene.snapshot().mesh_paths)
+                    names = ("BodySmile", "OutfitSmile") if visible else ("BodySmile",)
+                    self.assertEqual(names, scene.snapshot().curve_names)
+                    self.assertEqual((0.25,) * len(names), scene.sample().curves)
+                finally:
+                    scene.close()
+
+    def test_multiple_shapes_and_inherited_overrides_use_each_visible_shape(self):
+        root = cmds.joint(name="root")
+        first = self._skinned_outfit(root, "first", "HiddenSmile")
+        second = self._skinned_outfit(root, "second", "VisibleSmile")
+        second_shape = cmds.listRelatives(second, shapes=True, noIntermediate=True,
+                                          fullPath=True)[0]
+        first_shape = cmds.listRelatives(first, shapes=True, noIntermediate=True,
+                                         fullPath=True)[0]
+        cmds.parent(second_shape, first, shape=True, relative=True)
+        cmds.setAttr(first_shape + ".visibility", False)
+        self.assertEqual(first, mtou_scene.effective_mesh_transform(first))
+        self.assertEqual([first], mtou_scene.visible_skinned_meshes([root]))
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        self.assertEqual(("VisibleSmile",), scene.snapshot().curve_names)
+        self.assertEqual((0.25,), scene.sample().curves)
+        previous = scene.snapshot().mesh_identities
+        visible_shape = cmds.listRelatives(first, shapes=True, noIntermediate=True,
+                                           fullPath=True)[1]
+        cmds.setAttr(first_shape + ".visibility", True)
+        cmds.setAttr(visible_shape + ".visibility", False)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual((first,), scene.snapshot().mesh_paths)
+        self.assertEqual(("HiddenSmile",), scene.snapshot().curve_names)
+        self.assertNotEqual(previous, scene.snapshot().mesh_identities)
+        self.assertEqual(2, scene.snapshot().revision)
+        scene.close()
+        parent = cmds.group(first, name="geometry")
+        first = cmds.ls("first", long=True)[0]
+        cmds.setAttr(parent + ".overrideEnabled", True)
+        cmds.setAttr(parent + ".overrideDisplayType", 2)
+        self.assertEqual(first, mtou_scene.effective_mesh_transform(first))
+        layer = cmds.createDisplayLayer(parent, name="hiddenLayer")
+        cmds.setAttr(layer + ".visibility", False)
+        self.assertIsNone(mtou_scene.effective_mesh_transform(first))
+
+    def test_hidden_outfit_switches_coalesce_and_undo_redo_restore_identity(self):
+        root = cmds.joint(name="root")
+        first = self._skinned_outfit(root, "first", "FirstSmile")
+        second = self._skinned_outfit(root, "second", "SecondSmile")
+        cmds.setAttr(second + ".visibility", False)
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        old_identity = scene.snapshot().mesh_identities
+        cmds.undoInfo(openChunk=True)
+        try:
+            cmds.setAttr(first + ".visibility", False)
+            cmds.setAttr(second + ".visibility", True)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+            scene.sample()
+        self.assertEqual("CHARACTER_SCENE_REFRESHING", caught.exception.code)
+        self.assertEqual(["character_change_started"], [event.kind for event in events])
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(["character_change_started", "outfit_changed"],
+                         [event.kind for event in events])
+        self.assertEqual(2, scene.snapshot().revision)
+        self.assertEqual((second,), scene.snapshot().mesh_paths)
+        self.assertEqual(("SecondSmile",), scene.snapshot().curve_names)
+        self.assertEqual((0.25,), scene.sample().curves)
+        cmds.undo()
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(3, scene.snapshot().revision)
+        self.assertEqual(old_identity, scene.snapshot().mesh_identities)
+        cmds.redo()
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(4, scene.snapshot().revision)
+        self.assertEqual((second,), scene.snapshot().mesh_paths)
+        self.assertEqual(3, sum(event.kind == "character_change_started" for event in events))
+
+    def test_animated_visibility_is_checked_before_sampling_without_graph_rediscovery(self):
+        root = cmds.joint(name="root")
+        first = self._skinned_outfit(root, "first", "FirstSmile")
+        second = self._skinned_outfit(root, "second", "SecondSmile")
+        for mesh, start, end in ((first, 1, 0), (second, 0, 1)):
+            cmds.setKeyframe(mesh, attribute="visibility", time=1, value=start)
+            cmds.setKeyframe(mesh, attribute="visibility", time=2, value=end)
+        cmds.currentTime(1)
+        scene = mtou_scene.CharacterScene.capture(root)
+        self.addCleanup(scene.close)
+        with mock.patch.object(mtou_scene, "skinned_mesh_candidates",
+                               side_effect=AssertionError("per-frame graph scan")):
+            scene.sample()
+            cmds.currentTime(2)
+            with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+                scene.sample()
+        self.assertEqual("CHARACTER_SCENE_REFRESHING", caught.exception.code)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual((second,), scene.snapshot().mesh_paths)
+        self.assertEqual(("SecondSmile",), scene.snapshot().curve_names)
+
+    def test_labels_template_reference_rename_and_display_removal_do_not_change_revision(self):
+        group, root, display = self._create_character_group()
+        mesh = self._skinned_outfit(root, "outfit", "Smile")
+        events = []
+        nodes = [mtou_scene.dag_path(root).node(), mtou_scene.dag_path(mesh).node()]
+        original_callbacks = [set(mtou_scene.om.MMessage.nodeCallbacks(node)) for node in nodes]
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        identity = scene.snapshot().mesh_identities
+        for display_type in (1, 2):
+            cmds.setAttr(mesh + ".overrideEnabled", True)
+            cmds.setAttr(mesh + ".overrideDisplayType", display_type)
+            mtou_mayaapi.drain_deferred()
+            self.assertEqual(1, scene.sample().revision)
+        cmds.setAttr(display + ".clothes", 1)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual("Clothes02", scene.snapshot().outfit)
+        alternate = cmds.createNode("transform", name="alternateLabel", parent=group)
+        cmds.addAttr(alternate, longName="wardrobe", attributeType="enum", enumName="ClothesNew")
+        scene.set_display_controller(alternate, "wardrobe")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual("ClothesNew", scene.snapshot().outfit)
+        scene.set_display_controller(display, "clothes")
+        mtou_mayaapi.drain_deferred()
+        cmds.deleteAttr(display + ".clothes")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual("outfit", scene.snapshot().outfit)
+        mesh = cmds.rename(mesh, "renamedOutfit")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual("renamedOutfit", scene.snapshot().outfit)
+        cmds.delete(display)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(identity, scene.snapshot().mesh_identities)
+        self.assertEqual(1, scene.sample().revision)
+        self.assertNotIn("character_change_started", [event.kind for event in events])
+        callback_ids = list(scene._callback_ids + scene._input_callback_ids)
+        self.assertTrue(callback_ids)
+        scene.close()
+        scene.close()
+        self.assertEqual([], scene._callback_ids + scene._input_callback_ids)
+        self.assertEqual(original_callbacks,
+                         [set(mtou_scene.om.MMessage.nodeCallbacks(node)) for node in nodes])
+        count = len(events)
+        cmds.setAttr(mesh + ".visibility", False)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(count, len(events))
+
+    def test_skin_graph_add_remove_and_same_path_replacement_change_mesh_identity(self):
+        root = cmds.joint(name="root")
+        first = self._skinned_outfit(root, "outfit", "FirstSmile")
+        scene = mtou_scene.CharacterScene.capture(root)
+        self.addCleanup(scene.close)
+        identity = scene.snapshot().mesh_identities
+        second = self._skinned_outfit(root, "newOutfit", "SecondSmile")
+        cmds.delete(first)
+        cmds.rename(second, "outfit")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual((first,), scene.snapshot().mesh_paths)
+        self.assertNotEqual(identity, scene.snapshot().mesh_identities)
+        self.assertEqual(2, scene.snapshot().revision)
+        self.assertEqual(("SecondSmile",), scene.snapshot().curve_names)
+
+    def test_lod_override_and_layer_switches_refresh_the_hidden_candidates(self):
+        for attribute in ("lodVisibility", "overrideVisibility", "displayLayer"):
+            with self.subTest(attribute=attribute):
+                cmds.file(new=True, force=True)
+                root = cmds.joint(name="root")
+                first = self._skinned_outfit(root, "first", "FirstSmile")
+                second = self._skinned_outfit(root, "second", "SecondSmile")
+                if attribute == "displayLayer":
+                    first_plug = cmds.createDisplayLayer(first, name="firstLayer") + ".visibility"
+                    second_plug = (cmds.createDisplayLayer(second, name="secondLayer")
+                                   + ".visibility")
+                else:
+                    first_plug, second_plug = first + "." + attribute, second + "." + attribute
+                    if attribute == "overrideVisibility":
+                        cmds.setAttr(first + ".overrideEnabled", True)
+                        cmds.setAttr(second + ".overrideEnabled", True)
+                cmds.setAttr(second_plug, False)
+                events = []
+                scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+                try:
+                    cmds.setAttr(first_plug, False)
+                    cmds.setAttr(second_plug, True)
+                    mtou_mayaapi.drain_deferred()
+                    self.assertEqual((second,), scene.snapshot().mesh_paths)
+                    self.assertEqual(("SecondSmile",), scene.snapshot().curve_names)
+                    self.assertEqual(2, scene.sample().revision)
+                    self.assertEqual(["character_change_started", "outfit_changed"],
+                                     [event.kind for event in events])
+                finally:
+                    scene.close()
+
+    def test_mesh_and_deformer_rename_preserve_bind_pose_at_another_evaluated_pose(self):
+        root = cmds.joint(name="root")
+        middle = cmds.createNode("transform", name="middle", parent=root)
+        cmds.createNode("joint", name="tip", parent=middle)
+        mesh = self._skinned_outfit(root, "outfit", "Smile")
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        original = scene.snapshot()
+        cmds.setAttr(middle + ".translateX", 3.0)
+        cmds.rename(mesh, "renamedOutfit")
+        cmds.rename("outfitBS", "renamedBS")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(original.bind_local_transforms, scene.snapshot().bind_local_transforms)
+        self.assertEqual(1, scene.sample().revision)
+        self.assertEqual((0.25,), scene.sample().curves)
+        self.assertEqual("renamedOutfit", scene.snapshot().outfit)
+        self.assertEqual(["display_changed"], [event.kind for event in events])
+
+    def test_unrelated_dag_edit_preserves_bind_locals_during_animation(self):
+        root = cmds.joint(name="root")
+        self._skinned_outfit(root, "outfit", "Smile")
+        middle = cmds.createNode("transform", name="middle", parent=root)
+        cmds.createNode("joint", name="tip", parent=middle)
+        cmds.setKeyframe(middle, attribute="translateX", time=1, value=1.0)
+        cmds.setKeyframe(middle, attribute="translateX", time=2, value=3.0)
+        cmds.currentTime(1)
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        before = scene.snapshot()
+        old_frame = scene.sample()
+
+        cmds.currentTime(2)
+        cmds.spaceLocator(name="unrelated")
+        frame = scene.sample()
+        mtou_mayaapi.drain_deferred()
+
+        self.assertNotEqual(old_frame.transforms, frame.transforms)
+        self.assertEqual(before.bind_local_transforms, scene.snapshot().bind_local_transforms)
+        self.assertEqual(before.revision, frame.revision)
+        self.assertEqual([], events)
+
+    def test_deformer_rename_keeps_negotiated_curve_order_and_values(self):
+        root = cmds.joint(name="root")
+        self._skinned_outfit(root, "aOutfit", "Smile")
+        self._skinned_outfit(root, "bOutfit", "Jaw")
+        cmds.setAttr("bOutfitBS.weight[0]", 0.75)
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        before = scene.snapshot()
+        self.assertEqual(("Smile", "Jaw"), before.curve_names)
+
+        deformer = cmds.rename("aOutfitBS", "zOutfitBS")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(before.curve_names, scene.snapshot().curve_names)
+        self.assertEqual((0.25, 0.75), scene.sample().curves)
+
+        cmds.setAttr(deformer + ".weight[0]", 0.5)
+        cmds.spaceLocator(name="unrelated")
+        frame = scene.sample()
+        self.assertEqual(before.curve_names, scene.snapshot().curve_names)
+        self.assertEqual((0.5, 0.75), frame.curves)
+        self.assertEqual(before.revision, frame.revision)
+        self.assertEqual([], events)
+
+    def test_shared_alias_keeps_its_reference_weight_after_deformer_rename(self):
+        root = cmds.joint(name="root")
+        for name, value in (("aOutfit", 0.25), ("bOutfit", 0.25000075),
+                            ("cOutfit", 0.24999925)):
+            self._skinned_outfit(root, name, "Smile")
+            cmds.setAttr(name + "BS.weight[0]", value)
+        reference = cmds.getAttr("aOutfitBS.weight[0]")
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        before = scene.sample()
+        self.assertEqual((reference,), before.curves)
+
+        deformer = cmds.rename("aOutfitBS", "zOutfitBS")
+        mtou_mayaapi.drain_deferred()
+        after_rename = scene.sample()
+        self.assertEqual((reference,), after_rename.curves)
+        self.assertEqual(before.revision, after_rename.revision)
+
+        cmds.spaceLocator(name="unrelated")
+        refreshed = scene.sample()
+        self.assertEqual((reference,), refreshed.curves)
+        self.assertEqual(before.revision, refreshed.revision)
+        self.assertEqual(("Smile",), scene.snapshot().curve_names)
+        self.assertEqual([], events)
+
+        cmds.setAttr(deformer + ".weight[0]", 0.5)
+        with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+            scene.sample()
+        self.assertEqual("SAMPLING_FAILED", caught.exception.code)
+        self.assertIn("conflicting values for BlendShape alias Smile", caught.exception.details)
+
+    def test_manual_connect_recovers_the_explicit_display_by_identity(self):
+        for change, outfit in (("delete", "outfit"), ("replace", "outfit"),
+                               ("remove_enum", "outfit"), ("rename", "ClothesChosen")):
+            with self.subTest(change=change):
+                cmds.file(new=True, force=True)
+                group, root, _ = self._create_character_group()
+                root = cmds.ls(root, long=True)[0]
+                self._skinned_outfit(root, "outfit")
+                chosen = cmds.createNode("transform", name="alternateLabel", parent=group)
+                chosen = cmds.ls(chosen, long=True)[0]
+                cmds.addAttr(chosen, longName="wardrobe", attributeType="enum",
+                             enumName="ClothesChosen")
+                controller = mtou_controller.Controller()
+                controller._render_snapshot = mock.Mock()
+                controller._set_connected = mock.Mock()
+                controller._show_error = mock.Mock()
+                controller._selected_display = mock.Mock(return_value=chosen)
+                self.addCleanup(controller._clear_scene)
+                controller._capture_scene(root)
+                controller.set_display_controller()
+                mtou_mayaapi.drain_deferred()
+                scene = controller._scene
+                self.assertEqual("ClothesChosen", scene.snapshot().outfit)
+                if change in ("delete", "replace"):
+                    cmds.delete(chosen)
+                if change == "replace":
+                    replacement = cmds.createNode(
+                        "transform", name="alternateLabel", parent=group)
+                    cmds.addAttr(replacement, longName="wardrobe", attributeType="enum",
+                                 enumName="ClothesReplacement")
+                elif change == "remove_enum":
+                    cmds.deleteAttr(chosen + ".wardrobe")
+                elif change == "rename":
+                    cmds.rename(chosen, "renamedLabel")
+                mtou_mayaapi.drain_deferred()
+                self.assertEqual(outfit, scene.snapshot().outfit)
+
+                def on_event(event):
+                    controller._on_streaming_session_event(session, event)
+
+                session = mtou_session.StreamingSession(scene, 24.0, on_event)
+                session._worker = mock.Mock()
+                session._worker.status.return_value = ("ready", "", None, None)
+                session._phase = "ready"
+                controller._session = session
+                with mock.patch.object(mtou_scene, "sample_pose",
+                                       side_effect=RuntimeError("bad evaluated pose")):
+                    session._sample_and_submit(force=True)
+                mtou_mayaapi.drain_deferred()
+                self.assertIsNone(controller._scene)
+                self.assertIsNone(controller._session)
+                self.assertEqual("SAMPLING_FAILED", controller._show_error.call_args[0][0]["code"])
+                controller._show_error.reset_mock()
+
+                with mock.patch.object(mtou_session.StreamingSession, "start") as start:
+                    controller.connect()
+                controller._session = None
+                start.assert_called_once()
+                controller._show_error.assert_not_called()
+                self.assertEqual(outfit, controller._scene.snapshot().outfit)
+
+                outside = cmds.createNode("transform", name="outside")
+                controller._selected_display.return_value = outside
+                controller.set_display_controller()
+                self.assertIn("inside the character",
+                              controller._show_error.call_args[0][0]["message"])
+                self.assertEqual(outfit, controller._scene.snapshot().outfit)
+                controller._clear_scene()
+
+    def test_curve_manifest_and_bind_input_changes_increase_revision(self):
+        root = cmds.joint(name="root")
+        self._skinned_outfit(root, "outfit", "Smile")
+        scene = mtou_scene.CharacterScene.capture(root)
+        self.addCleanup(scene.close)
+        cmds.aliasAttr("outfitBS.Smile", remove=True)
+        cmds.aliasAttr("Grin", "outfitBS.weight[0]")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(("Grin",), scene.snapshot().curve_names)
+        self.assertEqual(2, scene.snapshot().revision)
+        previous_bind = scene.snapshot().bind_local_transforms
+        matrix = list(cmds.getAttr(root + ".bindPose"))
+        matrix[12] = 2.0
+        cmds.setAttr(root + ".bindPose", *matrix, type="matrix")
+        mtou_mayaapi.drain_deferred()
+        self.assertNotEqual(previous_bind, scene.snapshot().bind_local_transforms)
+        self.assertEqual(3, scene.snapshot().revision)
+
+    def test_same_path_root_replacement_and_new_scene_invalidate_and_clean_observers(self):
+        for action in ("replace_root", "new_scene"):
+            with self.subTest(action=action):
+                cmds.file(new=True, force=True)
+                root = cmds.joint(name="root")
+                self._skinned_outfit(root, "outfit")
+                events = []
+                scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+                try:
+                    if action == "replace_root":
+                        cmds.delete(root)
+                        cmds.joint(name="root")
+                    else:
+                        cmds.file(new=True, force=True)
+                    mtou_mayaapi.drain_deferred()
+                    with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+                        scene.sample()
+                    self.assertEqual("CHARACTER_ROOT_DESTROYED", caught.exception.code)
+                    self.assertEqual(["character_invalidated"], [event.kind for event in events])
+                    self.assertEqual([], scene._callback_ids + scene._input_callback_ids)
+                finally:
+                    scene.close()
 
     def test_duplicate_bone_action_selects_every_conflicting_dag_path(self):
         root = cmds.joint(name="duplicateRoot")
@@ -574,10 +1062,222 @@ class MayaHostTests(unittest.TestCase):
         self.assertTrue(FakeWorker.instance.init_message["blendshapes_enabled"])
         self.assertEqual(3, len(FakeWorker.instance.init_message["bones"][0]))
 
+    @staticmethod
+    def _send_restart_reply(peer, reply):
+        peer.sendall(mtou_protocol.encode_message(reply))
+
+    def _restart_peer_init(self, controller_session, peer, session_id, fresh=False):
+        peer.settimeout(3)
+        hello = mtou_protocol.recv_message(peer)
+        self.assertEqual("hello", hello["type"])
+        self._send_restart_reply(peer, {
+            "type": "hello_ack", "version": mtou_config.PROTOCOL_VERSION,
+            "session_id": session_id, "source_instance_id": "source",
+            "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES), "targets": [],
+            "space": {"space_revision": 1, "anchor": {
+                "translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": 1}},
+        })
+        if fresh:
+            deadline = time.monotonic() + 3
+            while controller_session.hello_reply is None:
+                self.assertLess(time.monotonic(), deadline)
+                threading.Event().wait(0.005)
+            controller_session.poll_connection()
+            mtou_mayaapi.drain_deferred()
+        return hello, mtou_protocol.recv_message(peer)
+
+    def _ready_restart_peer(self, active, peer, session_id, init, missing_in_unreal=(),
+                            secondary_init=None):
+        init_rows = (init,) if secondary_init is None else (init, secondary_init)
+        for row in init_rows:
+            self._send_restart_reply(peer, {
+                "type": "ready", "revision": row["revision"], "workflow": row["workflow"],
+                "session_id": session_id, "target_instance_id": row["object_id"] + "-target",
+                "object_id": row["object_id"], "set_revision": 1, "space_revision": 1,
+                "missing_in_unreal": list(missing_in_unreal), "missing_in_maya": [],
+                "bone_name_remaps": [], "target_morph_count": 0, "accepted_morph_count": 0,
+            })
+        deadline = time.monotonic() + 3
+        while not active.is_ready:
+            self.assertLess(time.monotonic(), deadline)
+            threading.Event().wait(0.005)
+
+    def _restart_listener(self):
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(3)
+        return listener
+
+    def test_workflow_and_evaluated_outfit_restart_once_on_a_fresh_tcp(self):
+        unused_group, root, unused_display = self._create_character_group()
+        body = cmds.polyCube(name="body")[0]
+        garment = cmds.polyCube(name="coat")[0]
+        cmds.skinCluster(root, body)
+        cmds.skinCluster(root, garment)
+        cmds.setAttr(garment + ".visibility", False)
+        controller = mtou_controller.Controller()
+        character = controller._capture_scene(root)
+        controller._set_connected = mock.Mock()
+        controller._show_error = mock.Mock()
+        controller._show_warning = mock.Mock()
+        self.addCleanup(controller.close)
+        listener = self._restart_listener()
+        with mock.patch.multiple(mtou_config, HOST="127.0.0.1", PORT=listener.getsockname()[1]):
+            controller.connect()
+            old_session = controller._session
+            with listener.accept()[0] as old_peer:
+                old_hello, init = self._restart_peer_init(old_session, old_peer, 19)
+                self._ready_restart_peer(old_session, old_peer, 19, init)
+                old_session._sample_and_submit(force=True)
+                self.assertEqual("frame", mtou_protocol.recv_message(old_peer)["type"])
+
+                controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
+                cmds.setAttr(body + ".visibility", False)
+                cmds.setAttr(garment + ".visibility", True)
+                mtou_mayaapi.drain_deferred()
+
+                while True:
+                    message = mtou_protocol.recv_message(old_peer)
+                    self.assertIn(message["type"], ("restart_request", "restart_prepared"))
+                    if (message["type"] == "restart_prepared"
+                            and message["source_revision"] == controller._input_revision):
+                        break
+                self._send_restart_reply(old_peer, {
+                    "type": "restart_state", "session_id": 19, "state": "permitted",
+                    "restart_token": "permission", "code": "", "detail": "",
+                })
+                self.assertEqual(b"", old_peer.recv(1))
+
+            old_session.poll_connection()
+            mtou_mayaapi.drain_deferred()
+            fresh = controller._session
+            self.assertIsNotNone(fresh)
+            self.assertIsNot(fresh, old_session)
+            with listener.accept()[0] as new_peer:
+                new_hello, new_init = self._restart_peer_init(fresh, new_peer, 20, fresh=True)
+                self.assertNotIn("restart_token", old_hello)
+                self.assertEqual("permission", new_hello["restart_token"])
+                self.assertEqual(old_hello["maya_subject_id"], new_hello["maya_subject_id"])
+                self.assertIs(character, controller._scene)
+                self.assertEqual(("|coat",), character.snapshot().mesh_paths)
+                self.assertGreater(new_init["revision"], init["revision"])
+                self.assertEqual("model", new_init["workflow"])
+                self._ready_restart_peer(fresh, new_peer, 20, new_init, ["MayaOnly"])
+                fresh._sample_and_submit(force=True)
+                self.assertEqual("frame", mtou_protocol.recv_message(new_peer)["type"])
+                self.assertIsNone(controller._restart)
+                self.assertEqual("BLENDSHAPE_MISMATCH", controller._last_diagnostic["code"])
+                controller._show_warning.assert_not_called()
+                controller._show_error.assert_not_called()
+
+    def _assert_live_sample_starts_restart(self, edited_mesh):
+        root = cmds.createNode("joint", name="bodyRoot")
+        secondary_root = cmds.createNode("joint", name="coatRoot")
+        self._skinned_outfit(root, "body", "Smile")
+        self._skinned_outfit(secondary_root, "coat", "Smile")
+        controller = mtou_controller.Controller()
+        body = controller._capture_scene(root)
+        controller._set_connected = mock.Mock()
+        controller._show_error = mock.Mock()
+        self.addCleanup(controller.close)
+        cmds.select(secondary_root, replace=True)
+        controller.set_secondary_object()
+        coat = controller._secondary_scene
+        self.assertIsNotNone(coat)
+        scene = {"body": body, "coat": coat}[edited_mesh]
+        listener = self._restart_listener()
+
+        with mock.patch.multiple(mtou_config, HOST="127.0.0.1", PORT=listener.getsockname()[1]):
+            controller.connect()
+            active = controller._session
+            self.assertIsNotNone(active)
+            with listener.accept()[0] as peer:
+                unused_hello, init = self._restart_peer_init(active, peer, 19)
+                secondary_init = mtou_protocol.recv_message(peer)
+                self.assertEqual("secondary", secondary_init["object_id"])
+                self._ready_restart_peer(active, peer, 19, init, secondary_init=secondary_init)
+                active._sample_and_submit(force=True)
+                self.assertEqual("frame", mtou_protocol.recv_message(peer)["type"])
+
+                deformer = edited_mesh + "BS"
+                cmds.aliasAttr(deformer + ".Smile", remove=True)
+                cmds.aliasAttr("Grin", deformer + ".weight[0]")
+                self.assertEqual(("Smile",), scene.snapshot().curve_names)
+
+                # Run the live timer's sampling path before mayapy drains the
+                # deferred refresh queued by the alias edit.
+                active._sample_and_submit(force=True)
+                self.assertEqual(2, scene.snapshot().revision)
+                self.assertEqual(("Grin",), scene.snapshot().curve_names)
+                self.assertTrue(active.poll_connection(),
+                                getattr(active._terminal_event, "diagnostic", None))
+                self.assertTrue(active.restarting)
+                self.assertFalse(active.is_ready)
+
+                input_revision = controller._input_revision
+                mtou_mayaapi.drain_deferred()
+                self.assertIs(active, controller._session)
+                self.assertEqual(input_revision, controller._input_revision)
+                for kind in ("restart_request", "restart_prepared"):
+                    message = mtou_protocol.recv_message(peer)
+                    self.assertEqual((kind, input_revision),
+                                     (message["type"], message["source_revision"]))
+                controller._show_error.assert_not_called()
+
+    def test_primary_live_sample_starts_restart_before_deferred_refresh(self):
+        self._assert_live_sample_starts_restart("body")
+
+    def test_secondary_live_sample_starts_restart_before_deferred_refresh(self):
+        self._assert_live_sample_starts_restart("coat")
+
+    def test_restart_deadline_closes_tcp_with_maya_main_thread_blocked(self):
+        unused_group, root, unused_display = self._create_character_group()
+        mesh = cmds.polyCube(name="body")[0]
+        cmds.skinCluster(root, mesh)
+        controller = mtou_controller.Controller()
+        controller._capture_scene(root)
+        controller._set_connected = mock.Mock()
+        controller._show_error = mock.Mock()
+        self.addCleanup(controller.close)
+        listener = self._restart_listener()
+        with mock.patch.multiple(mtou_config, HOST="127.0.0.1", PORT=listener.getsockname()[1]), \
+                mock.patch.object(mtou_session, "RESTART_COORDINATION_SECONDS", 0.3):
+            controller.connect()
+            active = controller._session
+            self.assertIsNotNone(active)
+            with listener.accept()[0] as peer:
+                unused_hello, init = self._restart_peer_init(active, peer, 19)
+                self._ready_restart_peer(active, peer, 19, init)
+                active._sample_and_submit(force=True)
+                controller._cached_playback.enter()
+                while mtou_protocol.recv_message(peer)["type"] != "cache_enter":
+                    pass
+                peer.sendall(mtou_protocol.encode_message({
+                    "type": "restart_state", "session_id": 19, "state": "ending",
+                    "code": "", "detail": "UE changed its composition",
+                }))
+                # Maya's host thread stays in a blocking read. It never drains
+                # deferred work, samples the scene, or gives up the cache lease.
+                reply = mtou_protocol.recv_message(peer)
+                self.assertEqual(("restart_cancel", "RESTART_TIMEOUT"),
+                                 (reply["type"], reply["code"]))
+                self.assertEqual(b"", peer.recv(1))
+                self.assertTrue(active.time_control.cache_holds_connection())
+
+                active.poll_connection()
+                mtou_mayaapi.drain_deferred()
+                self.assertIsNone(controller._session)
+                self.assertIsNone(controller._restart)
+                self.assertIsNone(controller._cached_playback)
+                self.assertFalse(active.time_control.cache_holds_connection())
+                self.assertEqual("RESTART_TIMEOUT", controller._last_diagnostic["code"])
+                controller._show_error.assert_not_called()
+
     def test_termination_from_a_worker_thread_is_delivered_without_an_idle_loop(self):
         # mayapy never runs maya.utils.executeDeferred work; batch mode queues
         # it for the host loop instead, which drains it on the main thread.
-        import threading
         group, root, unused_display = self._create_character_group()
         del group, unused_display
         mesh = cmds.polyCube(name="body")[0]
