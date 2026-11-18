@@ -533,6 +533,7 @@ private:
     TAtomic<bool> bRestartTestHoldHelloReply{false};
     TAtomic<int32> RestartTestHeldHelloPolls{0};
     TAtomic<bool> bRestartTestHoldPermit{false};
+    TAtomic<int32> RestartTestHandledMessages{0};
     TFunction<void(uint64)> RestartTestAfterEndTargetSample;
 #endif
     double RestartNow() const

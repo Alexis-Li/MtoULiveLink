@@ -16854,6 +16854,10 @@ public:
     {
         Source.bRestartTestHoldPermit.Store(bHold);
     }
+    static int32 HandledMessages(const FMtoULiveLinkSource& Source)
+    {
+        return Source.RestartTestHandledMessages.Load();
+    }
     static void AfterEndTargetSample(FMtoULiveLinkSource& Source, TFunction<void(uint64)> Callback)
     {
         Source.RestartTestAfterEndTargetSample = MoveTemp(Callback);
@@ -17144,6 +17148,20 @@ struct FMtoUSessionEndMaya
         return SendGreeting(Test) && ReceiveGreeting(Test) && (!bNegotiate || Negotiate(Test));
     }
 
+    TArray<uint8> RestartRequest(int32 SourceRevision) const
+    {
+        return Packet(FString::Printf(
+            TEXT("{\"type\":\"restart_request\",\"session_id\":%d,\"source_revision\":%d,\"reason\":\"input_changed\"}"),
+            SessionId, SourceRevision));
+    }
+
+    bool SendPrepared(int32 SourceRevision) const
+    {
+        return Send(Packet(FString::Printf(
+            TEXT("{\"type\":\"restart_prepared\",\"session_id\":%d,\"source_revision\":%d}"),
+            SessionId, SourceRevision)));
+    }
+
     bool PrepareRestart(FAutomationTestBase& Test, int32 SourceRevision)
     {
         TSharedPtr<FJsonObject> State;
@@ -17154,10 +17172,7 @@ struct FMtoUSessionEndMaya
         {
             return false;
         }
-        const TArray<uint8> Prepared = Packet(FString::Printf(
-            TEXT("{\"type\":\"restart_prepared\",\"session_id\":%d,\"source_revision\":%d}"),
-            SessionId, SourceRevision));
-        return Test.TestTrue(TEXT("Maya prepares after receiving ending"), Send(Prepared));
+        return Test.TestTrue(TEXT("Maya prepares after receiving ending"), SendPrepared(SourceRevision));
     }
 
     bool FinishCoordination(FAutomationTestBase& Test, int32 SourceRevision, FString& Permit)
@@ -17248,6 +17263,11 @@ bool WaitForUnsentPermit(FMtoUSessionEndFixture& Fixture, uint64 SessionId, FMto
             && Operation.bStatePending && !Operation.bPermitDelivered && !Operation.Token.IsEmpty()
             && FMtoURestartTestAccess::WorkerSession(*Fixture.Source) == SessionId;
     }, 2.0);
+}
+
+bool WaitForRestartMessages(FMtoULiveLinkSource& Source, int32 Count)
+{
+    return PollUntil([&]() { return FMtoURestartTestAccess::HandledMessages(Source) >= Count; }, 2.0);
 }
 }
 
@@ -18240,8 +18260,7 @@ bool FMtoURestartDeadlineTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("whole operation gets exactly 32 seconds"), First.OperationDeadline, 132.0);
     TestFalse(TEXT("old stream is synchronously gated"), F.Source->GetTimeControlView().bConnected);
     F.Pump();
-    const TArray<uint8> Request = Packet(FString::Printf(
-        TEXT("{\"type\":\"restart_request\",\"session_id\":%d,\"source_revision\":2,\"reason\":\"input_changed\"}"), Maya.SessionId));
+    const TArray<uint8> Request = Maya.RestartRequest(2);
     for (int32 Revision = 0; Revision < 4; ++Revision)
     {
         FMtoURestartTestAccess::Clock(*F.Source, 101.0 + Revision);
@@ -18512,6 +18531,165 @@ bool FMtoURestartEditDuringPermitSendTest::RunTest(const FString& Parameters)
         && F.Actor->GetCharacterPartComponents().Num() == 1
         && F.Actor->GetCharacterPartComponents()[0]->GetSkeletalMeshAsset() == LatestPart);
     return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartDuplicateRequestDuringPermitSendTest,
+    "MtoULiveLink.Source.Restart.DuplicateRequestDuringPermitSend",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURestartDuplicateRequestDuringPermitSendTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    FMtoUSessionEndMaya Old(F);
+    if (!Old.Connect(*this, true)) { return false; }
+    FMtoURestartTestAccess::Clock(*F.Source, 100.0);
+    FMtoURestartTestAccess::HoldPermit(*F.Source, true);
+    const TArray<uint8> Request = Old.RestartRequest(3);
+    FMtoURestartOperation Before;
+    if (!TestTrue(TEXT("Maya requests restart for revision 3"), Old.Send(Request))
+        || !Old.PrepareRestart(*this, 3)
+        || !TestTrue(TEXT("the prepared permit waits on the old TCP"), WaitForUnsentPermit(F, Old.SessionId, Before)))
+    {
+        return false;
+    }
+    TestEqual(TEXT("the original coordination deadline is five seconds"), Before.CoordinationDeadline, 105.0);
+    TestEqual(TEXT("the original operation deadline is 32 seconds"), Before.OperationDeadline, 132.0);
+
+    FMtoURestartTestAccess::Clock(*F.Source, 101.0);
+    int32 Handled = FMtoURestartTestAccess::HandledMessages(*F.Source);
+    // Observe worker dispatch before pumping the game thread or releasing the permit.
+    if (!TestTrue(TEXT("Maya resends the identical request on the same TCP"), Old.Send(Request))
+        || !TestTrue(TEXT("the worker handles the duplicate request"), WaitForRestartMessages(*F.Source, ++Handled)))
+    {
+        return false;
+    }
+    const auto CheckPermit = [&](const TCHAR* Description)
+    {
+        const auto After = FMtoURestartTestAccess::Operation(*F.Source);
+        TestTrue(Description, After.Phase == FMtoURestartOperation::EPhase::Permitted
+            && After.Token == Before.Token && After.bStatePending && !After.bPermitDelivered
+            && After.bRecovered && !After.bNeedsCleanup);
+        TestEqual(TEXT("the requested Maya revision is unchanged"), After.SourceRevision, 3);
+        TestEqual(TEXT("Maya preparation is unchanged"), After.PreparedRevision, 3);
+        TestEqual(TEXT("the old session still owns permission"), After.OldSession, Before.OldSession);
+        TestEqual(TEXT("the old session still owns coordination"), After.ActiveSession, Before.ActiveSession);
+        TestEqual(TEXT("the coordination deadline is unchanged"), After.CoordinationDeadline, Before.CoordinationDeadline);
+        TestEqual(TEXT("the operation deadline is unchanged"), After.OperationDeadline, Before.OperationDeadline);
+    };
+    CheckPermit(TEXT("the identical Maya request preserves the prepared permit"));
+    if (!TestTrue(TEXT("Maya repeats an already covered revision"), Old.Send(Old.RestartRequest(2)))
+        || !TestTrue(TEXT("the worker handles the older request"), WaitForRestartMessages(*F.Source, ++Handled)))
+    {
+        return false;
+    }
+    CheckPermit(TEXT("the older Maya request preserves the prepared permit"));
+
+    FMtoURestartTestAccess::HoldPermit(*F.Source, false);
+    TSharedPtr<FJsonObject> State;
+    if (!TestTrue(TEXT("Maya receives the original permit without sending another prepared"),
+            Old.ReadReply(TEXT("restart_state"), State) && State->GetStringField(TEXT("state")) == TEXT("permitted")))
+    {
+        return false;
+    }
+    const FString Token = State->GetStringField(TEXT("restart_token"));
+    TestEqual(TEXT("the original token reaches Maya"), Token, Before.Token);
+    if (!TestTrue(TEXT("the old TCP closes after permission"), Old.PeerClosed())) { return false; }
+    Old.Drop();
+
+    FMtoUSessionEndMaya Next(F);
+    if (!Next.SendGreeting(*this, Token) || !Next.ReceiveGreeting(*this)
+        || !TestTrue(TEXT("the replacement has its own session"), Next.SessionId > Old.SessionId)
+        || !TestTrue(TEXT("the replacement TCP receives a request naming the closed session"), Next.Send(Old.RestartRequest(99)))
+        || !TestTrue(TEXT("the replacement TCP repeats an already covered revision"), Next.Send(Next.RestartRequest(3)))
+        || !TestTrue(TEXT("the worker reaches the replacement session request"), WaitForRestartMessages(*F.Source, ++Handled)))
+    {
+        return false;
+    }
+    const auto Reconnecting = FMtoURestartTestAccess::Operation(*F.Source);
+    TestTrue(TEXT("covered requests leave the replacement in Reconnecting"),
+        Reconnecting.Phase == FMtoURestartOperation::EPhase::Reconnecting);
+    TestEqual(TEXT("the old session request did not contaminate the revision"), Reconnecting.SourceRevision, 3);
+    TestEqual(TEXT("the old session did not retake ownership"), Reconnecting.ActiveSession, static_cast<uint64>(Next.SessionId));
+    if (!Next.Negotiate(*this)
+        || !TestTrue(TEXT("the original permit brings the replacement to Ready"), PollUntil([&]()
+        {
+            return FMtoURestartTestAccess::Operation(*F.Source).Phase == FMtoURestartOperation::EPhase::Ready;
+        }, 2.0))
+        || !TestTrue(TEXT("Maya repeats the covered revision after Ready"), Next.Send(Next.RestartRequest(3)))
+        || !TestTrue(TEXT("the worker handles the Ready duplicate"), WaitForRestartMessages(*F.Source, ++Handled)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the duplicate leaves the replacement Ready"),
+        FMtoURestartTestAccess::Operation(*F.Source).Phase == FMtoURestartOperation::EPhase::Ready);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartNewerRequestDuringPermitSendTest,
+    "MtoULiveLink.Source.Restart.NewerRequestDuringPermitSend",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURestartNewerRequestDuringPermitSendTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    FMtoUSessionEndMaya Old(F);
+    if (!Old.Connect(*this, true)) { return false; }
+    FMtoURestartTestAccess::Clock(*F.Source, 200.0);
+    FMtoURestartTestAccess::HoldPermit(*F.Source, true);
+    FMtoURestartOperation Before;
+    if (!TestTrue(TEXT("Maya requests restart for revision 3"), Old.Send(Old.RestartRequest(3)))
+        || !Old.PrepareRestart(*this, 3)
+        || !TestTrue(TEXT("the revision 3 permit waits on the old TCP"), WaitForUnsentPermit(F, Old.SessionId, Before)))
+    {
+        return false;
+    }
+
+    FMtoURestartTestAccess::Clock(*F.Source, 201.0);
+    const int32 Handled = FMtoURestartTestAccess::HandledMessages(*F.Source);
+    if (!TestTrue(TEXT("Maya requests newer revision 4"), Old.Send(Old.RestartRequest(4)))
+        || !TestTrue(TEXT("Maya repeats stale preparation"), Old.SendPrepared(3))
+        || !TestTrue(TEXT("the worker handles the newer request and stale preparation"),
+            WaitForRestartMessages(*F.Source, Handled + 2)))
+    {
+        return false;
+    }
+    F.Pump();
+    const auto Waiting = FMtoURestartTestAccess::Operation(*F.Source);
+    TestTrue(TEXT("the newer request revokes the old permit and waits for preparation"),
+        Waiting.Phase == FMtoURestartOperation::EPhase::Ending && Waiting.Token.IsEmpty()
+        && Waiting.SourceRevision == 4 && Waiting.PreparedRevision == 0);
+    TestEqual(TEXT("the newer request keeps the coordination deadline"), Waiting.CoordinationDeadline, Before.CoordinationDeadline);
+    TestEqual(TEXT("the newer request keeps the whole operation deadline"), Waiting.OperationDeadline, Before.OperationDeadline);
+
+    FMtoURestartOperation After;
+    if (!Old.PrepareRestart(*this, 4)
+        || !TestTrue(TEXT("the latest preparation earns a new permit"), WaitForUnsentPermit(F, Old.SessionId, After)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the new token covers only revision 4"),
+        After.Token != Before.Token && After.PreparedRevision == 4 && After.SourceRevision == 4);
+    TestEqual(TEXT("the new permit keeps the coordination deadline"), After.CoordinationDeadline, Before.CoordinationDeadline);
+    TestEqual(TEXT("the new permit keeps the whole operation deadline"), After.OperationDeadline, Before.OperationDeadline);
+
+    FMtoURestartTestAccess::HoldPermit(*F.Source, false);
+    TSharedPtr<FJsonObject> State;
+    if (!TestTrue(TEXT("only the new permit reaches Maya"), Old.ReadReply(TEXT("restart_state"), State)
+            && State->GetStringField(TEXT("state")) == TEXT("permitted")
+            && State->GetStringField(TEXT("restart_token")) == After.Token)
+        || !TestTrue(TEXT("the old TCP closes after the new permit"), Old.PeerClosed()))
+    {
+        return false;
+    }
+    Old.Drop();
+    FMtoUSessionEndMaya Next(F);
+    return Next.SendGreeting(*this, After.Token) && Next.ReceiveGreeting(*this) && Next.Negotiate(*this);
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartRefreshDuringPermitCloseTest,

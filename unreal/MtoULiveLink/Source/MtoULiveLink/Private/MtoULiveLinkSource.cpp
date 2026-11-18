@@ -1496,11 +1496,8 @@ uint32 FMtoULiveLinkSource::Run()
                         FScopeLock Lock(&RestartMutex);
                         if (MessageType == TEXT("restart_request"))
                         {
-                            const bool bRepeatedReadyRequest = Restart.Phase == FMtoURestartOperation::EPhase::Ready
-                                && Restart.ActiveSession == ActiveSession && Message.SourceRevision <= Restart.SourceRevision;
-                            if (bHelloReceived && !bRepeatedReadyRequest && Restart.Begin(ActiveSession, RestartNow()))
+                            if (bHelloReceived && Restart.RequestFromMaya(ActiveSession, Message.SourceRevision, RestartNow()))
                             {
-                                Restart.SourceRevision = FMath::Max(Restart.SourceRevision, Message.SourceRevision);
                                 bRestartStatusDirty = true;
                             }
                         }
@@ -1523,6 +1520,9 @@ uint32 FMtoULiveLinkSource::Run()
                             Restart.Stop(Message.Code, Message.Detail);
                             bRestartStatusDirty = true;
                         }
+#if WITH_DEV_AUTOMATION_TESTS
+                        RestartTestHandledMessages.IncrementExchange();
+#endif
                         continue;
                     }
                     {

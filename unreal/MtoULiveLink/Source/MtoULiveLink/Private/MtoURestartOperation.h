@@ -50,6 +50,15 @@ struct FMtoURestartOperation
         Token.Reset();
         return true;
     }
+    bool RequestFromMaya(uint64 Session, int32 Revision, double Now)
+    {
+        // The operation carries the covered revision across its automatic
+        // transports. Repeats must leave the preparation and permit intact.
+        if ((ActiveSession == Session && Revision <= SourceRevision) || !Begin(Session, Now)) { return false; }
+        SourceRevision = Revision;
+        PreparedRevision = 0;
+        return true;
+    }
     void Stop(const FString& InCode, const FString& InDetail)
     {
         // Preserve the first observed concrete reason; timeout and EOF cannot
