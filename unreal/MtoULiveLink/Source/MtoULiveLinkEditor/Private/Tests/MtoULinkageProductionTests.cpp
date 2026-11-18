@@ -1223,6 +1223,17 @@ private:
             }
             return true;
         });
+        if (Scenario == TEXT("composition_reconnect"))
+        {
+            const TArray<TSharedPtr<FJsonValue>>* Swaps = nullptr;
+            if (!HasSecondary() || !Fixture->TryGetArrayField(TEXT("composition_swaps"), Swaps) || Swaps->IsEmpty())
+            {
+                Test->AddError(TEXT("composition_reconnect requires a secondary object and a composition swap"));
+                return;
+            }
+            AddCompositionSwap((*Swaps)[0]->AsObject(), true);
+            return;
+        }
         if (Scenario == TEXT("remove_secondary") || Scenario == TEXT("ue_remove_secondary"))
         {
             AddRemoval(Scenario, Tag);
@@ -3215,12 +3226,9 @@ private:
     }
 
     /**
-     * Synthetic composition changes of a connected set: each replaces one
-     * object's full body or parts, which must end the whole set; Maya then
-     * connects again with the changed object, and the original composition
-     * is restored and connected the same way. The fixture names the swaps in
-     * `composition_swaps`: `{name, object: "character"|"secondary",
-     * skeletal_mesh?, parts?}`.
+     * Change one object's full body or parts in the transient Binding. Each
+     * edit ends the old set. The next set must reach Ready automatically.
+     * The fixture names each swap's object and skeletal_mesh and/or parts.
      */
     void AddCompositionSwaps()
     {
@@ -3232,35 +3240,67 @@ private:
         Add(TEXT("[swap] dialog stage"), 30.0, [this]() { return SendOnce(TEXT("stage"), FString(), TEXT("composition_swaps")); });
         for (const TSharedPtr<FJsonValue>& Value : *Swaps)
         {
-            const TSharedPtr<FJsonObject> Swap = Value->AsObject();
-            const FString Name = Swap->GetStringField(TEXT("name"));
-            const bool bSecondary = Swap->GetStringField(TEXT("object")) == SecondaryObjectId;
-            Add(FString::Printf(TEXT("[swap] %s ends the set"), *Name), 120.0, [this, Swap, Name, bSecondary]()
+            AddCompositionSwap(Value->AsObject(), false);
+        }
+    }
+
+    int32 MayaAttempts() const
+    {
+        const TArray<TSharedPtr<FJsonValue>>* Attempts = nullptr;
+        return MayaResult && MayaResult->TryGetArrayField(TEXT("connection_attempts"), Attempts) ? Attempts->Num() : 0;
+    }
+
+    void AddCompositionSwap(const TSharedPtr<FJsonObject>& Swap, bool bDuringLinkage)
+    {
+        const FString Name = Swap->GetStringField(TEXT("name"));
+        const bool bSecondary = Swap->GetStringField(TEXT("object")) == SecondaryObjectId;
+        for (const bool bApply : {true, false})
+        {
+            const FString Label = FString::Printf(TEXT("[swap] %s %s"), *Name,
+                bApply ? TEXT("applied") : TEXT("restored"));
+            Add(Label + TEXT(": end the old set"), 40.0, [this, Swap, bSecondary, bApply]()
             {
-                return ChangeComposition(Swap, bSecondary, Name, true);
+                return ChangeComposition(Swap, bSecondary, bApply);
             });
-            Add(FString::Printf(TEXT("[swap] %s connects again"), *Name), 600.0, [this, Name]()
+            Add(Label + TEXT(": both objects automatically negotiate realtime"), 40.0,
+                [this, Label, bCheckRestore = bApply && bDuringLinkage]()
             {
-                return ReconnectSet(TEXT("[swap] ") + Name + TEXT(" changed"));
-            });
-            Add(FString::Printf(TEXT("[swap] %s restored ends the set"), *Name), 120.0, [this, Swap, Name, bSecondary]()
-            {
-                return ChangeComposition(Swap, bSecondary, Name, false);
-            });
-            Add(FString::Printf(TEXT("[swap] %s restored connects again"), *Name), 600.0, [this, Name]()
-            {
-                return ReconnectSet(TEXT("[swap] ") + Name + TEXT(" restored"));
+                const FMtoULinkageView View = MtoUGetLinkageView();
+                if (!SetConnected() || View.Identity.SessionId == 0 || View.Identity.SessionId == SwapSession
+                    || View.Mode != TEXT("realtime") || View.bTakeoverHeld || View.bTransitioning)
+                {
+                    return false;
+                }
+                Test->TestEqual(*(Label + TEXT(": the new set has both objects")), NegotiatedObjects(), 2);
+                Test->TestEqual(*(Label + TEXT(": exactly one automatic Maya attempt")), MayaAttempts(), SwapAttempts + 1);
+                if (bCheckRestore)
+                {
+                    bool bCamera = true;
+                    MayaResult->TryGetBoolField(TEXT("link_camera_exists"), bCamera);
+                    Test->TestFalse(*(Label + TEXT(": the old Maya linkage camera is gone")), bCamera);
+                    Test->TestTrue(*(Label + TEXT(": Maya restored its time")),
+                        FMath::IsNearlyEqual(MayaResult->GetNumberField(TEXT("maya_time")), MayaTimeBefore, 1e-4));
+                    Test->TestEqual(*(Label + TEXT(": Maya restored its panel camera")),
+                        MayaResult->GetStringField(TEXT("panel_camera")), MayaCameraBefore);
+                    Test->TestTrue(*(Label + TEXT(": the old Sequencer writers are unmuted")),
+                        WritersMuted(false, Label));
+                }
+                Log(FString::Printf(TEXT("%s: old set %d ended, both objects ready on %d; attempts %d -> %d"),
+                    *Label, SwapSession, View.Identity.SessionId, SwapAttempts, MayaAttempts()));
+                return true;
             });
         }
     }
 
     /** Applies one swap (or puts the original back) and waits for the set to end. */
-    bool ChangeComposition(const TSharedPtr<FJsonObject>& Swap, bool bSecondary, const FString& Name, bool bApply)
+    bool ChangeComposition(const TSharedPtr<FJsonObject>& Swap, bool bSecondary, bool bApply)
     {
         AMtoULiveLinkActor* Owner = bSecondary ? SecondaryActor.Get() : Actor.Get();
         UMtoULiveLinkBinding* Target = bSecondary ? SecondaryBinding.Get() : Binding.Get();
         if (RefusalPhase == 0)
         {
+            SwapAttempts = MayaAttempts();
+            SwapSession = MtoUGetLinkageView().Identity.SessionId;
             if (bApply)
             {
                 SavedMesh = Target->SkeletalMesh;
@@ -3296,7 +3336,12 @@ private:
             RefusalPhase = 1;
             return false;
         }
-        return SetEnded(FString::Printf(TEXT("[swap] %s %s"), *Name, bApply ? TEXT("applied") : TEXT("restored")));
+        if (Actor->IsInLiveLinkSet() || SecondaryActor->IsInLiveLinkSet())
+        {
+            return false;
+        }
+        RefusalPhase = 0;
+        return true;
     }
 
     /** The changed object ends the whole set: neither actor stays connected, and Maya finished tearing its session down. */
@@ -4544,8 +4589,6 @@ private:
                  {TEXT("set_refusals"), TEXT("ANCHOR_MISMATCH")},
                  {TEXT("wrong_skeleton"), TEXT("SKELETON_MISMATCH")},
                  {TEXT("wrong_skeleton"), TEXT("BLENDSHAPE_MISMATCH")},
-                 {TEXT("composition_swaps"), TEXT("STREAM_INTERRUPTED")},
-                 {TEXT("composition_swaps"), TEXT("BLENDSHAPE_MISMATCH")},
                  {TEXT("arms"), TEXT("STREAM_INTERRUPTED")},
                  {TEXT("arms"), TEXT("BLENDSHAPE_MISMATCH")},
                  {TEXT("set_injections"), TEXT("INVALID_MESSAGE")},
@@ -4610,6 +4653,7 @@ private:
     bool bMayaStarted = false;
     // The composition a swap replaced, put back afterwards.
     TObjectPtr<USkeletalMesh> SavedMesh;
+    int32 SwapSession = 0, SwapAttempts = 0;
     TStrongObjectPtr<USkeletalMesh> ArmsMesh, FullBodyMesh;
     TArray<FName> ArmsRequired, FullRequired;
     struct FRequiredBones

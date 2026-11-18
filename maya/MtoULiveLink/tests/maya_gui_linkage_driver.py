@@ -24,6 +24,12 @@ scene's own animation supplies the Morph oracle without test keys) and
 ``allow_scene_load_warnings`` and ``start_frame`` (Maya's time before the
 first connect). Joint names match without namespaces.
 
+For the reconnect workflow, ``legacy_display`` names the existing Display node
+and ``legacy_enum`` its clothing attribute. The driver captures its legacy label
+before removing the Display naming and enum-label conventions in memory.
+``secondary_root`` names the alternate role in a subject exit. The value
+``new_joint`` creates a disposable skinned root in the open scene.
+
 Optional ``secondary`` sets the second object before the first connect, from
 the same selection the 对象配对 window reads: ``root``, optional ``display``,
 ``oracle_joints``, ``keyed_joints`` and ``morph_namespace`` with the meanings
@@ -49,7 +55,11 @@ Python threads, open sockets, ``MtoU_*`` nodes and MtoU windows),
 then set the role and connect), ``new_scene``, ``reopen_scene`` (the fixture
 scene again, then connect), ``lock_link_camera`` (``target`` ``unlock``
 unlocks and deletes it), ``quit``. Each runs the handler of the panel control
-it names. The result file always carries the latest linkage status, the
+it names. Reconnect commands include ``blendshapes`` (``enabled``),
+``set_attrs`` (``edits``, each with ``plug`` and ``value``), ``undo``, ``redo``,
+and ``set_role`` (``target`` ``primary``/``alternate``).
+The result file includes the session identity, worker attempts, panel state
+history, captured mesh paths and revision, the latest linkage status, the
 object set and the panel's workflow, mode, cache state, status line and
 ``controls`` (whether 进入联动, 返回实时, 结束预览, 实时预览, 缓存播放 and
 捕获并上传 are enabled); ``ack`` names the last finished command.
@@ -67,6 +77,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -91,6 +102,68 @@ RESULT = {"phase": "starting", "ok": True, "ack": -1, "dialogs": [], "errors": [
           "prefs": maya_prefs_template.describe(cmds.internalVar(userPrefDir=True),
                                                 os.environ.get("MAYA_APP_DIR", ""))}
 STARTED = time.time()
+ATTEMPTS = []
+ATTEMPT_LOCK = threading.Lock()
+
+
+def install_session_census():
+    """Count every transport worker, including failed and automatic starts."""
+    from mtou_livelink.session import SenderWorker
+    run_worker = SenderWorker.run
+
+    def run(worker):
+        with ATTEMPT_LOCK:
+            ATTEMPTS.append({"seconds": time.perf_counter(),
+                             "stage": RESULT.get("stage", "startup")})
+        return run_worker(worker)
+
+    SenderWorker.run = run
+
+
+def attach_panel_census():
+    """Read the actual panel when its status changes, even between driver ticks."""
+    set_text = CONTROLLER._set_text
+
+    def observed(control, value):
+        set_text(control, value)
+        if control and control == CONTROLLER._status_text:
+            record_connection()
+
+    CONTROLLER._set_text = observed
+
+
+def record_connection():
+    session = CONTROLLER._session
+    diagnostic = getattr(CONTROLLER, "_last_diagnostic", None) or {}
+    record = {
+        "stage": RESULT.get("stage", "startup"),
+        "ready": CONTROLLER._session_ready() if session is not None else False,
+        "open": session is not None,
+        "session_id": CONTROLLER._session_id_of(session),
+        "reconnecting": getattr(CONTROLLER, "_restart", None) is not None,
+        "code": diagnostic.get("code"),
+        "status": cmds.text(CONTROLLER._status_text, query=True, label=True)
+        if CONTROLLER._status_text and cmds.text(CONTROLLER._status_text, exists=True) else None,
+    }
+    history = RESULT.setdefault("connections", [])
+    if not history or any(history[-1][key] != value for key, value in record.items()):
+        history.append(dict(record, seconds=time.perf_counter()))
+    with ATTEMPT_LOCK:
+        RESULT["connection_attempts"] = list(ATTEMPTS)
+
+
+def capture_record():
+    from mtou_livelink.scene import CharacterSceneError
+    scene = CONTROLLER._scene
+    if scene is None:
+        return None
+    try:
+        captured = scene.snapshot()
+    except CharacterSceneError:
+        return None
+    return {"root": captured.root, "display": scene._display_path,
+            "outfit": captured.outfit, "mesh_paths": captured.mesh_paths,
+            "revision": captured.revision, "curves": captured.curve_names}
 
 
 def write_result():
@@ -510,6 +583,7 @@ def open_panel():
     if CONTROLLER is not None:
         TOOL_SCRIPT_JOBS.update(CONTROLLER._script_jobs)
     CONTROLLER = MtoULiveLink.run()
+    attach_panel_census()
     connect_role()
 
 
@@ -521,6 +595,46 @@ def reopen_scene():
     if "start_frame" in FIXTURE:
         cmds.currentTime(float(FIXTURE["start_frame"]), update=True)
     connect_role()
+
+
+def prepare_root_only():
+    """Keep the rig's outfit connections while removing legacy discovery conventions."""
+    display = FIXTURE["legacy_display"]
+    attribute = FIXTURE["legacy_enum"]
+    if not cmds.objExists(display + "." + attribute):
+        raise ValueError("missing legacy Display enum " + display + "." + attribute)
+    connect_role(connect=False)
+    RESULT["legacy_capture"] = capture_record()
+    renamed = cmds.rename(display, "MtoU_ClothingContext")
+    labels = cmds.attributeQuery(attribute, node=renamed, listEnum=True)[0].split(":")
+    cmds.addAttr(renamed + "." + attribute, edit=True,
+                 enumName=":".join("Option" + str(index) for index in range(len(labels))))
+
+
+def edit_attrs(edits):
+    """One Maya undoable edit, with fixture prerequisites checked before mutation."""
+    for edit in edits:
+        if not cmds.objExists(edit["plug"]) or not cmds.getAttr(edit["plug"], settable=True):
+            raise ValueError("cannot edit fixture plug " + edit["plug"])
+    cmds.undoInfo(openChunk=True, chunkName="MtoU GUI acceptance")
+    try:
+        for edit in edits:
+            cmds.setAttr(edit["plug"], edit["value"])
+    finally:
+        cmds.undoInfo(closeChunk=True)
+
+
+def alternate_root():
+    root = FIXTURE["secondary_root"]
+    if root != "new_joint":
+        return root
+    root = "|MtoU_AlternateRoot"
+    if not cmds.objExists(root):
+        cmds.select(clear=True)
+        cmds.joint(name=root[1:])
+        mesh = cmds.polyCube(name="MtoU_AlternateMesh")[0]
+        cmds.skinCluster(root, mesh, toSelectedBones=True)
+    return root
 
 
 def connect_role(connect=True):
@@ -556,7 +670,14 @@ def run_command(command):
         CONTROLLER.show_diagnostics()
         grab_windows(command.get("name", "panel"))
     elif action == "time":
-        cmds.currentTime(float(command["frame"]), update=True)
+        preserve = command.get("preserve_undo") and cmds.undoInfo(query=True, state=True)
+        if preserve:
+            cmds.undoInfo(stateWithoutFlush=False)
+        try:
+            cmds.currentTime(float(command["frame"]), update=True)
+        finally:
+            if preserve:
+                cmds.undoInfo(stateWithoutFlush=True)
         RESULT["time_evaluated"] = {"frame": cmds.currentTime(query=True),
                                     "seconds": time.perf_counter()}
     elif action == "disconnect":
@@ -569,6 +690,20 @@ def run_command(command):
     elif action == "workflow":
         # The 动画／模型 tab buttons' own handler.
         CONTROLLER._on_workflow_changed(command["target"])
+    elif action == "blendshapes":
+        cmds.checkBox(CONTROLLER._bs_checkbox, edit=True, value=command["enabled"])
+        CONTROLLER._on_blendshapes_toggled()
+    elif action == "set_attrs":
+        edit_attrs(command["edits"])
+    elif action in ("undo", "redo"):
+        name = cmds.undoInfo(query=True, **{action + "Name": True})
+        if name != "MtoU GUI acceptance":
+            raise RuntimeError("next Maya %s is not the test edit: %s" % (action, name))
+        {"undo": cmds.undo, "redo": cmds.redo}[action]()
+    elif action == "set_role":
+        root = alternate_root() if command["target"] == "alternate" else FIXTURE["root"]
+        cmds.select(root, replace=True)
+        CONTROLLER.set_role()
     elif action == "mode":
         # The 实时预览／缓存播放 buttons' own handler.
         from mtou_livelink import controller as panel
@@ -679,6 +814,9 @@ def tick():
         RESULT["connected"] = CONTROLLER._session is not None and CONTROLLER._session_ready()
         # 连接 does nothing while an ending session is still being torn down.
         RESULT["session_open"] = CONTROLLER._session is not None
+        record_connection()
+        if FIXTURE.get("legacy_display"):
+            RESULT["capture"] = capture_record()
         RESULT["maya_time"] = cmds.currentTime(query=True)
         RESULT["link_camera_exists"] = bool(cmds.objExists("MtoU_LinkCamera"))
         RESULT["panel_camera"] = (camera_record() or {}).get("camera")
@@ -730,8 +868,14 @@ def start():
         key_test_motion()
         key_test_morphs()
         install_callback_census()
+        install_session_census()
         import MtoULiveLink
         CONTROLLER = MtoULiveLink.run()
+        attach_panel_census()
+        if FIXTURE.get("legacy_display"):
+            prepare_root_only()
+        if FIXTURE.get("initial_edits"):
+            edit_attrs(FIXTURE["initial_edits"])
         RESULT["phase"] = "panel"
         write_result()
         if "start_frame" in FIXTURE:

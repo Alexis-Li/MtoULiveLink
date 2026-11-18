@@ -275,11 +275,41 @@ For subject replacement or failure, observe the surviving host's reason and
 prove no additional connection attempts occur until an explicit Connect.
 Editor exit/restart needs an external launcher to observe that interval.
 
-Use the existing file-command acknowledgement and component snapshots; extend
-the driver and the fixture together for a control or lifecycle case they do
-not yet exercise. Missing driver coverage or a fixture is an acceptance gap,
-not a passing mock or baseline experiment. Record fixture and preference hashes
-with the executed evidence; keep production scenes and assets unsaved.
+Run `GuiRegression` with `-MtoUGuiWorkflowFixture=<fixtures>/workflow-reconnect.json`
+on `/Engine/Maps/Entry`. The fixture adds a `reconnect` object to the ordinary
+GUI workflow. Set `oracle_frames` to two different displayed poses, `part_name`
+to a compatible part already listed in `parts`, and `incompatible_mesh` to an
+asset from another Skeleton. `failure_code` is the expected diagnostic for
+that negotiation. Each `visibility_cases` and `outfit_cases` entry gives a
+stage name, editable Maya plugs and values in `edits`, and one `present` and
+one `absent` mesh path to check. Visibility cases also specify whether the
+visible set changes in `restarts`. Each outfit edit is repeated through Maya
+Undo and Redo. `maya.legacy_display`, `maya.legacy_enum` and `legacy_outfit`
+describe the rig's original clothing label. The driver keeps its DG
+connections and changes the naming and labels in memory to exercise root-only
+discovery. `maya.initial_edits` sets the initial Template state.
+Use a distinct `maya.secondary_root` for the role change. `new_joint` creates
+a skinned root in the open test scene. `maya.keyed_morphs` names matching
+non-zero Maya and Unreal weights for the displayed-component oracle.
+
+In a two-object `ProductionSequence` fixture, add `composition_reconnect` to
+`scenarios` to apply its first `composition_swaps` entry during linkage.
+The test checks that the old set ends, the Sequencer writers and Maya camera
+and time are restored, and both objects negotiate realtime on a new session.
+The existing `destroy_target` and `close_world` cases exercise subject exits
+during linkage.
+
+Run the separate Editor exit and relaunch with the launcher. It keeps the
+original Maya open across both Editor processes and records the stop reason
+and unchanged Maya attempt count through the restart window.
+
+```text
+python tools/verify_editor_restart.py --editor <UnrealEditor-Cmd> --project <Project.uproject> --fixture <fixtures>/workflow-reconnect.json --evidence <scratch>/editor-restart --port <dedicated-test-port>
+```
+
+Keep production scenes and assets unsaved. Record the run fixture hash and
+Maya preference hash along with the automation report, pose comparisons and
+connection events under the evidence directory.
 
 ### Maya preferences
 
