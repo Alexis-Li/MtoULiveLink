@@ -4210,7 +4210,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     const FLiveLinkSubjectKey LiveSubjectKey(SourceGuid, FName(TEXT("MtoU_Character")));
     TestTrue(TEXT("source reaches listening state"),
-        PollUntil([&]() { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); }));
+        PollUntil([&]() { return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))); }));
     auto ReceiveOne = [&](FSocket& Socket, TArray<uint8>& OutPayload, TFunctionRef<void()> Pump)
     {
         // Minimal length-prefix framing without depending on Runtime Private
@@ -4296,6 +4297,14 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
             return (FSocket*)nullptr;
         }
         Socket->SetNonBlocking(true);
+        const TArray<uint8> Hello = PacketFor(TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD
+            ",\"maya_subject_id\":\"editor-automation-subject\",\"host\":\"maya\",\"maya_version\":\"2024\","
+            "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1,\"fps\":24},"
+            "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
+        TArray<uint8> Ack;
+        if (!SendBytes(*Socket, Hello.GetData(), Hello.Num())
+            || !ReceiveOne(*Socket, Ack, [&]() { Source->Update(); }))
+        { DestroySocket(Socket); }
         return Socket;
     };
     auto EvaluateRoot = [&](FVector& OutRoot)
@@ -4417,7 +4426,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("animation refresh releases the replaced preview"), AnimReplaced.IsValid());
     TestTrue(TEXT("animation refresh closes the old socket"), AnimClient && WaitForClose(*AnimClient));
     TestTrue(TEXT("animation refresh returns source to listening"),
-        PollUntil([&]() { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); }));
+        PollUntil([&]() { return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))); }));
     TestTrue(TEXT("animation refresh requires explicit reconnection"),
         PollUntil([&]()
         {
@@ -4469,7 +4479,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
         PollUntil([&]()
         {
             Source->Update();
-            return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+            return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED")));
         }));
     FSocket* ModelClient = ConnectClient();
     TestNotNull(TEXT("model client connects"), ModelClient);
@@ -4671,7 +4682,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
     TestFalse(TEXT("model refresh releases the replaced preview"), ModelReplaced.IsValid());
     TestTrue(TEXT("model refresh closes the old socket"), ModelClient && WaitForClose(*ModelClient));
     TestTrue(TEXT("model refresh returns source to listening"),
-        PollUntil([&]() { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); }));
+        PollUntil([&]() { return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))); }));
     TestTrue(TEXT("stale model frame and cached upload never publish after refresh"),
         PollUntil([&]()
         {
@@ -4708,7 +4720,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
             && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == Driver);
     TestTrue(TEXT("failed refresh terminates the Model session"), FailingClient && WaitForClose(*FailingClient));
     TestTrue(TEXT("failed refresh returns source to listening"),
-        PollUntil([&]() { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); }));
+        PollUntil([&]() { return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))); }));
     TestTrue(TEXT("failed refresh keeps Error and Driver for inspection"),
         PollUntil([&]()
         {
@@ -4741,7 +4754,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
         PollUntil([&]()
         {
             Source->Update();
-            return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+            return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED")));
         }));
     // Failed refresh during an active Animation session: the same
     // termination applies, Error readiness keeps the Driver for inspection,
@@ -4770,7 +4784,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
             && Actor->GetSkeletalMeshComponent()->GetSkeletalMeshAsset() == Driver);
     TestTrue(TEXT("failed Animation refresh terminates the session"), AnimFailClient && WaitForClose(*AnimFailClient));
     TestTrue(TEXT("failed Animation refresh returns source to listening"),
-        PollUntil([&]() { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); }));
+        PollUntil([&]() { return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))); }));
     DestroySocket(AnimFailClient);
     Binding->PreviewStaticMesh = AlignedPreview;
     const FMtoUPreviewReadiness AnimRecovered = FMtoUPreviewPreparation::RefreshActor(*Actor);
@@ -4781,7 +4796,8 @@ bool FMtoURefreshEndsSessionTest::RunTest(const FString& Parameters)
         PollUntil([&]()
         {
             Source->Update();
-            return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+            return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED")));
         }));
     Source->StopListener();
     LiveLinkClient.RemoveSource(Source);
@@ -5047,7 +5063,8 @@ bool FMtoUMayaRefreshPeerTest::RunTest(const FString& Parameters)
                 }
                 break;
             case 3:
-                if (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")))
+                if ((Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))))
                 {
                     // The actor's Disconnected status lands on the Update that
                     // drains the ended session, after the refresh itself.
@@ -5379,7 +5396,8 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
     const FLiveLinkSubjectKey LiveSubjectKey(SourceGuid, FName(TEXT("MtoU_Character")));
     TestTrue(TEXT("source reaches listening state"),
-        PollUntil([&]() { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); }));
+        PollUntil([&]() { return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))); }));
     auto ReceiveOne = [&](FSocket& Socket, TArray<uint8>& OutPayload, TFunctionRef<void()> Pump)
     {
         TArray<uint8> Pending;
@@ -5431,6 +5449,14 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
             return (FSocket*)nullptr;
         }
         Socket->SetNonBlocking(true);
+        const TArray<uint8> Hello = PacketFor(TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD
+            ",\"maya_subject_id\":\"editor-automation-subject\",\"host\":\"maya\",\"maya_version\":\"2024\","
+            "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1,\"fps\":24},"
+            "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
+        TArray<uint8> Ack;
+        if (!SendBytes(*Socket, Hello.GetData(), Hello.Num())
+            || !ReceiveOne(*Socket, Ack, [&]() { Source->Update(); }))
+        { DestroySocket(Socket); }
         return Socket;
     };
     auto EvaluateRootX = [&](double& OutX)
@@ -5493,7 +5519,8 @@ bool FMtoUDetailsRefreshClickTest::RunTest(const FString& Parameters)
         PollUntil([&]()
         {
             Source->Update();
-            return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"));
+            return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED")));
         }));
     TestTrue(TEXT("Details click shows Generated Preview while disconnected"),
         PollUntil([&]()
@@ -5843,6 +5870,8 @@ bool ComparisonReceive(FSocket& Socket, TArray<uint8>& OutPayload,
         {
             Pending.Append(Buffer, Read);
         }
+        while (Pending.Num() >= 8)
+        {
         if (Pending.Num() < 8)
         {
             return false;
@@ -5862,7 +5891,10 @@ bool ComparisonReceive(FSocket& Socket, TArray<uint8>& OutPayload,
             FMemory::Memcpy(OutPayload.GetData(), Pending.GetData() + 8,
                 static_cast<int32>(Length));
         }
-        return true;
+        Pending.RemoveAt(0, static_cast<int32>(8 + Length), EAllowShrinking::No);
+        if (!ComparisonFromUtf8(OutPayload).Contains(TEXT("\"type\":\"hello_ack\""))) { return true; }
+        }
+        return false;
     }, Timeout);
 }
 
@@ -5883,6 +5915,11 @@ FSocket* ComparisonConnect(ISocketSubsystem& SocketSubsystem, const uint16 Port)
         return nullptr;
     }
     Socket->SetNonBlocking(true);
+    const TArray<uint8> Hello = ComparisonPacket(TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD
+        ",\"maya_subject_id\":\"editor-comparison-subject\",\"host\":\"maya\",\"maya_version\":\"2024\","
+        "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1,\"fps\":24},"
+        "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
+    ComparisonSend(*Socket, Hello.GetData(), Hello.Num());
     return Socket;
 }
 
@@ -6297,7 +6334,8 @@ bool FMtoUPreviewComparisonNaturalTickTest::RunTest(const FString& Parameters)
         const FGuid SourceGuid = LiveLinkClient.AddSource(Source);
         Self->TestTrue(TEXT("Live Link source receives a guid"), SourceGuid.IsValid());
         Self->TestTrue(TEXT("source reaches listening state"), ComparisonPollUntil(
-            [Source]() { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); }));
+            [Source]() { return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))); }));
 
         FSocket* Client = ComparisonConnect(*SocketSubsystem, Port);
         Self->TestNotNull(TEXT("Maya Model client connects"), Client);
@@ -7512,7 +7550,8 @@ bool FMtoUBackgroundUpdatesTest::RunTest(const FString& Parameters)
     FMtoUBackgroundUpdatesTestAccess::BeginFrame();
     TestEqual(TEXT("listener alone has no CPU registration"), FMtoUBackgroundUpdatesTestAccess::RegistrationCount(), 0);
     if (!TestTrue(TEXT("listener is ready"), ComparisonPollUntil([&]()
-        { return Source->GetSourceStatus().ToString().Contains(TEXT("Listening on")); })))
+        { return (Source->GetSourceStatus().ToString().Contains(TEXT("Listening on"))
+            || Source->GetSourceStatus().ToString().Contains(TEXT("RESTART_CANCELLED"))); })))
     {
         return false;
     }

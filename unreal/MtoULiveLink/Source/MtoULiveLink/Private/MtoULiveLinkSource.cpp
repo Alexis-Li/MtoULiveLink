@@ -87,13 +87,17 @@ bool SendPacket(
     ISocketSubsystem& SocketSubsystem,
     FSocket& Socket,
     const TArray<uint8>& Packet,
-    const TAtomic<bool>& bStopping)
+    const TAtomic<bool>& bStopping,
+    TFunction<bool()> MayContinue = {}, bool* bTimedOut = nullptr)
 {
     int32 Offset = 0;
-    while (Offset < Packet.Num() && !bStopping.Load())
+    const double SendDeadline = FPlatformTime::Seconds() + 5.0;
+    while (Offset < Packet.Num() && !bStopping.Load()
+        && FPlatformTime::Seconds() < SendDeadline && (!MayContinue || MayContinue()))
     {
         int32 Sent = 0;
-        const bool bSent = Socket.Send(Packet.GetData() + Offset, Packet.Num() - Offset, Sent);
+        const bool bSent = Socket.Send(Packet.GetData() + Offset,
+            FMath::Min(Packet.Num() - Offset, ReceiveBufferSize), Sent);
         if (bSent && Sent > 0)
         {
             Offset += Sent;
@@ -109,6 +113,7 @@ bool SendPacket(
                 FTimespan::FromMilliseconds(IdleWaitMilliseconds));
         }
     }
+    if (bTimedOut) { *bTimedOut = Offset < Packet.Num() && FPlatformTime::Seconds() >= SendDeadline; }
     return Offset == Packet.Num();
 }
 
@@ -157,7 +162,7 @@ TWeakPtr<FMtoULiveLinkSource> MtoUGetActiveLinkageSource()
     return GActiveSource;
 }
 
-void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester)
+void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester, EMtoUSessionEndReason Reason)
 {
     check(IsInGameThread());
 #if WITH_DEV_AUTOMATION_TESTS
@@ -168,7 +173,7 @@ void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester)
 #endif
     if (const TSharedPtr<FMtoULiveLinkSource> Source = GActiveSource.Pin())
     {
-        Source->RequestStreamingSessionEnd(Requester);
+        Source->RequestStreamingSessionEnd(Requester, Reason);
     }
 }
 #if WITH_DEV_AUTOMATION_TESTS
@@ -212,7 +217,7 @@ void MtoUNotifyEditorWorldCleanup(UWorld* World, bool bSessionEnded, bool bClean
     {
         if (!It->HasAnyFlags(RF_ClassDefaultObject) && It->GetWorld() == World)
         {
-            MtoURequestStreamingSessionEnd(**It);
+            MtoURequestStreamingSessionEnd(**It, EMtoUSessionEndReason::SubjectChanged);
         }
     }
 }
@@ -272,6 +277,16 @@ bool FMtoULiveLinkSource::RequestLinkageEnter(int32 ModeRevision, FString& OutEr
     // Revalidate mode and revision AFTER queued peer controls, before starting
     // BeginTakeover. Draining from its guard would reenter an in-progress mode.
     LeavesTakenBeforeUpdate += DrainTimeControlsOnGameThread();
+    {
+        FScopeLock Lock(&RestartMutex);
+        if (Restart.IsActive() || (Restart.Phase == FMtoURestartOperation::EPhase::Stopped
+            && Restart.ActiveSession == GameThreadSession))
+        {
+            OutCode = TEXT("LINKAGE_NOT_ACTIVE");
+            OutError = TEXT("The streaming session is ending or reconnecting.");
+            return false;
+        }
+    }
     return LinkageSession.RequestEnter(ModeRevision, OutError, OutCode);
 }
 
@@ -447,6 +462,7 @@ void FMtoULiveLinkSource::Update()
     // The greeting is answered before any object is negotiated, so the intake
     // runs ahead of the init handling and the acknowledgement always reaches
     // the peer before a negotiation reply.
+    TickRestartOnGameThread();
     DrainLinkageHellosOnGameThread();
 
     TArray<FMtoUPendingInit> Inits;
@@ -473,6 +489,11 @@ void FMtoULiveLinkSource::Update()
             break;
         }
     }
+    if (GameThreadSession && !ProtectedSubjects.IsEmpty() && !ValidateSubjectsOnGameThread())
+    {
+        RequestSessionEndOnGameThread(GameThreadSession, EMtoUSessionEndReason::SubjectChanged);
+    }
+    ReflectRestartOnGameThread();
     LeavesTaken += DrainTimeControlsOnGameThread();
     TickCacheOnGameThread();
 
@@ -607,6 +628,7 @@ bool FMtoULiveLinkSource::StartListener()
 
 void FMtoULiveLinkSource::Stop()
 {
+    StopRestart(TEXT("SUBJECT_CHANGED"), TEXT("The Live Link Source stopped."));
     bStopRequested.Store(true);
 }
 
@@ -627,19 +649,20 @@ void FMtoULiveLinkSource::StopListener()
         // reply and without touching the Live Link client, which may be
         // invalid by now. The editor module has already handed the writers
         // back and cleared its hooks when the editor closes.
-        const int32 GreetedSession = LinkageSession.GetSessionId();
+        const int32 ClosingGreeting = LinkageSession.GetSessionId();
         EndStreamingSessionOnGameThread(GameThreadSession, true);
-        if (GreetedSession > 0)
+        if (ClosingGreeting > 0)
         {
-            EndStreamingSessionOnGameThread(static_cast<uint64>(GreetedSession), true);
+            EndStreamingSessionOnGameThread(static_cast<uint64>(ClosingGreeting), true);
         }
         EndedSession = 0;
         CacheSession.EndSession();
         HoldLinkageDisplaysOnGameThread(false);
+        ReflectRestartOnGameThread();
     }
 }
 
-void FMtoULiveLinkSource::RequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester)
+void FMtoULiveLinkSource::RequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester, EMtoUSessionEndReason Reason)
 {
     check(IsInGameThread());
     uint64 Target = 0;
@@ -651,11 +674,24 @@ void FMtoULiveLinkSource::RequestStreamingSessionEnd(const AMtoULiveLinkActor& R
     // that could end a later one.
     if (Target == 0)
     {
+        FScopeLock Lock(&RestartMutex);
+        if (Restart.IsActive() && Reason != EMtoUSessionEndReason::InputChanged
+            && ProtectedSubjects.ContainsByPredicate([&Requester](const FProtectedSubject& Subject)
+                { return Subject.Actor.GetEvenIfUnreachable() == &Requester; }))
+        {
+            Restart.Stop(Reason == EMtoUSessionEndReason::SubjectChanged ? TEXT("SUBJECT_CHANGED")
+                : TEXT("RESTART_CANCELLED"), TEXT("The reconnecting subject ended."));
+            bRestartStatusDirty = true;
+        }
         return;
     }
     // Until the object set is negotiated, any Binding actor may change what
     // the negotiation reads, so any request ends it. Afterwards the session
     // streams its participating actors only; the others come and go freely.
+    if (GreetedSession == Target && !ProtectedSubjects.IsEmpty()
+        && !ProtectedSubjects.ContainsByPredicate([&Requester](const FProtectedSubject& Subject)
+            { return Subject.Actor.GetEvenIfUnreachable() == &Requester; }))
+    { return; }
     const bool bNegotiated = GameThreadSession == Target
         && !SetObjects.IsEmpty()
         && SessionObjects.Num() == SetObjects.Num();
@@ -671,18 +707,32 @@ void FMtoULiveLinkSource::RequestStreamingSessionEnd(const AMtoULiveLinkActor& R
             return;
         }
     }
-    RequestSessionEndOnGameThread(Target);
+    RequestSessionEndOnGameThread(Target, Reason);
 }
 
-void FMtoULiveLinkSource::RequestSessionEndOnGameThread(uint64 SessionId)
+void FMtoULiveLinkSource::RequestSessionEndOnGameThread(uint64 SessionId, EMtoUSessionEndReason Reason)
 {
     check(IsInGameThread());
-    if (SessionId == 0 || SessionId == EndedSession || !IsCurrentSession(SessionId))
-    {
-        return;
-    }
+    if (SessionId == 0 || !IsCurrentSession(SessionId)) { return; }
+    // Record the publication gate before replacing any component or writer.
     EndedSession = SessionId;
-    SessionEndRequests.Enqueue(SessionId);
+    if (Reason == EMtoUSessionEndReason::InputChanged && GreetedSession == SessionId)
+    {
+        FScopeLock Lock(&RestartMutex);
+        Restart.Begin(SessionId, RestartNow());
+        bRestartStatusDirty = true;
+    }
+    else
+    {
+        { FScopeLock Lock(&RestartMutex);
+            if (!Restart.IsActive()) { Restart.ActiveSession = SessionId; Restart.OldSession = SessionId; }
+        }
+        StopRestart(Reason == EMtoUSessionEndReason::SubjectChanged ? TEXT("SUBJECT_CHANGED")
+            : TEXT("RESTART_CANCELLED"), Reason == EMtoUSessionEndReason::Refresh
+                ? TEXT("Explicit Refresh Preview ended the session; connect when it is ready.")
+                : TEXT("The streaming session was explicitly ended."));
+        SessionEndRequests.Enqueue(SessionId);
+    }
 }
 
 void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool bListenerStopped)
@@ -767,6 +817,10 @@ void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool
         // scoped to one negotiated streaming session; a newer connection
         // starts its own fresh sequence at 1.
         CacheSession.EndSession();
+    }
+    { FScopeLock Lock(&RestartMutex);
+        if (Restart.IsActive() || Restart.Phase == FMtoURestartOperation::EPhase::Stopped)
+        { bRestartStatusDirty = true; }
     }
 }
 
@@ -861,6 +915,8 @@ uint32 FMtoULiveLinkSource::Run()
     uint64 SessionCounter = 0;
     uint64 ActiveSession = 0;
     // Every init of the declared set arrives before any other message.
+    bool bHelloReceived = false;
+    bool bHelloReplySent = false;
     bool bInitReceived = false;
     int32 WorkerInitsExpected = 0;
     int32 WorkerInitsReceived = 0;
@@ -882,6 +938,29 @@ uint32 FMtoULiveLinkSource::Run()
     // until then, so queued parsed ownership stays inside the budget.
     TOptional<TArray<uint8>> HeldCacheFrame;
 
+    auto SendWorkerPacket = [&](FSocket& Socket, const TArray<uint8>& Packet)
+    {
+        bool bPhaseTimedOut = false;
+        const bool bSent = SendPacket(*SocketSubsystem, Socket, Packet, bStopRequested,
+            [this, &ActiveSession]()
+            {
+                FScopeLock Lock(&RestartMutex);
+                if (Restart.Expire(RestartNow())) { bRestartStatusDirty = true; }
+                return Restart.Phase != FMtoURestartOperation::EPhase::Stopped
+                    || Restart.ActiveSession != ActiveSession;
+            }, &bPhaseTimedOut);
+        if (bPhaseTimedOut)
+        {
+            FScopeLock Lock(&RestartMutex);
+            if (Restart.IsActive() && Restart.ActiveSession == ActiveSession)
+            {
+                Restart.Stop(TEXT("RESTART_TIMEOUT"), TEXT("Timed out sending restart or negotiation data to Maya."));
+                bRestartStatusDirty = true;
+            }
+        }
+        return bSent;
+    };
+
     auto MarkDisconnected = [&]()
     {
         HeldCacheFrame.Reset();
@@ -894,6 +973,16 @@ uint32 FMtoULiveLinkSource::Run()
         // and queue slots, so each message is taken exactly once.
         if (ActiveSession != 0)
         {
+            {
+                FScopeLock Lock(&RestartMutex);
+                if (Restart.IsActive() && Restart.ActiveSession == ActiveSession
+                    && !(Restart.Phase == FMtoURestartOperation::EPhase::Permitted
+                        && Restart.OldSession == ActiveSession && Restart.bPermitDelivered))
+                {
+                    Restart.Stop(TEXT("RESTART_CANCELLED"), TEXT("The reconnect transport closed unexpectedly; no further attempt will be made."));
+                    bRestartStatusDirty = true;
+                }
+            }
             // Cancel every queued command of the dead session immediately so
             // disconnect or teardown can never leave parsed frames in flight.
             CacheCommands.CancelSession(ActiveSession);
@@ -910,6 +999,8 @@ uint32 FMtoULiveLinkSource::Run()
         }
         CloseSocket(*SocketSubsystem, ClientSocket);
         ActiveSession = 0;
+        bHelloReceived = false;
+        bHelloReplySent = false;
         bInitReceived = false;
         WorkerInitsExpected = 0;
         WorkerInitsReceived = 0;
@@ -920,7 +1011,11 @@ uint32 FMtoULiveLinkSource::Run()
         Decoder = FMtoUFrameDecoder();
         if (!bStopRequested.Load())
         {
-            SetStatus(ListeningStatus);
+            FScopeLock Lock(&RestartMutex);
+            if (Restart.Phase == FMtoURestartOperation::EPhase::Stopped)
+            { SetStatus(Restart.Code + TEXT(": ") + Restart.Detail); }
+            else if (Restart.IsActive()) { SetStatus(TEXT("Reconnecting after inputs changed...")); }
+            else { SetStatus(ListeningStatus); }
         }
     };
 
@@ -928,11 +1023,7 @@ uint32 FMtoULiveLinkSource::Run()
     {
         if (ClientSocket)
         {
-            SendPacket(
-                *SocketSubsystem,
-                *ClientSocket,
-                FMtoUProtocol::EncodeError(Code, Message),
-                bStopRequested);
+            SendWorkerPacket(*ClientSocket, FMtoUProtocol::EncodeError(Code, Message));
         }
         MarkDisconnected();
     };
@@ -943,11 +1034,7 @@ uint32 FMtoULiveLinkSource::Run()
     {
         if (ClientSocket)
         {
-            SendPacket(
-                *SocketSubsystem,
-                *ClientSocket,
-                FMtoUProtocol::EncodeError(Code, Message),
-                bStopRequested);
+            SendWorkerPacket(*ClientSocket, FMtoUProtocol::EncodeError(Code, Message));
         }
     };
 
@@ -987,6 +1074,12 @@ uint32 FMtoULiveLinkSource::Run()
                 if (bStopRequested.Load())
                 {
                     return true;
+                }
+                {
+                    FScopeLock Lock(&RestartMutex);
+                    if (Restart.Expire(RestartNow())) { bRestartStatusDirty = true; }
+                    if (Restart.Phase == FMtoURestartOperation::EPhase::Stopped
+                        && Restart.ActiveSession == ActiveSession) { return true; }
                 }
                 FScopeLock Lock(&PendingMutex);
                 return CurrentWorkerSession != ActiveSession;
@@ -1064,6 +1157,60 @@ uint32 FMtoULiveLinkSource::Run()
     while (!bStopRequested.Load())
     {
         bool bDidWork = false;
+        bool bSessionEndCleanupDeferred = false;
+#if WITH_DEV_AUTOMATION_TESTS
+        bSessionEndCleanupDeferred = GDeferStreamingSessionEndCleanup.Load();
+#endif
+        TArray<uint8> RestartPacket;
+        bool bCloseRestartTransport = false;
+        bool bStopRestartTransport = false;
+        {
+            FScopeLock Lock(&RestartMutex);
+            if (Restart.Expire(RestartNow())) { bRestartStatusDirty = true; }
+            if (Restart.ActiveSession == ActiveSession && ActiveSession != 0)
+            {
+                if (Restart.bStatePending && !(bSessionEndCleanupDeferred
+                    && Restart.Phase == FMtoURestartOperation::EPhase::Stopped
+                    && Restart.Code != TEXT("RESTART_TIMEOUT")))
+                {
+                    const FString State = Restart.Phase == FMtoURestartOperation::EPhase::Ending ? TEXT("ending")
+                        : Restart.Phase == FMtoURestartOperation::EPhase::Permitted ? TEXT("permitted")
+                        : Restart.Phase == FMtoURestartOperation::EPhase::Stopped ? TEXT("stopped") : FString();
+                    if (!State.IsEmpty())
+                    {
+                        RestartPacket = FMtoUProtocol::EncodeRestartState(static_cast<int32>(Restart.OldSession),
+                            State, Restart.Code, Restart.Detail, Restart.Token);
+                    }
+                    Restart.bStatePending = false;
+                }
+                bCloseRestartTransport = Restart.Phase == FMtoURestartOperation::EPhase::Permitted
+                    && Restart.OldSession == ActiveSession;
+                bStopRestartTransport = Restart.Phase == FMtoURestartOperation::EPhase::Stopped
+                    && (!bSessionEndCleanupDeferred || Restart.Code == TEXT("RESTART_TIMEOUT"));
+            }
+        }
+        if (ClientSocket && bStopRestartTransport)
+        {
+            // One best-effort nonblocking report: the deadline never waits on
+            // a peer reading the reason. MarkDisconnected releases admission.
+            if (!RestartPacket.IsEmpty())
+            {
+                int32 Sent = 0;
+                ClientSocket->Send(RestartPacket.GetData(), RestartPacket.Num(), Sent);
+            }
+            MarkDisconnected();
+            continue;
+        }
+        if (ClientSocket && !RestartPacket.IsEmpty())
+        {
+            if (!SendWorkerPacket(*ClientSocket, RestartPacket))
+            { MarkDisconnected(); continue; }
+        }
+        if (ClientSocket && bCloseRestartTransport)
+        {
+            { FScopeLock Lock(&RestartMutex); Restart.bPermitDelivered = true; }
+            MarkDisconnected(); continue;
+        }
         // One shared idempotent termination boundary: a Preview revision
         // invalidation or Binding actor lifetime end closes the socket here,
         // and the existing disconnect path performs the Game Thread cleanup.
@@ -1073,10 +1220,6 @@ uint32 FMtoULiveLinkSource::Run()
         // so the synchronous Game Thread publish gate can be proven before
         // any worker close; the requests stay queued, so release still
         // disconnects exactly once.
-        bool bSessionEndCleanupDeferred = false;
-#if WITH_DEV_AUTOMATION_TESTS
-        bSessionEndCleanupDeferred = GDeferStreamingSessionEndCleanup.Load();
-#endif
         if (!bSessionEndCleanupDeferred)
         {
             bool bCloseActiveSession = false;
@@ -1113,21 +1256,30 @@ uint32 FMtoULiveLinkSource::Run()
             {
                 bDidWork = true;
                 Accepted->SetNonBlocking(true);
+#if WITH_DEV_AUTOMATION_TESTS
+                if (const int32 Requested = RestartTestSendBuffer.Load(); Requested > 0)
+                {
+                    int32 Actual = 0;
+                    Accepted->SetSendBufferSize(Requested, Actual);
+                }
+#endif
                 if (ClientSocket)
                 {
-                    SendPacket(
-                        *SocketSubsystem,
-                        *Accepted,
-                        FMtoUProtocol::EncodeError(
+                    SendWorkerPacket(*Accepted, FMtoUProtocol::EncodeError(
                             TEXT("SECOND_CLIENT_REJECTED"),
-                            TEXT("MtoU_LiveLink already has a Maya client.")),
-                        bStopRequested);
+                            TEXT("MtoU_LiveLink already has a Maya client.")));
                     CloseSocket(*SocketSubsystem, Accepted);
                 }
                 else
                 {
                     ClientSocket = Accepted;
                     ActiveSession = ++SessionCounter;
+                    { FScopeLock Lock(&RestartMutex);
+                        if (Restart.Phase == FMtoURestartOperation::EPhase::Permitted)
+                        { Restart.ActiveSession = ActiveSession; }
+                    }
+                    bHelloReceived = false;
+                    bHelloReplySent = false;
                     bInitReceived = false;
                     WorkerInitsExpected = 0;
                     WorkerInitsReceived = 0;
@@ -1161,12 +1313,19 @@ uint32 FMtoULiveLinkSource::Run()
                 {
                     continue;
                 }
+                // The first control reply is the queued hello_ack. It must
+                // establish the peer's session identity even if an input
+                // changed immediately after greeting. All old-stream replies,
+                // especially queued Ready, are discarded behind the fence.
+                const bool bGreetingReply = Reply.bControl && !bHelloReplySent;
+                if (IsRestartBlocked(ActiveSession) && !bGreetingReply) { continue; }
                 bDidWork = true;
-                if (!SendPacket(*SocketSubsystem, *ClientSocket, Reply.Packet, bStopRequested))
+                if (!SendWorkerPacket(*ClientSocket, Reply.Packet))
                 {
                     MarkDisconnected();
                     break;
                 }
+                if (bGreetingReply) { bHelloReplySent = true; }
                 if (Reply.bCloseAfter)
                 {
                     MarkDisconnected();
@@ -1189,6 +1348,19 @@ uint32 FMtoULiveLinkSource::Run()
                     if (Reply.bSetComplete)
                     {
                         bReady = true;
+                        { FScopeLock Lock(&RestartMutex);
+                            if (Restart.Phase == FMtoURestartOperation::EPhase::Reconnecting
+                                && Restart.ActiveSession == ActiveSession)
+                            {
+                                if (Restart.Expire(RestartNow())) { bRestartStatusDirty = true; }
+                                else
+                                {
+                                    Restart.Phase = FMtoURestartOperation::EPhase::Ready;
+                                    Restart.Token.Reset();
+                                    bRestartStatusDirty = true;
+                                }
+                            }
+                        }
                         SetStatus(TEXT("Connected to Maya"));
                     }
                 }
@@ -1264,6 +1436,57 @@ uint32 FMtoULiveLinkSource::Run()
                         break;
                     }
 
+                    if (MessageType == TEXT("restart_request") || MessageType == TEXT("restart_prepared")
+                        || MessageType == TEXT("restart_cancel"))
+                    {
+                        FMtoURestartMessage Message;
+                        FString RestartError, RestartCode;
+                        const bool bParsed = MessageType == TEXT("restart_request")
+                            ? FMtoUProtocol::ParseRestartRequest(Payload, Message, RestartError, &RestartCode)
+                            : MessageType == TEXT("restart_prepared")
+                                ? FMtoUProtocol::ParseRestartPrepared(Payload, Message, RestartError, &RestartCode)
+                                : FMtoUProtocol::ParseRestartCancel(Payload, Message, RestartError, &RestartCode);
+                        if (!bParsed) { SendErrorAndDisconnect(RestartCode, RestartError); break; }
+                        if (static_cast<uint64>(Message.SessionId) != ActiveSession) { continue; }
+                        FScopeLock Lock(&RestartMutex);
+                        if (MessageType == TEXT("restart_request"))
+                        {
+                            const bool bRepeatedReadyRequest = Restart.Phase == FMtoURestartOperation::EPhase::Ready
+                                && Restart.ActiveSession == ActiveSession && Message.SourceRevision <= Restart.SourceRevision;
+                            if (bHelloReceived && !bRepeatedReadyRequest && Restart.Begin(ActiveSession, RestartNow()))
+                            {
+                                Restart.SourceRevision = FMath::Max(Restart.SourceRevision, Message.SourceRevision);
+                                bRestartStatusDirty = true;
+                            }
+                        }
+                        else if (MessageType == TEXT("restart_prepared"))
+                        {
+                            if (Restart.Phase == FMtoURestartOperation::EPhase::Ending
+                                && Restart.OldSession == ActiveSession
+                                && Message.SourceRevision >= Restart.SourceRevision)
+                            { Restart.SourceRevision = Message.SourceRevision; Restart.PreparedRevision = Message.SourceRevision; }
+                        }
+                        else if (bHelloReceived && (Restart.Phase != FMtoURestartOperation::EPhase::Stopped
+                            || Restart.ActiveSession == ActiveSession))
+                        {
+                            if (!Restart.IsActive())
+                            {
+                                Restart.OldSession = ActiveSession;
+                                Restart.ActiveSession = ActiveSession;
+                                Restart.bNeedsCleanup = true;
+                            }
+                            Restart.Stop(Message.Code, Message.Detail);
+                            bRestartStatusDirty = true;
+                        }
+                        continue;
+                    }
+                    {
+                        FScopeLock Lock(&RestartMutex);
+                        if (!bSessionEndCleanupDeferred && Restart.ActiveSession == ActiveSession
+                            && (Restart.Phase == FMtoURestartOperation::EPhase::Ending
+                                || Restart.Phase == FMtoURestartOperation::EPhase::Stopped))
+                        { continue; }
+                    }
                     if (!bInitReceived)
                     {
                         // The greeting opens a v10 connection. A mismatched
@@ -1290,6 +1513,7 @@ uint32 FMtoULiveLinkSource::Run()
                                     TEXT("The linkage control queue is full."));
                                 break;
                             }
+                            bHelloReceived = true;
                             FMtoUPendingHello Pending;
                             Pending.SessionId = ActiveSession;
                             Pending.Message = MoveTemp(Hello);
@@ -1307,6 +1531,11 @@ uint32 FMtoULiveLinkSource::Run()
                                 LogVersionRefusal(Init.Version, FString());
                             }
                             SendErrorAndDisconnect(ErrorCode, Error);
+                            break;
+                        }
+                        if (!bHelloReceived)
+                        {
+                            SendErrorAndDisconnect(TEXT("INVALID_MESSAGE"), TEXT("A hello with maya_subject_id must precede init; update both components together."));
                             break;
                         }
                         // The first init declares the set; one init follows
@@ -1508,15 +1737,11 @@ uint32 FMtoULiveLinkSource::Run()
                                 CacheCommands.CancelUpload(
                                     ActiveSession, WorkerCacheUploadId);
                                 bDidWork = true;
-                                SendPacket(
-                                    *SocketSubsystem,
-                                    *ClientSocket,
-                                    FMtoUProtocol::EncodeError(
+                                SendWorkerPacket(*ClientSocket, FMtoUProtocol::EncodeError(
                                         ErrorCode,
                                         CacheError,
                                         CacheError,
-                                        Command.Begin.UploadId),
-                                    bStopRequested);
+                                        Command.Begin.UploadId));
                                 continue;
                             }
                             if (bShapeValid)
@@ -1631,6 +1856,19 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
 {
     check(IsInGameThread());
     const uint64 SessionId = GameThreadSession;
+    if (IsRestartBlocked(SessionId)) { return false; }
+    if (!LinkageSession.GetView().RecoveryResidual.IsEmpty())
+    {
+        EnqueueErrorOnGameThread(TEXT("RECOVERY_REFUSED"), TEXT("Previous linkage resources still need recovery."),
+            LinkageSession.GetView().RecoveryResidual);
+        return false;
+    }
+    if (GreetedSession != SessionId || (!ProtectedSubjects.IsEmpty() && !ValidateSubjectsOnGameThread()))
+    {
+        EnqueueErrorOnGameThread(TEXT("SUBJECT_CHANGED"), TEXT("The greeted target instance changed before init."));
+        StopRestart(TEXT("SUBJECT_CHANGED"), TEXT("The greeted target instance changed before init."));
+        return false;
+    }
     const bool bPrimary = Message.ObjectId == FMtoUObjectIds::Character;
     if (bPrimary)
     {
@@ -1730,6 +1968,13 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     else
     {
         Actor = Actors[0];
+    }
+    const FProtectedSubject* Pinned = ProtectedSubjects.FindByPredicate(
+        [&Message](const FProtectedSubject& Subject) { return Subject.ObjectId == Message.ObjectId; });
+    if (!Pinned || Pinned->Actor.Get() != Actor)
+    {
+        EnqueueErrorOnGameThread(TEXT("SUBJECT_CHANGED"), TEXT("The target is not the greeted instance."));
+        return false;
     }
     if (!bPrimary)
     {
@@ -1942,7 +2187,7 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
             TEXT("INTERNAL_ERROR"), TEXT("The Unreal Live Link client is unavailable."));
         return false;
     }
-    if (!IsCurrentSession(SessionId))
+    if (!IsCurrentSession(SessionId) || IsRestartBlocked(SessionId) || !ValidateSubjectsOnGameThread())
     {
         return false;
     }
@@ -2019,14 +2264,21 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
     {
         Actor->ShowDriverMesh();
     }
-    Actor->SetConnectionState(bBoneOnlySession
+    Object.NegotiatedState = bBoneOnlySession
         ? EMtoUConnectionState::ConnectedBoneOnly
         : bPartialMorphCoverage
             ? EMtoUConnectionState::ConnectedPartialMorph
             : bPrimary
                 ? EMtoUConnectionState::Connected
-                : EMtoUConnectionState::ConnectedAsSecondObject);
-    Actor->NoteSessionStreaming();
+                : EMtoUConnectionState::ConnectedAsSecondObject;
+    bool bAutomaticNegotiation = false;
+    { FScopeLock Lock(&RestartMutex);
+        bAutomaticNegotiation = Restart.Phase == FMtoURestartOperation::EPhase::Reconnecting
+            && Restart.ActiveSession == SessionId;
+    }
+    Actor->SetConnectionState(bAutomaticNegotiation ? EMtoUConnectionState::Reconnecting : Object.NegotiatedState,
+        bAutomaticNegotiation ? TEXT("Waiting for the complete reconnected object set to become Ready.") : FString());
+    if (!bAutomaticNegotiation) { Actor->NoteSessionStreaming(); }
 
     Client->PushSubjectStaticData_AnyThread(
         Object.SubjectKey,
@@ -2048,13 +2300,24 @@ bool FMtoULiveLinkSource::HandleInitOnGameThread(FMtoUInitMessage&& Message)
         static_cast<int32>(SessionId),
         Message.ObjectId,
         NegotiatedSetRevision,
-        NegotiatedSpaceRevision);
+        NegotiatedSpaceRevision,
+        Pinned->InstanceId);
     Reply.ExpectedBoneCount = Object.ExpectedBoneCount;
     Reply.ExpectedCurveCount = Object.ExpectedCurveCount;
     Reply.bReady = true;
     Reply.ReadyObjectId = Message.ObjectId;
     SessionObjects.Add(MoveTemp(Object));
     Reply.bSetComplete = SessionObjects.Num() == SetObjects.Num();
+    if (Reply.bSetComplete)
+    {
+        ProtectedSubjects.RemoveAll([this](const FProtectedSubject& Subject)
+            { return !SetObjects.Contains(Subject.ObjectId); });
+    }
+    if (!ValidateSubjectsOnGameThread())
+    {
+        RequestSessionEndOnGameThread(SessionId, EMtoUSessionEndReason::SubjectChanged);
+        return false;
+    }
     OutgoingReplies.Enqueue(MoveTemp(Reply));
     return true;
 }
@@ -2070,11 +2333,61 @@ void FMtoULiveLinkSource::DrainLinkageHellosOnGameThread()
         {
             continue;
         }
-        if (LinkageSession.GetSessionId() != static_cast<int32>(Hello.SessionId))
+        bool bAllowed = true;
+        const bool bAutomatic = !Hello.Message.RestartToken.IsEmpty();
+        if (!bAutomatic && GreetedSession == Hello.SessionId)
         {
-            LinkageSession.BeginSession(static_cast<int32>(Hello.SessionId));
+            if (Hello.Message.MayaSubjectId == MayaSubjectId)
+            { LinkageSession.NoteHello(Hello.Message, SourceInstanceId); }
+            else
+            {
+                RequestSessionEndOnGameThread(Hello.SessionId, EMtoUSessionEndReason::SubjectChanged);
+            }
+            continue;
         }
-        LinkageSession.NoteHello(Hello.Message);
+        if (bAutomatic)
+        {
+            const bool bSameSubjects = ValidateSubjectsOnGameThread();
+            FScopeLock Lock(&RestartMutex);
+            Restart.Expire(RestartNow());
+            bAllowed = Restart.Phase == FMtoURestartOperation::EPhase::Permitted
+                && Restart.Token == Hello.Message.RestartToken && !Restart.Token.IsEmpty()
+                && Hello.Message.MayaSubjectId == MayaSubjectId && bSameSubjects;
+            Restart.Token.Reset();
+            if (bAllowed)
+            {
+                Restart.Phase = FMtoURestartOperation::EPhase::Reconnecting;
+                Restart.ActiveSession = Hello.SessionId;
+            }
+            else
+            {
+                Restart.Stop(TEXT("SUBJECT_CHANGED"), TEXT("The automatic connection permit is invalid or its subject changed."));
+                bRestartStatusDirty = true;
+            }
+        }
+        else
+        {
+            FScopeLock Lock(&RestartMutex);
+            if (Restart.IsActive())
+            {
+                Restart.Stop(TEXT("RESTART_CANCELLED"), TEXT("An explicit connection replaced the automatic intent."));
+            }
+            Restart = FMtoURestartOperation();
+        }
+        if (!bAllowed)
+        {
+            FMtoUOutgoing Refusal;
+            Refusal.SessionId = Hello.SessionId;
+            Refusal.Packet = FMtoUProtocol::EncodeError(TEXT("SUBJECT_CHANGED"), TEXT("The automatic reconnect subject changed or its permit was spent."));
+            Refusal.bCloseAfter = true;
+            OutgoingReplies.Enqueue(MoveTemp(Refusal));
+            continue;
+        }
+        if (!bAutomatic) { CaptureSubjectsOnGameThread(); MayaSubjectId = Hello.Message.MayaSubjectId; }
+        GreetedSession = Hello.SessionId;
+        if (LinkageSession.GetSessionId() != static_cast<int32>(Hello.SessionId))
+        { LinkageSession.BeginSession(static_cast<int32>(Hello.SessionId)); }
+        LinkageSession.NoteHello(Hello.Message, SourceInstanceId);
     }
 }
 
@@ -2354,10 +2667,15 @@ AMtoULiveLinkActor* FMtoULiveLinkSource::FindNegotiatedActorOnGameThread(const F
 void FMtoULiveLinkSource::NotePairingChangedOnGameThread()
 {
     check(IsInGameThread());
-    if (GameThreadSession == 0)
+    if (!ProtectedSubjects.IsEmpty() && !ValidateSubjectsOnGameThread())
     {
+        StopRestart(TEXT("SUBJECT_CHANGED"), TEXT("The explicit target pairing changed."));
+        uint64 Current = 0;
+        { FScopeLock Lock(&PendingMutex); Current = CurrentWorkerSession; }
+        if (Current) { RequestSessionEndOnGameThread(Current, EMtoUSessionEndReason::SubjectChanged); }
         return;
     }
+    if (GameThreadSession == 0) { return; }
     for (const FMtoUSessionObject& Object : SessionObjects)
     {
         const FMtoULinkagePairing* Pairing = LinkageSession.FindPairing(Object.ObjectId);
@@ -3573,11 +3891,18 @@ void FMtoULiveLinkSource::EnqueueErrorOnGameThread(
     const FString& Details)
 {
     check(IsInGameThread());
-    if (!IsSessionPublishableOnGameThread(GameThreadSession))
+    if (!IsCurrentSession(GameThreadSession) || GameThreadSession == EndedSession)
     {
         return;
     }
-    SetStatus(Message);
+    { FScopeLock Lock(&RestartMutex);
+        if (Restart.IsActive())
+        {
+            Restart.Stop(Code, Details.IsEmpty() ? Message : Details);
+            bRestartStatusDirty = true;
+        }
+    }
+    SetStatus(Code + TEXT(": ") + Message);
     FMtoUOutgoing Reply;
     Reply.SessionId = GameThreadSession;
     Reply.Packet = FMtoUProtocol::EncodeError(Code, Message, Details);
@@ -3598,7 +3923,16 @@ bool FMtoULiveLinkSource::IsSessionPublishableOnGameThread(uint64 SessionId) con
     {
         return false;
     }
-    return IsCurrentSession(SessionId);
+    {
+        FScopeLock Lock(&RestartMutex);
+        if ((Restart.IsActive()
+                && (Restart.Phase == FMtoURestartOperation::EPhase::Ending
+                    || Restart.Phase == FMtoURestartOperation::EPhase::Reconnecting)
+                && Restart.ActiveSession == SessionId)
+            || (Restart.Phase == FMtoURestartOperation::EPhase::Stopped && Restart.ActiveSession == SessionId))
+        { return false; }
+    }
+    return ValidateSubjectsOnGameThread() && IsCurrentSession(SessionId);
 }
 
 void FMtoULiveLinkSource::SetStatus(const FString& InStatus)

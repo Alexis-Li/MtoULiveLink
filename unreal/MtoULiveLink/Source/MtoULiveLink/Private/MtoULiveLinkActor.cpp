@@ -120,7 +120,7 @@ void AMtoULiveLinkActor::PostDuplicate(bool bDuplicateForPIE)
 
 void AMtoULiveLinkActor::Destroyed()
 {
-    MtoURequestStreamingSessionEnd(*this);
+    MtoURequestStreamingSessionEnd(*this, EMtoUSessionEndReason::SubjectChanged);
     ReleaseGeneratedPreview();
     Super::Destroyed();
 }
@@ -140,7 +140,7 @@ void AMtoULiveLinkActor::SetBinding(UMtoULiveLinkBinding* InBinding)
         return;
     }
 
-    MtoURequestStreamingSessionEnd(*this);
+    MtoURequestStreamingSessionEnd(*this, EMtoUSessionEndReason::SubjectChanged);
     ReleaseGeneratedPreview();
     Binding = InBinding;
     EnterUnrefreshedReadiness(TEXT("Run Refresh Preview to prepare the current Binding inputs."));
@@ -202,7 +202,7 @@ bool AMtoULiveLinkActor::BeginPreviewBuild()
     // also the synchronous publish gate: old queued frames and cached
     // commands fail closed from here, without waiting for the worker to
     // close the socket. A rejected reentrant start above never terminates.
-    MtoURequestStreamingSessionEnd(*this);
+    MtoURequestStreamingSessionEnd(*this, EMtoUSessionEndReason::Refresh);
     ReleaseGeneratedPreview();
     HideDisplay();
     PreviewState = EMtoUPreviewState::Building;
@@ -422,8 +422,8 @@ void AMtoULiveLinkActor::NotifyBindingInputsChanged()
 {
     // Primary Driver and Preview inputs are the Preview revision, but they also
     // change which parts resolve, so the composition is republished here too.
-    SyncCharacterComposition();
     MtoURequestStreamingSessionEnd(*this);
+    SyncCharacterComposition();
     RebindInputNotifications();
     InvalidateGeneratedPreview(TEXT("Binding inputs changed. Run Refresh Preview."));
     ReapplyDisplayTarget();
@@ -662,6 +662,25 @@ void AMtoULiveLinkActor::InheritPrimaryDisplaySettings(USkeletalMeshComponent& C
 void AMtoULiveLinkActor::SyncCharacterComposition()
 {
     if (FUObjectThreadContext::Get().IsRoutingPostLoad) { return; }
+    // Identify a real enabled-input change before the potentially expensive
+    // skin-weight/dependency resolution. Labels and list order do not fence.
+    TArray<FMtoUAppliedPart> Inputs;
+    if (Binding)
+    {
+        for (const FMtoUCharacterPart& Part : Binding->AdditionalParts)
+        {
+            if (Part.bEnabled) { Inputs.Add({Part.PartId, Part.SkeletalMesh}); }
+        }
+    }
+    Inputs.Sort([](const FMtoUAppliedPart& A, const FMtoUAppliedPart& B) { return A.PartId < B.PartId; });
+    bool bInputChanged = Inputs.Num() != ObservedPartInputs.Num();
+    for (int32 Index = 0; !bInputChanged && Index < Inputs.Num(); ++Index)
+    {
+        bInputChanged = Inputs[Index].PartId != ObservedPartInputs[Index].PartId
+            || Inputs[Index].Mesh != ObservedPartInputs[Index].Mesh;
+    }
+    if (bInputChanged) { MtoURequestStreamingSessionEnd(*this); }
+    ObservedPartInputs = MoveTemp(Inputs);
     const FMtoUCharacterComposition Composition = FMtoUCharacterComposition::Resolve(Binding);
     CharacterPartDiagnostics = Composition.Diagnostics;
     CharacterPartSummary = Composition.Summary;
@@ -678,7 +697,7 @@ void AMtoULiveLinkActor::SyncCharacterComposition()
     // Primary Driver removes the whole character, parts included. The applied
     // record decides even when an undo or redo already restored matching
     // components.
-    MtoURequestStreamingSessionEnd(*this);
+    if (!bInputChanged) { MtoURequestStreamingSessionEnd(*this); }
     AppliedParts.Reset(Composition.GetEnabledIdentity().Num());
     for (const FMtoUCharacterPartIdentity& Part : Composition.GetEnabledIdentity())
     {
