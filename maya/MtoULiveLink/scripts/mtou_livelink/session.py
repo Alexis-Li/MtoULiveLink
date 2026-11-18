@@ -1545,6 +1545,9 @@ class StreamingSession(object):
                     error.message, details=error.details),
                 recapture_scene=True)
             return
+        # Sampling can synchronously discover a revision and fence this session.
+        if not self.is_ready:
+            return
         if frame.revision != self._revision:
             self._request_failure(
                 make_diagnostic(
@@ -1568,6 +1571,8 @@ class StreamingSession(object):
                         error.code if error.code in DIAGNOSTICS else "SAMPLING_FAILED",
                         "副对象：" + error.message, details=error.details),
                     recapture_scene=False)
+                return
+            if not self.is_ready:
                 return
             if secondary.revision != self._secondary_revision:
                 self._request_failure(

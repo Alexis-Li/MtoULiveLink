@@ -458,7 +458,7 @@ def _capture_bind_local_transforms(subject, previous_fallbacks):
     return bind_local, conflicts, fallbacks
 
 
-def discover_curve_plugs(bone_paths, visible_meshes=None, curve_order=()):
+def discover_curve_plugs(bone_paths, visible_meshes=None, previous_curves=()):
     if visible_meshes is None:
         visible_meshes = visible_mesh_shapes(skinned_mesh_candidates(bone_paths))
     deformers = set()
@@ -468,27 +468,35 @@ def discover_curve_plugs(bone_paths, visible_meshes=None, curve_order=()):
     curves = []
     for deformer in sorted(deformers):
         aliases = cmds.aliasAttr(deformer, query=True) or []
+        if not aliases:
+            continue
+        deformer_uuid = cmds.ls(deformer, uuid=True)[0]
         for alias, attribute in zip(aliases[0::2], aliases[1::2]):
             match = re.match(r"(?:weight|w)\[(\d+)\]$", attribute)
             if match:
+                index = int(match.group(1))
                 curves.append({"name": alias, "plug": deformer + "." + attribute,
-                               "sort": (deformer, int(match.group(1)))})
+                               "sort": (deformer, index), "id": (deformer_uuid, index)})
     curves.sort(key=lambda curve: curve["sort"])
-    grouped = []
+    previous_references = {curve["name"]: curve["reference_id"] for curve in previous_curves}
     by_name = {}
     for curve in curves:
-        group = by_name.get(curve["name"])
+        name, plug, plug_id = curve["name"], curve["plug"], curve["id"]
+        group = by_name.get(name)
         if group is None:
-            group = {"name": curve["name"], "plugs": [], "sort": curve["sort"]}
-            by_name[curve["name"]] = group
-            grouped.append(group)
-        group["plugs"].append(curve["plug"])
-    if by_name.keys() == set(curve_order):
-        return [by_name[name] for name in curve_order]
-    return grouped
+            by_name[name] = {"name": name, "plugs": [plug], "reference_id": plug_id}
+        elif plug_id == previous_references.get(name):
+            # Sampling publishes the first plug and checks the others against it.
+            group["plugs"].insert(0, plug)
+            group["reference_id"] = plug_id
+        else:
+            group["plugs"].append(plug)
+    if by_name.keys() == previous_references.keys():
+        return [by_name[name] for name in previous_references]
+    return list(by_name.values())
 
 
-def capture_subject(root=None, bind_fallbacks=None, curve_order=()):
+def capture_subject(root=None, bind_fallbacks=None, previous_curves=()):
     require_maya()
     root = root or selected_root()
     bones = build_hierarchy(root, maya_children, allow_duplicates=True)
@@ -503,7 +511,7 @@ def capture_subject(root=None, bind_fallbacks=None, curve_order=()):
                "meshes": mesh_paths,
                "mesh_shapes": shapes,
                "curves": discover_curve_plugs(
-                   [bone["path"] for bone in bones], shapes, curve_order),
+                   [bone["path"] for bone in bones], shapes, previous_curves),
                "unit_scale": centimeters_per_unit(
                    cmds.currentUnit(query=True, linear=True))}
     bind_local, conflicts, fallbacks = _capture_bind_local_transforms(
@@ -811,10 +819,10 @@ class CharacterScene(object):
 
     def _capture_values(self, revision):
         try:
+            previous_subject = self._subject or {}
             subject = capture_subject(
-                self._root,
-                (self._subject or {}).get("bind_fallbacks"),
-                self._snapshot.curve_names if self._snapshot is not None else ())
+                self._root, previous_subject.get("bind_fallbacks"),
+                previous_subject.get("curves", ()))
             record = self._display_record()
             outfit = (current_enum_label(record) if record is not None
                       else mesh_label(subject["meshes"]))
@@ -1104,7 +1112,7 @@ class CharacterScene(object):
                         [bone["path"] for bone in subject["bones"]],
                         visible_mesh_shapes([
                             path.fullPathName() for path in self._candidate_paths]),
-                        previous.curve_names)
+                        subject["curves"])
                     grouped = duplicate_bone_paths(subject["bones"])
                     duplicates = [path for name in sorted(grouped) for path in grouped[name]]
                 candidate = CharacterSnapshot(

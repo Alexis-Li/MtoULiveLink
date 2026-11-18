@@ -511,6 +511,38 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual(before.revision, frame.revision)
         self.assertEqual([], events)
 
+    def test_shared_alias_keeps_its_reference_weight_after_deformer_rename(self):
+        root = cmds.joint(name="root")
+        for name, value in (("aOutfit", 0.25), ("bOutfit", 0.25000075),
+                            ("cOutfit", 0.24999925)):
+            self._skinned_outfit(root, name, "Smile")
+            cmds.setAttr(name + "BS.weight[0]", value)
+        reference = cmds.getAttr("aOutfitBS.weight[0]")
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        before = scene.sample()
+        self.assertEqual((reference,), before.curves)
+
+        deformer = cmds.rename("aOutfitBS", "zOutfitBS")
+        mtou_mayaapi.drain_deferred()
+        after_rename = scene.sample()
+        self.assertEqual((reference,), after_rename.curves)
+        self.assertEqual(before.revision, after_rename.revision)
+
+        cmds.spaceLocator(name="unrelated")
+        refreshed = scene.sample()
+        self.assertEqual((reference,), refreshed.curves)
+        self.assertEqual(before.revision, refreshed.revision)
+        self.assertEqual(("Smile",), scene.snapshot().curve_names)
+        self.assertEqual([], events)
+
+        cmds.setAttr(deformer + ".weight[0]", 0.5)
+        with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+            scene.sample()
+        self.assertEqual("SAMPLING_FAILED", caught.exception.code)
+        self.assertIn("conflicting values for BlendShape alias Smile", caught.exception.details)
+
     def test_manual_connect_recovers_the_explicit_display_by_identity(self):
         for change, outfit in (("delete", "outfit"), ("replace", "outfit"),
                                ("remove_enum", "outfit"), ("rename", "ClothesChosen")):
@@ -1054,14 +1086,17 @@ class MayaHostTests(unittest.TestCase):
             mtou_mayaapi.drain_deferred()
         return hello, mtou_protocol.recv_message(peer)
 
-    def _ready_restart_peer(self, active, peer, session_id, init, missing_in_unreal=()):
-        self._send_restart_reply(peer, {
-            "type": "ready", "revision": init["revision"], "workflow": init["workflow"],
-            "session_id": session_id, "target_instance_id": "target", "object_id": "character",
-            "set_revision": 1, "space_revision": 1,
-            "missing_in_unreal": list(missing_in_unreal), "missing_in_maya": [],
-            "bone_name_remaps": [], "target_morph_count": 0, "accepted_morph_count": 0,
-        })
+    def _ready_restart_peer(self, active, peer, session_id, init, missing_in_unreal=(),
+                            secondary_init=None):
+        init_rows = (init,) if secondary_init is None else (init, secondary_init)
+        for row in init_rows:
+            self._send_restart_reply(peer, {
+                "type": "ready", "revision": row["revision"], "workflow": row["workflow"],
+                "session_id": session_id, "target_instance_id": row["object_id"] + "-target",
+                "object_id": row["object_id"], "set_revision": 1, "space_revision": 1,
+                "missing_in_unreal": list(missing_in_unreal), "missing_in_maya": [],
+                "bone_name_remaps": [], "target_morph_count": 0, "accepted_morph_count": 0,
+            })
         deadline = time.monotonic() + 3
         while not active.is_ready:
             self.assertLess(time.monotonic(), deadline)
@@ -1136,6 +1171,66 @@ class MayaHostTests(unittest.TestCase):
                 self.assertEqual("BLENDSHAPE_MISMATCH", controller._last_diagnostic["code"])
                 controller._show_warning.assert_not_called()
                 controller._show_error.assert_not_called()
+
+    def _assert_live_sample_starts_restart(self, edited_mesh):
+        root = cmds.createNode("joint", name="bodyRoot")
+        secondary_root = cmds.createNode("joint", name="coatRoot")
+        self._skinned_outfit(root, "body", "Smile")
+        self._skinned_outfit(secondary_root, "coat", "Smile")
+        controller = mtou_controller.Controller()
+        body = controller._capture_scene(root)
+        controller._set_connected = mock.Mock()
+        controller._show_error = mock.Mock()
+        self.addCleanup(controller.close)
+        cmds.select(secondary_root, replace=True)
+        controller.set_secondary_object()
+        coat = controller._secondary_scene
+        self.assertIsNotNone(coat)
+        scene = {"body": body, "coat": coat}[edited_mesh]
+        listener = self._restart_listener()
+
+        with mock.patch.multiple(mtou_config, HOST="127.0.0.1", PORT=listener.getsockname()[1]):
+            controller.connect()
+            active = controller._session
+            self.assertIsNotNone(active)
+            with listener.accept()[0] as peer:
+                unused_hello, init = self._restart_peer_init(active, peer, 19)
+                secondary_init = mtou_protocol.recv_message(peer)
+                self.assertEqual("secondary", secondary_init["object_id"])
+                self._ready_restart_peer(active, peer, 19, init, secondary_init=secondary_init)
+                active._sample_and_submit(force=True)
+                self.assertEqual("frame", mtou_protocol.recv_message(peer)["type"])
+
+                deformer = edited_mesh + "BS"
+                cmds.aliasAttr(deformer + ".Smile", remove=True)
+                cmds.aliasAttr("Grin", deformer + ".weight[0]")
+                self.assertEqual(("Smile",), scene.snapshot().curve_names)
+
+                # Run the live timer's sampling path before mayapy drains the
+                # deferred refresh queued by the alias edit.
+                active._sample_and_submit(force=True)
+                self.assertEqual(2, scene.snapshot().revision)
+                self.assertEqual(("Grin",), scene.snapshot().curve_names)
+                self.assertTrue(active.poll_connection(),
+                                getattr(active._terminal_event, "diagnostic", None))
+                self.assertTrue(active.restarting)
+                self.assertFalse(active.is_ready)
+
+                input_revision = controller._input_revision
+                mtou_mayaapi.drain_deferred()
+                self.assertIs(active, controller._session)
+                self.assertEqual(input_revision, controller._input_revision)
+                for kind in ("restart_request", "restart_prepared"):
+                    message = mtou_protocol.recv_message(peer)
+                    self.assertEqual((kind, input_revision),
+                                     (message["type"], message["source_revision"]))
+                controller._show_error.assert_not_called()
+
+    def test_primary_live_sample_starts_restart_before_deferred_refresh(self):
+        self._assert_live_sample_starts_restart("body")
+
+    def test_secondary_live_sample_starts_restart_before_deferred_refresh(self):
+        self._assert_live_sample_starts_restart("coat")
 
     def test_restart_deadline_closes_tcp_with_maya_main_thread_blocked(self):
         unused_group, root, unused_display = self._create_character_group()

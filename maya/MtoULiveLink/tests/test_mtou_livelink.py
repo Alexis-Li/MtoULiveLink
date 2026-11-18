@@ -1397,25 +1397,41 @@ class StreamingSessionTests(unittest.TestCase):
         worker.join.assert_called_once_with(1.0)
         self.assertEqual(["stopped"], [event.kind for event in events])
 
-    def test_revision_change_fails_after_ready_and_requires_recapture(self):
-        events = []
-        timers = []
-        deferred = []
+    def test_revision_change_fails_while_the_session_is_still_ready(self):
+        for edited_object in ("character", "secondary"):
+            with self.subTest(edited_object=edited_object):
+                self._assert_ready_session_rejects_revision_change(edited_object)
+
+    def _assert_ready_session_rejects_revision_change(self, edited_object):
+        events, timers, deferred = [], [], []
         worker = mock.Mock()
         worker.status.return_value = ("ready", "Connected", None, None)
         fake_om, fake_cmds, scene = self._runtime(timers, deferred)
-        scene.sample.return_value = mtou_scene.CharacterFrame(8, [], [])
+        changed_frame = mtou_scene.CharacterFrame(8, [], [])
+        secondary = None
+        if edited_object == "character":
+            scene.sample.return_value = changed_frame
+        else:
+            scene.sample.return_value = mtou_scene.CharacterFrame(7, [], [])
+            secondary = mock.Mock()
+            secondary.snapshot.return_value = character_snapshot(
+                7, "|secondary", "Clothes01", [("secondary", -1)], [])
+            secondary.sample.return_value = changed_frame
 
         with patch_global("om", fake_om), \
              patch_global("cmds", fake_cmds), \
              patch_global("SenderWorker", return_value=worker):
-            mtou_session.StreamingSession.start(scene, 24.0, events.append)
+            mtou_session.StreamingSession.start(
+                scene, 24.0, events.append, secondary_scene=secondary)
             timers[0](0.0, 0.0, None)
             deferred[0]()
 
         self.assertEqual(["ready", "failed"], [event.kind for event in events])
         self.assertEqual("SAMPLING_FAILED", events[1].diagnostic["code"])
-        self.assertTrue(events[1].recapture_scene)
+        self.assertEqual(edited_object + " scene revision changed from 7 to 8",
+                         events[1].diagnostic["details"])
+        self.assertEqual(edited_object == "character", events[1].recapture_scene)
+        worker.submit.assert_not_called()
 
     def test_rate_timer_creation_failure_keeps_old_timer_until_terminal_cleanup(self):
         events = []
@@ -5647,6 +5663,8 @@ class CharacterPartDiscoveryTests(unittest.TestCase):
             return list(self.ALIASES.get(node, ()))
 
         def ls(*names, **kwargs):
+            if kwargs.get("uuid"):
+                return [name + "-uuid" for name in names if name in self.ALIASES]
             known = set(shapes.values()) | set(self.MESHES)
             return [name for name in names if name in known]
 
