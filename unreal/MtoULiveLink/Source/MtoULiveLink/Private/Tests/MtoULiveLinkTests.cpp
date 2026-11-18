@@ -18375,6 +18375,160 @@ bool FMtoURestartGreetingOrderTest::RunTest(const FString& Parameters)
     TestTrue(TEXT("the reconnected session is new"), Final.SessionId > Next.SessionId);
     TestEqual(TEXT("the primary stays pinned across both greetings"),
         Ready->GetStringField(TEXT("target_instance_id")), PrimaryInstance);
+
+    UMtoULiveLinkBinding* Replacement = NewObject<UMtoULiveLinkBinding>(GetTransientPackage());
+    Replacement->SkeletalMesh = F.Actor->GetBinding()->SkeletalMesh;
+    F.Actor->SetBinding(Replacement);
+    TSharedPtr<FJsonObject> Stopped;
+    if (!TestTrue(TEXT("the acknowledged Ready transport receives restart_state"),
+        Final.ReadReply(TEXT("restart_state"), Stopped)))
+    {
+        return false;
+    }
+    TestEqual(TEXT("stopped names the current Ready session"),
+        static_cast<int32>(Stopped->GetNumberField(TEXT("session_id"))), Final.SessionId);
+    TestEqual(TEXT("stopped preserves the subject change category"),
+        Stopped->GetStringField(TEXT("code")), FString(TEXT("SUBJECT_CHANGED")));
+    TestTrue(TEXT("the stopped Ready transport closes"), Final.PeerClosed());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartEditBeforeHelloTest,
+    "MtoULiveLink.Source.Restart.EditBeforeHello",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURestartEditBeforeHelloTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    UMtoULiveLinkBinding* Binding = F.Actor->GetBinding();
+    FMtoUCharacterPart& Part = Binding->AdditionalParts.AddDefaulted_GetRef();
+    Part.PartId = FGuid::NewGuid();
+    Part.SkeletalMesh = DuplicateObject<USkeletalMesh>(Binding->SkeletalMesh, GetTransientPackage());
+    Part.bEnabled = false;
+    F.Actor->NotifyCharacterPartsChanged();
+    FMtoUSessionEndMaya Initial(F);
+    TSharedPtr<FJsonObject> Ready;
+    if (!Initial.Connect(*this, false)
+        || !TestTrue(TEXT("initial character negotiates"),
+            Initial.Send(F.InitPacket()) && Initial.ReadReply(TEXT("ready"), Ready)))
+    {
+        return false;
+    }
+    const FString PrimaryInstance = Ready->GetStringField(TEXT("target_instance_id"));
+    FMtoURestartTestAccess::Clock(*F.Source, 100);
+    MtoURequestStreamingSessionEnd(*F.Actor);
+    FString Permit;
+    if (!Initial.FinishCoordination(*this, 2, Permit)) { return false; }
+    Initial.Drop();
+
+    FMtoUSessionEndMaya Next(F);
+    FMtoURestartTestAccess::HoldHelloReply(*F.Source, true);
+    if (!Next.SendGreeting(*this, Permit)
+        || !TestTrue(TEXT("worker queues replacement hello without the game thread"), PollUntil([&]()
+        {
+            const auto Op = FMtoURestartTestAccess::Operation(*F.Source);
+            return Op.ActiveSession != Op.OldSession
+                && FMtoURestartTestAccess::HeldHelloPolls(*F.Source) > 0;
+        }, 2.0)))
+    {
+        return false;
+    }
+    const auto BeforeEdit = FMtoURestartTestAccess::Operation(*F.Source);
+    FMtoURestartTestAccess::Clock(*F.Source, 101);
+    Part.bEnabled = true;
+    F.Actor->NotifyCharacterPartsChanged();
+    const auto AfterEdit = FMtoURestartTestAccess::Operation(*F.Source);
+    TestTrue(TEXT("the input edit leaves the unused permit intact"),
+        AfterEdit.Phase == FMtoURestartOperation::EPhase::Permitted && AfterEdit.Token == Permit);
+    TestEqual(TEXT("the edit keeps the original coordination deadline"),
+        AfterEdit.CoordinationDeadline, BeforeEdit.CoordinationDeadline);
+    TestEqual(TEXT("the edit keeps the original total deadline"),
+        AfterEdit.OperationDeadline, BeforeEdit.OperationDeadline);
+    FMtoURestartTestAccess::HoldHelloReply(*F.Source, false);
+    if (!Next.ReceiveGreeting(*this)
+        || !TestTrue(TEXT("first init negotiates after the part edit"),
+            Next.Send(F.InitPacket()) && Next.ReadReply(TEXT("ready"), Ready)))
+    {
+        return false;
+    }
+    TestEqual(TEXT("the same target accepts the first init"),
+        Ready->GetStringField(TEXT("target_instance_id")), PrimaryInstance);
+    TestTrue(TEXT("the newly enabled part joins the negotiated target"),
+        F.Actor->GetCharacterPartComponents().Num() == 1
+            && F.Actor->GetCharacterPartComponents()[0]->GetSkeletalMeshAsset() == Part.SkeletalMesh);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartStopBeforeGreetingTest,
+    "MtoULiveLink.Source.Restart.StopBeforeGreeting",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURestartStopBeforeGreetingTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    for (const bool bAdmitHello : {false, true})
+    {
+        FMtoUSessionEndFixture F;
+        ON_SCOPE_EXIT { F.Close(); };
+        if (!F.Open(*this)) { return false; }
+        FMtoUSessionEndMaya Initial(F);
+        if (!Initial.Connect(*this, true)) { return false; }
+        FMtoURestartTestAccess::Clock(*F.Source, 200);
+        MtoURequestStreamingSessionEnd(*F.Actor);
+        FString Permit;
+        if (!Initial.FinishCoordination(*this, 2, Permit)) { return false; }
+        Initial.Drop();
+
+        FMtoUSessionEndMaya Next(F);
+        FMtoURestartTestAccess::HoldHelloReply(*F.Source, true);
+        if (!Next.SendGreeting(*this, Permit)
+            || !TestTrue(TEXT("worker holds the unacknowledged greeting"), PollUntil([&]()
+            {
+                if (bAdmitHello) { F.Pump(); }
+                const auto Op = FMtoURestartTestAccess::Operation(*F.Source);
+                return Op.Phase == (bAdmitHello ? FMtoURestartOperation::EPhase::Reconnecting
+                    : FMtoURestartOperation::EPhase::Permitted)
+                    && FMtoURestartTestAccess::HeldHelloPolls(*F.Source) > 0;
+            }, 2.0)))
+        {
+            return false;
+        }
+        if (bAdmitHello)
+        {
+            MtoURequestStreamingSessionEnd(*F.Actor);
+            const auto Ending = FMtoURestartTestAccess::Operation(*F.Source);
+            TestTrue(TEXT("a further edit starts ending on the unacknowledged session"),
+                Ending.Phase == FMtoURestartOperation::EPhase::Ending
+                    && Ending.OldSession != static_cast<uint64>(Initial.SessionId));
+        }
+        UMtoULiveLinkBinding* Replacement = NewObject<UMtoULiveLinkBinding>(GetTransientPackage());
+        Replacement->SkeletalMesh = F.Actor->GetBinding()->SkeletalMesh;
+        F.Actor->SetBinding(Replacement);
+        TArray<uint8> Payload;
+        if (TestTrue(TEXT("actual Binding replacement delivers a pre-greeting error"),
+            Next.Reader.Next(*Next.Socket, TEXT("error"), Payload, [&]() { F.Pump(); }, 2.0)))
+        {
+            TSharedPtr<FJsonObject> Error;
+            if (TestTrue(TEXT("the refusal is a complete JSON message"), JsonObjectFromBytes(Payload, Error)))
+            {
+                TestEqual(TEXT("the error retains its terminal category"),
+                    Error->GetStringField(TEXT("code")), FString(TEXT("SUBJECT_CHANGED")));
+                TestTrue(TEXT("the error explains which identity changed"),
+                    Error->GetStringField(TEXT("details")).Contains(TEXT("Binding")));
+            }
+        }
+        TestTrue(TEXT("terminal reply closes the TCP"), Next.PeerClosed());
+        TestFalse(TEXT("stopped greeting never grants the new identity"),
+            Next.Reader.OtherTypes.Contains(TEXT("hello_ack")));
+        const auto Stopped = FMtoURestartTestAccess::Operation(*F.Source);
+        TestTrue(TEXT("the subject change consumes no reusable permission"),
+            Stopped.Phase == FMtoURestartOperation::EPhase::Stopped && Stopped.Token.IsEmpty());
+        TestFalse(TEXT("the replacement Binding never receives a Live Link subject"),
+            F.Actor->IsInLiveLinkSet());
+    }
     return true;
 }
 
@@ -18385,101 +18539,123 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartRemovedSecondaryTest,
 bool FMtoURestartRemovedSecondaryTest::RunTest(const FString& Parameters)
 {
     (void)Parameters;
-    FMtoUSessionEndFixture F;
-    ON_SCOPE_EXIT { F.Close(); };
-    if (!F.Open(*this)) { return false; }
-    AMtoULiveLinkActor* Secondary = F.Place();
-    if (!TestNotNull(TEXT("the secondary exists"), Secondary)
-        || !TestTrue(TEXT("the secondary is paired"), PairLinkageTarget(Secondary, TEXT("secondary"))))
+    const auto CheckRemoval = [&](bool bDeleteDuringAdmission)
     {
-        return false;
-    }
-    FMtoUSessionEndMaya Maya(F);
-    const TCHAR* Both = TEXT("[\"character\",\"secondary\"]");
-    TSharedPtr<FJsonObject> Ready;
-    if (!Maya.Connect(*this, false)
-        || !TestTrue(TEXT("the primary is Ready"), Maya.Send(F.InitPacket(Both)) && Maya.ReadReply(TEXT("ready"), Ready)))
-    {
-        return false;
-    }
-    const FString PrimaryInstance = Ready->GetStringField(TEXT("target_instance_id"));
-    if (!TestTrue(TEXT("the secondary is Ready"),
-        Maya.Send(F.InitPacket(Both, FMtoUObjectIds::Secondary)) && Maya.ReadReply(TEXT("ready"), Ready)))
-    {
-        return false;
-    }
-    TestEqual(TEXT("the second reply is for the secondary"), Ready->GetStringField(TEXT("object_id")), FString(TEXT("secondary")));
-
-    const TArray<uint8> Remove = Packet(FString::Printf(
-        TEXT("{\"type\":\"remove_object\",\"session_id\":%d,\"object_id\":\"secondary\","
-             "\"set_revision\":2,\"detail\":\"remove secondary\"}"), Maya.SessionId));
-    TSharedPtr<FJsonObject> Removal;
-    if (!TestTrue(TEXT("secondary removal is confirmed"),
-        Maya.Send(Remove) && Maya.ReadReply(TEXT("object_removed"), Removal)))
-    {
-        return false;
-    }
-    TestTrue(TEXT("the removed target was restored"), Removal->GetBoolField(TEXT("restored")));
-    TestFalse(TEXT("the secondary left the Live Link set"), Secondary->IsInLiveLinkSet());
-
-    const FReferenceSkeleton& Skeleton = F.Actor->GetBinding()->SkeletalMesh->GetRefSkeleton();
-    const auto PublishesFrame = [&](FMtoUSessionEndMaya& Connection, double Offset)
-    {
-        TArray<FString> Transforms;
-        const double ExpectedX = Skeleton.GetRefBonePose()[0].GetTranslation().X + Offset;
-        for (int32 Index = 0; Index < Skeleton.GetNum(); ++Index)
+        FMtoUSessionEndFixture F;
+        ON_SCOPE_EXIT { F.Close(); };
+        if (!F.Open(*this)) { return false; }
+        AMtoULiveLinkActor* Secondary = F.Place();
+        if (!TestNotNull(TEXT("the secondary exists"), Secondary)
+            || !TestTrue(TEXT("the secondary is paired"), PairLinkageTarget(Secondary, TEXT("secondary"))))
         {
-            FTransform Transform = Skeleton.GetRefBonePose()[Index];
-            if (Index == 0) { Transform.AddToTranslation(FVector(Offset, 0, 0)); }
-            Transforms.Add(TransformJson(Transform));
+            return false;
         }
-        const TArray<uint8> Frame = Packet(FString::Printf(
-            TEXT("{\"type\":\"frame\",\"transforms\":[%s],\"curves\":[]}"),
-            *FString::Join(Transforms, TEXT(","))));
-        return Connection.Send(Frame) && PollUntil([&]()
+        FMtoUSessionEndMaya Maya(F);
+        const TCHAR* Both = TEXT("[\"character\",\"secondary\"]");
+        TSharedPtr<FJsonObject> Ready;
+        if (!Maya.Connect(*this, false)
+            || !TestTrue(TEXT("the primary is Ready"), Maya.Send(F.InitPacket(Both)) && Maya.ReadReply(TEXT("ready"), Ready)))
         {
-            F.Pump();
-            FLiveLinkSubjectFrameData Data;
-            if (!F.LiveLink->EvaluateFrameFromSource_AnyThread(
-                FLiveLinkSubjectKey(F.SourceGuid, FName(TEXT("MtoU_Character"))),
-                ULiveLinkAnimationRole::StaticClass(), Data))
+            return false;
+        }
+        const FString PrimaryInstance = Ready->GetStringField(TEXT("target_instance_id"));
+        if (!TestTrue(TEXT("the secondary is Ready"),
+            Maya.Send(F.InitPacket(Both, FMtoUObjectIds::Secondary)) && Maya.ReadReply(TEXT("ready"), Ready)))
+        {
+            return false;
+        }
+        TestEqual(TEXT("the second reply is for the secondary"), Ready->GetStringField(TEXT("object_id")), FString(TEXT("secondary")));
+
+        const TArray<uint8> Remove = Packet(FString::Printf(
+            TEXT("{\"type\":\"remove_object\",\"session_id\":%d,\"object_id\":\"secondary\","
+                 "\"set_revision\":2,\"detail\":\"remove secondary\"}"), Maya.SessionId));
+        TSharedPtr<FJsonObject> Removal;
+        if (!TestTrue(TEXT("secondary removal is confirmed"),
+            Maya.Send(Remove) && Maya.ReadReply(TEXT("object_removed"), Removal)))
+        {
+            return false;
+        }
+        TestTrue(TEXT("the removed target was restored"), Removal->GetBoolField(TEXT("restored")));
+        TestFalse(TEXT("the secondary left the Live Link set"), Secondary->IsInLiveLinkSet());
+
+        const FReferenceSkeleton& Skeleton = F.Actor->GetBinding()->SkeletalMesh->GetRefSkeleton();
+        const auto PublishesFrame = [&](FMtoUSessionEndMaya& Connection, double Offset)
+        {
+            TArray<FString> Transforms;
+            const double ExpectedX = Skeleton.GetRefBonePose()[0].GetTranslation().X + Offset;
+            for (int32 Index = 0; Index < Skeleton.GetNum(); ++Index)
+            {
+                FTransform Transform = Skeleton.GetRefBonePose()[Index];
+                if (Index == 0) { Transform.AddToTranslation(FVector(Offset, 0, 0)); }
+                Transforms.Add(TransformJson(Transform));
+            }
+            const TArray<uint8> Frame = Packet(FString::Printf(
+                TEXT("{\"type\":\"frame\",\"transforms\":[%s],\"curves\":[]}"),
+                *FString::Join(Transforms, TEXT(","))));
+            return Connection.Send(Frame) && PollUntil([&]()
+            {
+                F.Pump();
+                FLiveLinkSubjectFrameData Data;
+                if (!F.LiveLink->EvaluateFrameFromSource_AnyThread(
+                    FLiveLinkSubjectKey(F.SourceGuid, FName(TEXT("MtoU_Character"))),
+                    ULiveLinkAnimationRole::StaticClass(), Data))
+                {
+                    return false;
+                }
+                const auto* FrameData = Data.FrameData.Cast<FLiveLinkAnimationFrameData>();
+                return FrameData && FrameData->Transforms.Num() == Skeleton.GetNum()
+                    && FMath::IsNearlyEqual(FrameData->Transforms[0].GetTranslation().X, ExpectedX, 1.0e-3);
+            }, 2.0);
+        };
+        MtoUClearLinkageTarget(*Secondary);
+        if (!TestTrue(TEXT("the same primary session publishes after unpairing the former secondary"),
+            PublishesFrame(Maya, 10.0)))
+        {
+            return false;
+        }
+        TestEqual(TEXT("unpairing preserves the original session ID"), MtoUGetLinkageView().Identity.SessionId, Maya.SessionId);
+        if (!bDeleteDuringAdmission
+            && (!TestTrue(TEXT("the former secondary can be deleted while streaming"), Secondary->Destroy())
+                || !TestTrue(TEXT("the primary still publishes after deletion"), PublishesFrame(Maya, 20.0))))
+        {
+            return false;
+        }
+        MtoURequestStreamingSessionEnd(*F.Actor);
+        FString Permit;
+        if (!Maya.FinishCoordination(*this, 2, Permit)) { return false; }
+        Maya.Drop();
+        FMtoUSessionEndMaya Next(F);
+        if (!Next.SendGreeting(*this, Permit)) { return false; }
+        if (bDeleteDuringAdmission)
+        {
+            if (!TestTrue(TEXT("replacement TCP is associated before hello admission"), PollUntil([&]()
+                {
+                    const auto Op = FMtoURestartTestAccess::Operation(*F.Source);
+                    // We never pump the game thread between sending the greeting and deleting the Actor.
+                    return Op.ActiveSession != Op.OldSession && Op.Phase == FMtoURestartOperation::EPhase::Permitted;
+                }, 2.0))
+                || !TestTrue(TEXT("the former secondary can be deleted during admission"), Secondary->Destroy()))
             {
                 return false;
             }
-            const auto* FrameData = Data.FrameData.Cast<FLiveLinkAnimationFrameData>();
-            return FrameData && FrameData->Transforms.Num() == Skeleton.GetNum()
-                && FMath::IsNearlyEqual(FrameData->Transforms[0].GetTranslation().X, ExpectedX, 1.0e-3);
-        }, 2.0);
+            TestTrue(TEXT("deleting an Actor outside the permitted set leaves its token intact"),
+                FMtoURestartTestAccess::Operation(*F.Source).Token == Permit);
+        }
+        if (!Next.ReceiveGreeting(*this)
+            || !TestTrue(TEXT("the primary alone negotiates the new session"),
+                Next.Send(F.InitPacket()) && Next.ReadReply(TEXT("ready"), Ready)))
+        {
+            return false;
+        }
+        TestTrue(TEXT("the restart uses a new session"), Next.SessionId > Maya.SessionId);
+        TestEqual(TEXT("the restart keeps the original primary instance"),
+            Ready->GetStringField(TEXT("target_instance_id")), PrimaryInstance);
+        TestTrue(TEXT("the reconnected primary publishes its pose"), PublishesFrame(Next, 30.0));
+        return true;
     };
-    MtoUClearLinkageTarget(*Secondary);
-    if (!TestTrue(TEXT("the same primary session publishes after unpairing the former secondary"),
-        PublishesFrame(Maya, 10.0)))
-    {
-        return false;
-    }
-    TestEqual(TEXT("unpairing preserves the original session ID"), MtoUGetLinkageView().Identity.SessionId, Maya.SessionId);
-    if (!TestTrue(TEXT("the former secondary can be deleted"), Secondary->Destroy())
-        || !TestTrue(TEXT("the primary still publishes after deletion"), PublishesFrame(Maya, 20.0)))
-    {
-        return false;
-    }
-
-    MtoURequestStreamingSessionEnd(*F.Actor);
-    FString Permit;
-    if (!Maya.FinishCoordination(*this, 2, Permit)) { return false; }
-    Maya.Drop();
-    FMtoUSessionEndMaya Next(F);
-    if (!Next.SendGreeting(*this, Permit) || !Next.ReceiveGreeting(*this)
-        || !TestTrue(TEXT("the primary alone negotiates the new session"),
-            Next.Send(F.InitPacket()) && Next.ReadReply(TEXT("ready"), Ready)))
-    {
-        return false;
-    }
-    TestTrue(TEXT("the restart uses a new session"), Next.SessionId > Maya.SessionId);
-    TestEqual(TEXT("the restart keeps the original primary instance"),
-        Ready->GetStringField(TEXT("target_instance_id")), PrimaryInstance);
-    TestTrue(TEXT("the reconnected primary publishes its pose"), PublishesFrame(Next, 30.0));
-    return true;
+    const bool bRemovedWhileStreaming = CheckRemoval(false);
+    const bool bRemovedDuringAdmission = CheckRemoval(true);
+    return bRemovedWhileStreaming && bRemovedDuringAdmission;
 }
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartIdentityTest,

@@ -207,6 +207,19 @@ class RestartTransportTests(unittest.TestCase):
         self.assertEqual("PREVIEW_NOT_READY", fresh.status()[3]["code"])
         self.assertEqual("Refresh required", fresh.status()[3]["details"])
 
+    def test_pre_greeting_error_preserves_the_terminal_reason_without_init(self):
+        operation = session.RestartWindow()
+        fresh, peer = self.open_connection(operation, "permission")
+        detail = "The World, Actor, Binding or pairing instance changed."
+        self.send(peer, {"type": "error", "kind": "failure", "code": "SUBJECT_CHANGED",
+                         "message": detail, "details": detail})
+        self.assertEqual(b"", peer.recv(1))
+        fresh.join(1)
+        self.assertIsNone(fresh.hello_reply())
+        self.assertEqual("SUBJECT_CHANGED", fresh.status()[3]["code"])
+        self.assertEqual(detail, fresh.status()[3]["details"])
+        self.assertEqual("SUBJECT_CHANGED", operation.failure["code"])
+
     def test_different_source_cannot_receive_init(self):
         fresh, peer = self.open_connection(session.RestartWindow(), "permission")
         self.send(peer, greeting(12, source="replacement-source"))

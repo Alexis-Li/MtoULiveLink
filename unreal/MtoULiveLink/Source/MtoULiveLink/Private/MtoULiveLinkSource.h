@@ -550,9 +550,6 @@ private:
     TArray<FMtoUPendingInit> PendingInits;
     TOptional<FMtoUPendingFrame> PendingFrame;
     TQueue<uint64, EQueueMode::Spsc> DisconnectedSessions;
-    // The sessions the game thread asked the worker to close; the worker
-    // closes a connection only while its session is the named one.
-    TQueue<uint64, EQueueMode::Spsc> SessionEndRequests;
     TQueue<FMtoUOutgoing, EQueueMode::Spsc> OutgoingReplies;
     // Linkage intake: the greeting, the control messages and the staged pose
     // groups the worker parsed. The game thread drains every one of them, so
