@@ -114,6 +114,28 @@ Use `gh` from this clone so GitHub resolves the repository from its remote.
 The issue owns the problem, scope, acceptance criteria and product decisions.
 The PR owns the implementation diff, review findings and check results.
 
+### `main` and development branches
+
+- `main` holds only stable versions: accepted milestones and releases. Its
+  content arrives only by merging a development branch; nothing is committed
+  to it directly and no task PR targets it.
+- Day-to-day work happens on the **development branch** in progress. While
+  one is in progress every change goes to it: small edits are committed to it
+  directly, and PR branches are cut from it and target it.
+- A development branch is named `dev/<topic>`, with a short kebab-case
+  English topic. It usually carries one large piece of work: an umbrella
+  issue and its sub-issues. Defects and unplanned work found during it are
+  not part of that umbrella issue but go to the same development branch.
+- A development branch is created from `main` and merged back into `main`
+  when its work is accepted or released; a branch that carries several
+  releases is merged at each of them. Merging into `main` is a separate step
+  that needs the user's agreement.
+- Only while no development branch is in progress do the small direct edits
+  below go on `main`. Any other change then starts by creating a development
+  branch.
+- Before starting, check which development branch is in progress and which
+  branch you are on.
+
 ### From requirement to integration
 
 1. **Define the task.** Read the issue and all its comments. Specify observable
@@ -123,16 +145,16 @@ The PR owns the implementation diff, review findings and check results.
    its agreed prototype scope.
 2. **Choose the delivery boundary.** Small wording, typo, link and formatting
    fixes, and small edits to rules, workflows, templates or `CHANGELOG.md`, go
-   directly on the integration branch in progress when they change no code,
+   directly on the development branch in progress when they change no code,
    tests, tools, CI, packaging, version or product decision; with no
-   integration branch in progress they go on `main`. They never go on a PR
+   development branch in progress they go on `main`. They never go on a PR
    branch, and they need no separate branch, PR, development report or review
-   report. They reach `main` with the integration branch. Run applicable
+   report. They reach `main` with the development branch. Run applicable
    checks and use normal commits without rewriting shared history. Use a PR if
    size or impact is uncertain.
    All other work, including development tasks, code changes and significant
-   changes, goes through a PR. Branch from the integration branch in progress
-   (from `main` only when none is) and target the PR at it, with
+   changes, goes through a PR. Branch from the development branch in progress
+   (create one first when none is) and target the PR at it, with
    `feature/<topic>` for new features, tools or documentation, or
    `fix/<topic>` for corrections; use a short kebab-case topic. A PR branch
    holds only its PR's change. Inspect local
@@ -166,16 +188,16 @@ The PR owns the implementation diff, review findings and check results.
    and delete the local head branch when the worktree is clean and the branch
    is contained in the target branch. Leave a dirty or unmerged checkout in
    place and report it; do not remove another active session's worktree.
-   Record the resulting `main` or integration-branch SHA in the issue's progress
+   Record the resulting development-branch SHA in the issue's progress
    comment, together with the PR, covered ACs and pending acceptance. Do not
    add a separate post-merge SHA comment to the PR.
 6. **Complete the issue.** Close when agreed acceptance is covered, blockers
-   are resolved and the delivery is on its intended integration branch.
+   are resolved and the delivery is on its development branch.
    Research/prototype tasks close against their own deliverable. Closure
    includes the comment consolidation below: the status comment says `已关闭`
    and contains the final review, integration SHA and acceptance results. Do
-   not add a separate closing comment. Milestone integration into `main` and
-   release are separate steps.
+   not add a separate closing comment. Merging the development branch into
+   `main` and release are separate steps.
 
 Commit, push, PR creation, merge, tracker updates, closure and comment deletion
 follow the task's authorization. Report the achieved state precisely:

@@ -6,7 +6,7 @@ Unreal plugin, protocol, tooling or docs).
 ## Scope and delivery
 
 - Issue and covered IDs: Refs #... (AC-.., R-...)
-- Target branch: main
+- Target branch: dev/...
 - Change range (full base SHA..head SHA):
 
 Use `Refs`, not a closing keyword: issues close after acceptance and

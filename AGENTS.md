@@ -75,7 +75,7 @@ times by a fresh session that has only the repository and `HANDOFF.md`.
   allowance will run out; a note that is always current is the only
   protection.
 - Save the work at the same checkpoints: commit verified work to the branch
-  allowed by docs/workflow.md (the integration branch for small rule or
+  allowed by docs/workflow.md (the development branch for small rule or
   documentation edits, the task branch for PR work), so the note points at a
   commit. Anything left uncommitted is listed
   in the note with its state.
@@ -129,9 +129,13 @@ times by a fresh session that has only the repository and `HANDOFF.md`.
   the user agrees. Each kind of content has one owner (the reading map) and
   other places link to it; a change that makes a document's statement untrue
   rewrites that document in the same change.
+- `main` holds only accepted milestones and releases; task PRs never target
+  it. Work lands on the development branch in progress (`dev/<topic>`):
+  check which one it is before you start, and create one from `main` when
+  none is. Merging it into `main` is a separate step the user agrees to.
 - Follow docs/workflow.md for Issue/PR work: `feature/<topic>` or
-  `fix/<topic>` branches cut from the integration branch in progress (`main`
-  when none is) with a PR back to it, `Refs #<issue>` (never closing
+  `fix/<topic>` branches cut from the development branch with a PR back to
+  it, `Refs #<issue>` (never closing
   keywords), full base/head SHAs, AC and R- finding IDs, a published review of
   the exact head SHA before every merge, `--match-head-commit` merges, and
   issue comments that each end with a `当前状态` footer, generated and checked
@@ -139,7 +143,7 @@ times by a fresh session that has only the repository and `HANDOFF.md`.
   conclusion comment per review round, and a comment a later one supersedes
   is deleted. A PR branch holds only
   its PR's change; small documentation and rule edits go directly on the
-  integration branch as docs/workflow.md defines.
+  development branch as docs/workflow.md defines.
 - Never publish machine-specific paths, credentials or private asset contents
   in files, Issues or PRs; use placeholders such as `<Maya2024>`,
   `<Project.uproject>` or `<scratch>`. Report the state reached precisely:
