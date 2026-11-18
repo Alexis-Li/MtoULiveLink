@@ -114,6 +114,10 @@ public:
             {
                 Log(TEXT("Last Unreal observation: ") + LastUnrealState);
             }
+            if (!LastPoseObservation.IsEmpty())
+            {
+                Log(TEXT("Last oracle observation: ") + LastPoseObservation);
+            }
             Finish();
             return true;
         }
@@ -129,6 +133,7 @@ public:
             StepStarted = 0.0;
             Pending = -1;
             SettleUntil = 0.0;
+            LastPoseObservation.Reset();
         }
         return false;
     }
@@ -1061,8 +1066,26 @@ private:
         double ExpectedRotation = 0.0, DisplayedRotation = 0.0, RotationError = 0.0;
         if (DistinctPose != INDEX_NONE)
         {
+            constexpr double RotationTolerance = 0.5;
+            double CalibratedError = 0.0;
+            FName CalibratedBone;
+            for (const TPair<FName, FOracleRotation>& Pair : DisplayedPose)
+            {
+                if (const FQuat* Offset = OracleAxisOffsets.Find(Pair.Key))
+                {
+                    const FQuat Expected = Pair.Value.Maya * *Offset;
+                    const double Error = FMath::RadiansToDegrees(Expected.AngularDistance(Pair.Value.Shown));
+                    if (Error > CalibratedError)
+                    {
+                        CalibratedError = Error;
+                        CalibratedBone = Pair.Key;
+                    }
+                }
+            }
+            LastPoseObservation = FString::Printf(TEXT("%s: %d bones, %.4f cm; %d Morphs, %.5f weight error; %s %.4f deg axis error"),
+                *Name, DisplayedPose.Num(), MaxWorld, Morphs, MaxMorph, *CalibratedBone.ToString(), CalibratedError);
             if (DisplayedPose.Num() < 3 || MaxWorld >= WorldTolerance || Morphs == 0
-                || MaxExpected <= 0.05 || MaxMorph >= MorphTolerance)
+                || MaxExpected <= 0.05 || MaxMorph >= MorphTolerance || CalibratedError >= RotationTolerance)
             {
                 return false;
             }
@@ -1086,10 +1109,23 @@ private:
                             FMath::RadiansToDegrees(MayaChange.AngularDistance(ShownChange)));
                     }
                 }
-                constexpr double RotationTolerance = 0.5;
+                LastPoseObservation += FString::Printf(
+                    TEXT("; Maya %.4f deg, displayed %.4f deg, max rotation change error %.4f deg"),
+                    ExpectedRotation, DisplayedRotation, RotationError);
                 if (RotationError >= RotationTolerance)
                 {
                     return false;
+                }
+                if (OracleAxisOffsets.IsEmpty())
+                {
+                    // The Primary Driver has the same imported local axes throughout
+                    // the run. The first two matching frames establish their offset.
+                    // Subsequent oracle frames wait until the actual rotation reaches
+                    // that frame, even if the position and Morph weights match early.
+                    for (const TPair<FName, FOracleRotation>& Pair : FirstOraclePose)
+                    {
+                        OracleAxisOffsets.Add(Pair.Key, Pair.Value.Maya.Inverse() * Pair.Value.Shown);
+                    }
                 }
                 Test->TestTrue(*(Name + TEXT(": the real display changes between oracle frames")),
                     ExpectedRotation > RotationTolerance && DisplayedRotation > RotationTolerance);
@@ -1244,11 +1280,12 @@ private:
     FAutomationTestBase* Test;
     FString FixturePath, EvidenceDir;
     TSharedPtr<FJsonObject> Fixture, MayaResult, Reconnect;
-    FString MonitoredStage, LastUnrealState;
+    FString MonitoredStage, LastUnrealState, LastPoseObservation;
     int32 OldSession = 0, OldAttempts = 0;
     bool bUnrealReconnecting = false;
     TArray<TSharedPtr<FJsonValue>> UnrealHistory;
     TMap<FName, FOracleRotation> FirstOraclePose;
+    TMap<FName, FQuat> OracleAxisOffsets;
     TArray<FString> OldCapturePaths;
     const TArray<TSharedPtr<FJsonValue>>* DetailsWidths = nullptr;
     TArray<FStep> Steps;
