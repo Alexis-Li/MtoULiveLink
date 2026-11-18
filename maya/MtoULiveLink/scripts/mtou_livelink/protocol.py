@@ -164,13 +164,19 @@ DEFAULT_CAPABILITIES = {
 
 
 def make_hello_message(maya_version, linear_unit, unit_scale, fps,
-                       capabilities=None, plugin_version=__version__):
+                       capabilities=None, plugin_version=__version__,
+                       maya_subject_id=None, restart_token=None):
     """First message of a connection: version, scene units and capabilities.
 
     ``plugin_version`` is the release of the Maya component that is loaded; it
     only lets the peer name both releases when it refuses a protocol version.
-    ``None`` leaves the field out.
+    ``None`` leaves the field out. ``maya_subject_id`` is required for this
+    v12 development contract; ``restart_token`` is supplied only by the owner
+    of one permitted automatic attempt.
     """
+    subject_id = _opaque_identity(maya_subject_id, "maya_subject_id")
+    if restart_token is not None:
+        _opaque_identity(restart_token, "restart_token")
     scale = finite_float(unit_scale)
     if scale is None or scale <= 0.0:
         raise ValueError("scene unit scale must be a positive finite number")
@@ -185,6 +191,7 @@ def make_hello_message(maya_version, linear_unit, unit_scale, fps,
         "type": "hello",
         "version": PROTOCOL_VERSION,
         "host": "maya",
+        "maya_subject_id": subject_id,
         "maya_version": str(maya_version),
         "scene": {
             "linear_unit": str(linear_unit),
@@ -195,7 +202,116 @@ def make_hello_message(maya_version, linear_unit, unit_scale, fps,
     }
     if plugin_version is not None:
         message["plugin_version"] = str(plugin_version)
+    if restart_token is not None:
+        message["restart_token"] = restart_token
     return message
+
+
+# Stable reasons of an automatic operation that stopped. Text never classifies it.
+RESTART_STOP_CODES = frozenset({
+    "SUBJECT_CHANGED", "RESTART_TIMEOUT", "RESTART_CANCELLED",
+    "RECOVERY_REFUSED", "PREVIEW_NOT_READY", "PREVIEW_MORPH_MISMATCH",
+    "INVALID_MESSAGE", "PROTOCOL_VERSION_MISMATCH", "SECOND_CLIENT_REJECTED",
+    "NO_BINDING_ACTOR", "MULTIPLE_BINDING_ACTORS", "SKELETON_MISMATCH",
+    "BIND_POSE_INVALID", "PAIRING_REQUIRED", "TARGET_UNKNOWN",
+    "TARGET_ALREADY_PAIRED", "WRITER_NOT_ISOLATABLE", "SHARED_WRITER",
+    "MOVING_SOCKET", "ANCHOR_MISMATCH", "OBJECT_SET_UNSUPPORTED",
+    "MODE_CONFLICT", "CACHE_NOT_CLEARED", "SET_REVISION_STALE",
+    "SPACE_REVISION_STALE", "EVAL_STALE", "LINKAGE_APPLY_FAILED",
+    "LINKAGE_NOT_ACTIVE", "RESOURCE_LIMIT", "INTERNAL_ERROR",
+    "CACHE_METADATA_INVALID", "CACHE_PAYLOAD_TOO_LARGE",
+    "CACHE_FRAME_INDEX_INVALID", "CACHE_FRAME_CONTENTS_INVALID",
+    "CACHE_INVALID_STATE", "CACHE_NOT_READY", "CACHE_REVISION_MISMATCH",
+    "CACHE_SEEK_INVALID", "CACHE_SEEK_FAILED", "CACHED_PLAYBACK_PERFORMANCE",
+})
+
+
+def _opaque_identity(value, name):
+    if not isinstance(value, str) or not value:
+        raise ValueError("field '{0}' must be a non-empty string; update both hosts together".format(name))
+    return value
+
+
+def _restart_int(value, name):
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not 1 <= value <= 2147483647 or int(value) != value):
+        raise ValueError("field '{0}' must be a positive int32".format(name))
+    return int(value)
+
+
+def validate_restart_message(message):
+    """Validate a coordination shape, without granting or consuming a permit.
+
+    Session matching, phase ordering, token lifetime and immutable deadlines
+    belong to the connection owner. A valid message alone authorizes no work.
+    """
+    if not isinstance(message, dict):
+        raise ValueError("restart message must be an object")
+    kind = message.get("type")
+    if kind not in ("restart_request", "restart_prepared", "restart_cancel", "restart_state"):
+        raise ValueError("unknown restart message type")
+    _restart_int(message.get("session_id"), "session_id")
+    if kind in ("restart_request", "restart_prepared"):
+        _restart_int(message.get("source_revision"), "source_revision")
+    if kind == "restart_request" and message.get("reason") != "input_changed":
+        raise ValueError("restart reason must be 'input_changed'")
+    if kind in ("restart_cancel", "restart_state"):
+        if not isinstance(message.get("detail"), str):
+            raise ValueError("restart detail must be a string")
+        code = message.get("code")
+        if not isinstance(code, str):
+            raise ValueError("restart code must be a string")
+        stopped = kind == "restart_cancel" or message.get("state") == "stopped"
+        if stopped and code not in RESTART_STOP_CODES:
+            raise ValueError("restart code must be a defined stable stop code")
+        if not stopped and code:
+            raise ValueError("restart ending/permitted code must be empty")
+    if kind == "restart_state":
+        state = message.get("state")
+        if state not in ("ending", "permitted", "stopped"):
+            raise ValueError("restart state must be 'ending', 'permitted' or 'stopped'")
+        if state == "permitted":
+            _opaque_identity(message.get("restart_token"), "restart_token")
+        elif "restart_token" in message:
+            raise ValueError("restart_token is only defined for permitted state")
+    return message
+
+
+def make_restart_request_message(session_id, source_revision, reason="input_changed"):
+    return validate_restart_message({"type": "restart_request", "session_id": session_id,
+                                     "source_revision": source_revision, "reason": reason})
+
+
+def make_restart_prepared_message(session_id, source_revision):
+    return validate_restart_message({"type": "restart_prepared", "session_id": session_id,
+                                     "source_revision": source_revision})
+
+
+def make_restart_cancel_message(session_id, code, detail=""):
+    return validate_restart_message({"type": "restart_cancel", "session_id": session_id,
+                                     "code": code, "detail": detail})
+
+
+def validate_ready_identities(replies, set_objects):
+    """Require one distinct actual target identity for every negotiated object."""
+    objects = validate_set_objects(set_objects)
+    replies = list(replies)
+    seen_objects, seen_targets = set(), set()
+    for reply in replies:
+        validate_reply(reply)
+        if reply.get("type") != "ready":
+            raise ValueError("target identities require ready replies")
+        object_id = reply["object_id"]
+        target_id = reply["target_instance_id"]
+        if object_id not in objects or object_id in seen_objects:
+            raise ValueError("ready contains a duplicate or unknown object identity")
+        if target_id in seen_targets:
+            raise ValueError("ready contains a duplicate target_instance_id")
+        seen_objects.add(object_id)
+        seen_targets.add(target_id)
+    if seen_objects != set(objects):
+        raise ValueError("ready identities must cover the complete object set")
+    return {reply["object_id"]: reply["target_instance_id"] for reply in replies}
 
 
 def validate_mode_control(mode, control):
@@ -433,8 +549,12 @@ def validate_reply(reply):
     if not isinstance(reply, dict):
         raise ValueError("protocol reply must be a JSON object")
     reply_type = reply.get("type")
+    if reply_type == "restart_state":
+        return validate_restart_message(reply)
     required = {
         "ready": {
+            "target_instance_id": str,
+            "object_id": str,
             "revision": (int, float),
             "missing_in_unreal": list,
             "missing_in_maya": list,
@@ -477,6 +597,7 @@ def validate_reply(reply):
         "cache_cleared": {
             "upload_id": (int, float), "play_id": (int, float), "clear_id": int},
         "hello_ack": {
+            "source_instance_id": str,
             "version": (int, float),
             "session_id": (int, float),
             "capabilities": dict,
@@ -581,7 +702,13 @@ def validate_reply(reply):
     if reply_type == "cache_complete" and reply["scope"] not in ("cache", "segment"):
         raise ValueError(
             "protocol reply field 'scope' must be 'cache' or 'segment'")
+    if reply_type == "ready":
+        _opaque_identity(reply["target_instance_id"], "target_instance_id")
+        if reply["object_id"] not in (CHARACTER_OBJECT_ID, SECONDARY_OBJECT_ID):
+            raise ValueError("ready names an unknown object_id")
     if reply_type == "hello_ack":
+        _opaque_identity(reply["source_instance_id"], "source_instance_id")
+        target_ids = []
         for target in reply["targets"]:
             if not isinstance(target, dict):
                 raise ValueError("hello_ack targets must be objects")
@@ -589,6 +716,9 @@ def validate_reply(reply):
                 if not isinstance(target.get(name), str):
                     raise ValueError(
                         "hello_ack target field '{0}' must be a string".format(name))
+            target_ids.append(target["object_id"])
+        if target_ids:
+            validate_set_objects(target_ids)
         space = reply["space"]
         if not isinstance(space.get("anchor"), dict):
             raise ValueError("hello_ack space field 'anchor' must be an object")

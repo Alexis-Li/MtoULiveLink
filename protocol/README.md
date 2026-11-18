@@ -16,6 +16,12 @@ Git history.
 
 ## Version pairing
 
+- This **unreleased** v12 development contract includes required subject
+  identities and coordinated restart. Earlier v12 development snapshots do
+  not interoperate with it. Missing identities fail closed; `version: 12`
+  alone and `plugin_version` never imply support. This development refinement
+  does not change the rule that a breaking change to a released protocol
+  increments its version.
 - Both hosts declare `version: 12`: Maya's `PROTOCOL_VERSION` and the Unreal
   plugin report the same value.
 - The Maya client opens with `hello`. A peer that cannot answer with the same
@@ -39,6 +45,42 @@ Git history.
   `INVALID_MESSAGE` like any known field, but only after the version check: a
   `hello` whose `version` differs is always answered with
   `PROTOCOL_VERSION_MISMATCH`, whatever else it holds.
+
+## Subject identities and greeting barrier
+
+Identities are opaque non-empty strings, generated in memory and never paths,
+pointers, persistent asset identities or release strings. One connection uses
+three distinct layers:
+
+| Field | Owner and lifetime |
+| --- | --- |
+| `hello.maya_subject_id` | Maya scene/character subject, including the complete object set; changes when the scene or any captured subject changes |
+| `hello_ack.source_instance_id` | One Unreal Source instance; a replacement Source or restarted Editor has another identity |
+| `ready.target_instance_id` | One actual target object, including its World, Actor, Binding instance, object slot and pairing generation; replacing any of these invalidates the identity, including the otherwise unpaired unique Actor |
+
+Every `hello`, ordinary and automatic, requires `maya_subject_id`. Every
+same-version `hello_ack` requires `source_instance_id`, and every `ready`
+requires a known `object_id` and non-empty `target_instance_id`. Greeting
+`targets` contains only explicitly paired objects: it cannot replace the
+actual target identity in `ready`. Unknown or duplicate object ids and duplicate
+actual target identities are `INVALID_MESSAGE`. All objects of the negotiated
+set must be Ready before any sampling or publication resumes.
+
+Maya sends **only hello**, receives and validates a legal hello acknowledgement,
+and only then sends the complete ordered init set. Missing, empty or wrongly
+typed identities in a same-v12 peer cause `INVALID_MESSAGE` with a diagnostic
+to update both hosts together: missing Source identity prevents sending init;
+missing target identity prevents sampling/publication; missing Maya identity
+closes before negotiation or any Actor/scene mutation. An earlier version is
+still rejected by the existing version check first. There is no legacy mode
+that bypasses this barrier.
+
+For an automatic hello Maya additionally sends the single-use `restart_token`
+from the old Source. Unreal validates that token **on the game thread** against
+the pinned old subject references and pairing generation before admitting init.
+Maya compares `source_instance_id` with the old Source before sending any init.
+Unreal checks the pinned actual targets again at each init, the complete Ready
+commit and publication, so replacement after hello cannot gain authority.
 
 ## Transport and framing
 
@@ -306,7 +348,8 @@ wire mode.
 
 | `mode` | `control` | `transition` | Legal |
 | --- | --- | --- | --- |
-| `linkage` | `unreal` | `ready` | yes |
+| `linkage` | `unreal` | `restart_state` | see [Coordinated restart](#coordinated-restart-after-an-input-change) | old-session coordination only |
+| `ready` | yes |
 | `realtime` | `maya` | `ready` or `failed` | yes |
 | `linkage` | `unreal` | `failed` | no: Maya reports a failed transition as `realtime` |
 | `linkage` | `maya` | any | no |
@@ -402,6 +445,92 @@ rounded to integers. `ue_display_frame` is always the root Level Sequence's
 time; a subsequence contributes no second offset. `maya_origin` is captured when
 linkage starts, so returning to realtime restores the frame the artist had.
 
+## Coordinated restart after an input change
+
+A restart ends the old streaming session and opens a genuinely new TCP
+connection with a new `session_id` and full negotiation. No pose, cache,
+`camera_time` or group traffic is accepted or sent once ending starts. The old
+TCP remains briefly for coordination alone; a new client never displaces it.
+The Source owns at most one bounded operation and one unconsumed permission.
+The Maya controller owns one existing connection intent, never a fresh choice
+of subject. Both sides merge concurrent input changes into that operation.
+
+| Direction | Message | Required fields |
+| --- | --- | --- |
+| Maya → Unreal | `restart_request` | `session_id`, `source_revision`, `reason: "input_changed"` |
+| Maya → Unreal | `restart_prepared` | `session_id`, `source_revision` |
+| Maya → Unreal | `restart_cancel` | `session_id`, `code`, `detail` |
+| Unreal → Maya | `restart_state` | `session_id`, `state`, `code`, `detail`; `restart_token` only for `permitted` |
+
+`session_id` and `source_revision` are positive int32 JSON numbers, never
+booleans or fractional numbers. The revision identifies the latest complete
+Maya snapshot, not a replacement subject or a deadline reset. `reason` is
+exactly `input_changed`. `detail` is a diagnostic string, possibly empty.
+`state` is exactly `ending`, `permitted` or `stopped`. For `ending` and
+`permitted`, `code` is the empty string; for `stopped` and `restart_cancel`, it
+is a defined stable rejection code, including `SUBJECT_CHANGED`,
+`RESTART_TIMEOUT`, `RESTART_CANCELLED`, `RECOVERY_REFUSED` or
+`PREVIEW_NOT_READY`. Text never determines the category. `permitted` requires a
+non-empty opaque `restart_token`; other states must omit that known field.
+Unknown enum values, missing fields, empty identities and wrong JSON types
+are structural `INVALID_MESSAGE` and close the connection.
+
+1. The first input change synchronously fences old sampling/publication. Maya
+   releases cache/time/camera ownership and captures the latest complete
+   snapshot before `restart_prepared`. Unreal fences the old session before
+   restoring its queued data, display ownership and writers. A Maya change
+   starts with `restart_request`; an Unreal change may start with `ending`.
+2. Unreal sends `permitted` only after its old resources are restored and a
+   matching latest `restart_prepared` has arrived, then closes the old TCP.
+   Capture/restoration failure sends cancel or stopped with its concrete code;
+   restoration failure never grants a permit. Explicit Refresh remains a
+   separate stop, requiring user action rather than automatic reconnection.
+3. Permission fixes all old actual subjects, pairing identities, old session
+   and the one new intent. It is consumed once when the new automatic hello
+   is admitted. Unknown, stale, consumed or expired tokens and changed subject
+   references are `SUBJECT_CHANGED` and close; they never fall back to finding
+   the current unique Actor. Manual hello omits `restart_token` and grants no
+   inherited intent.
+4. After permission Maya makes exactly one new TCP attempt with the latest
+   snapshot, workflow, BS choice and full set. All objects must become Ready.
+   No rejection, EOF, timeout, protocol failure or failed connect is retried.
+   Subject replacement, manual cancellation, Source exit or recovery failure
+   revokes any unconsumed permission and dominates later input changes.
+
+Coordination messages name the old session. A structurally valid message from
+another or already terminated session is harmlessly discarded and never
+changes the new session. Duplicate request/ending/prepared for the same
+operation and revision is idempotent; a newer local input revision supersedes
+preparation until that latest revision is complete. A duplicate permitted may
+never start another TCP attempt or authorize another init. A prepared message
+without a live requested operation, permission in an unexpected phase, or a
+late Ready/capture/recovery callback cannot create authority: discard it.
+A stopped operation cannot be reopened by any message. More specific observed
+subject, manual-stop or restoration reasons survive subsequent EOF/timeouts.
+
+Each host establishes immutable local monotonic deadlines at the earliest
+local input fence/request or receipt of the peer's ending/request, **before**
+posting deferred capture or game-thread restoration. Old coordination through
+permission is bounded by **5 seconds**, and the complete operation through
+all-object Ready by **32 seconds**, even across a new TCP or further genuine
+input changes after init. Repeated messages, received bytes, changes of
+revision, reconnect or token consumption do not extend either deadline.
+Individual sends/waits use the smaller of their phase remainder and the total
+operation remainder; irrelevant replies do not reset phase time. The total
+covers coordination 5 + connect 2 + hello send 5 + hello_ack 5 + all init sends
+5 + two Ready waits of 5 seconds (`max_set_objects=2`).
+
+Both network workers enforce expiry when receive is idle, send is blocked,
+and when no TCP exists but a permit remains; neither relies on host-thread
+callbacks or UI timers. Expiry atomically stops with `RESTART_TIMEOUT`, clears
+intent/permission, closes the operation's active TCP and releases client
+occupancy. A cancel/stopped reason is attempted once without blocking; sending
+it cannot delay shutdown. Local diagnostics keep the timed-out phase and what
+it awaited. Late work is discarded; mandatory resource restoration still runs
+when the host thread resumes, and a residual recovery failure stays a failure
+and keeps publication fenced. A host reports only the reason it actually
+observed, never assumes its peer received the same text.
+
 ## Space
 
 - Common space: centimetres, `C(x, y, z) = (x, z, y)` from Maya to Unreal, with
@@ -430,7 +559,8 @@ linkage starts, so returning to realtime restores the frame the artist had.
 
 | `type` | Payload | Notes |
 | --- | --- | --- |
-| `hello` | `version`, `host`, `maya_version`, `scene{linear_unit, unit_scale_cm, fps}`, `capabilities{linkage, cache, model}`; optional `plugin_version` | first message of a connection; `plugin_version` is the Maya component's release, shown when a protocol version is refused |
+| `hello` | `version`, `host`, `maya_version`, `scene{linear_unit, unit_scale_cm, fps}`, `capabilities{linkage, cache, model}`, `maya_subject_id`; optional `plugin_version`, `restart_token` | first message of a connection; `plugin_version` is the Maya component's release, shown when a protocol version is refused |
+| `restart_request`, `restart_prepared`, `restart_cancel` | see [Coordinated restart](#coordinated-restart-after-an-input-change) | old-session coordination only |
 | `init` | `version`, `revision`, `workflow`, `blendshapes_enabled`, `bones[[name, parent_index, transform]]` parent first (root parent `-1`), `curves[name]`, `object_id`, `set_revision`, `space_revision`, `set_objects` | one per object of the set, in `set_objects` order; an existing pairing must name the placed Binding Actor |
 | `frame` | `transforms`, `curves` for the primary, plus `objects[{object_id, transforms, curves}]` for the other object of a two-object set | one realtime sample of the whole set at one Maya time |
 | `cache_enter` | — | the connection enters cached ownership before capture |
@@ -447,8 +577,8 @@ linkage starts, so returning to realtime restores the frame the artist had.
 
 | `type` | Payload | Notes |
 | --- | --- | --- |
-| `hello_ack` | `version`, `session_id`, `capabilities`, `targets[{object_id, kind, binding_path, generation}]`, `space{space_revision, anchor}` | `targets` lists the explicitly paired targets, primary first; empty until the user pairs |
-| `ready` | `revision`, `workflow`, `missing_in_unreal`, `missing_in_maya`, `bone_name_remaps`, `target_morph_count`, `accepted_morph_count`, `session_id`, `object_id`, `set_revision`, `space_revision` | negotiation result for one object |
+| `hello_ack` | `version`, `session_id`, `source_instance_id`, `capabilities`, `targets[{object_id, kind, binding_path, generation}]`, `space{space_revision, anchor}` | `targets` lists the explicitly paired targets, primary first; empty until the user pairs |
+| `ready` | `revision`, `workflow`, `missing_in_unreal`, `missing_in_maya`, `bone_name_remaps`, `target_morph_count`, `accepted_morph_count`, `session_id`, `object_id`, `set_revision`, `space_revision`, `target_instance_id` | negotiation result for one object |
 | `error` | `code`, `message`, `details`, `kind`; `eval_id` and `sample_serial` for a refused `group`; `upload_id` and/or `play_id` for a cache error; `protocol_version` and `plugin_version` for `PROTOCOL_VERSION_MISMATCH` | a stable code from the table below; text is diagnostic only. `kind` is `scheduling` or `failure` (see [Error kinds](#error-kinds)). A recoverable cache error carries the positive identity of the upload or play attempt it belongs to; each field is omitted when the error has none, including a refused stale `cache_clear` and structural errors (see [Cached playback](#cached-playback)). The routing by `upload_id` and `play_id` does not depend on `kind`, `eval_id` or `sample_serial`. `protocol_version` and `plugin_version` name the refusing release (see [Version pairing](#version-pairing)) |
 | `cache_ready` | `upload_id`, `revision`, `frame_count` | the complete upload was accepted |
 | `cache_playing` | `upload_id`, `play_id`, `loop` | an attempt started; precedes its other outcomes |
@@ -476,6 +606,9 @@ it. A message whose `type` is not defined is always a structural failure.
 | --- | --- |
 | `PROTOCOL_VERSION_MISMATCH` | version field or `hello` version differs, or Maya receives a `hello_ack` of another `version`; the `error` Unreal sends names its `protocol_version` and `plugin_version` |
 | `INVALID_MESSAGE` | malformed shape or framing, invalid UTF-8, non-finite number, wrong length, duplicate id, partial or unknown object set, an undefined `type`, a value the protocol does not define for a known field, a `mode` that its `control` or `transition` does not pair with; a dropped realtime frame keeps the connection, and so does an illegal `mode` |
+| `SUBJECT_CHANGED` | automatic permission or a fixed subject no longer matches, including an unknown, consumed or expired restart token; closes without fallback target discovery |
+| `RESTART_TIMEOUT` | immutable coordination or total restart deadline expired; stops and revokes permission |
+| `RESTART_CANCELLED` | explicit user disconnect/cancellation stopped the automatic operation; revokes permission |
 | `SECOND_CLIENT_REJECTED` | a second Maya connects while one is connected |
 | `NO_BINDING_ACTOR`, `MULTIPLE_BINDING_ACTORS` | no placed Binding Actor, or several without an explicit pairing |
 | `SKELETON_MISMATCH` | the Maya bones cannot drive the required Unreal bones of every enabled display |
@@ -550,14 +683,18 @@ implements and the plugin version it loaded. A resource case names
 one `limits` key and a measured size above it instead of carrying the
 oversized payload. The corpus covers framing, negotiation, realtime frames,
 the cache upload and its outcomes, identity staleness, the object set and its
-removal, linkage transitions, groups and applied evidence, resources, an
+removal, linkage transitions, groups and applied evidence, required greeting
+identities, restart message shapes and invalid stages/codes/tokens, complete
+Ready identity sets (`ready_set`), resources, an
 earlier-version `hello`, `init`, `frame`, `cache_begin` and `hello_ack`.
 The cancelled-target and paused-resample refusals are pinned by the linkage
 unit tests on both hosts rather than by a corpus case.
 
 ## Changing the protocol
 
-A change to any message shape, meaning, identity rule, limit or code is a new
+Except for the unreleased v12 development refinement described in
+[Version pairing](#version-pairing), a change to any message shape, meaning,
+identity rule, limit or code is a new
 protocol version: update this document, the corpus and `protocol_version`,
 both hosts' version constants and their tests together, then run
 `python protocol/generate_unreal_corpus.py` and commit the regenerated `.inl`.
