@@ -844,6 +844,15 @@ class CharacterScene(object):
         self._ensure_available()
         return self._snapshot
 
+    def refresh_for_restart(self):
+        """Capture the current evaluated inputs before preparing a restart."""
+        if not self._refreshing:
+            self._ensure_available()
+            self._check_evaluated_inputs()
+        if self._refresh_pending or self._refreshing:
+            self._refresh_inputs(self._refresh_generation)
+        return self.snapshot()
+
     def set_display_controller(self, display, display_attribute=None):
         """Choose a label source without replacing the captured character."""
         self._ensure_available()

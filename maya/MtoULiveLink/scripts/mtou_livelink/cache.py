@@ -1181,15 +1181,19 @@ class CachedPlayback(object):
             except RuntimeError:
                 pass
 
-    def _restore_capture_frame(self):
+    def _restore_capture_frame(self, verify=False):
         original_frame = self._capture_original_frame
         if original_frame is None:
             return
         try:
             self._timeline.set_frame(original_frame)
-        except (AttributeError, RuntimeError, TypeError, ValueError):
-            pass
-        self._capture_original_frame = None
+            if verify and abs(self._timeline.current_frame() - original_frame) > 1e-6:
+                return "Could not restore Maya time to {0}".format(original_frame)
+        except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+            if verify:
+                return "Could not restore Maya time: {0}".format(error)
+        finally:
+            self._capture_original_frame = None
 
     def capture(self, scene_fps, confirm_large_cache=None, capture_range=None):
         if self._phase == "capturing":
@@ -1306,6 +1310,9 @@ class CachedPlayback(object):
     def _capture_step(self):
         if self._phase != "capturing":
             return False
+        session = self._streaming_session
+        if getattr(session, "restarting", False):
+            return False
         try:
             if self._capture_cancel_requested:
                 error = CachedPlaybackError(
@@ -1314,7 +1321,6 @@ class CachedPlayback(object):
                 return True
             if self._awaiting_clear is not None:
                 return False
-            session = self._streaming_session
             if session is None or not session.is_ready:
                 self._handle_transport_failure(CachedPlaybackError(
                     "STREAM_INTERRUPTED",
@@ -1406,6 +1412,8 @@ class CachedPlayback(object):
             self._capture_failure(error)
             return True
         except (CharacterSceneError, PlaybackCacheError, RuntimeError, ValueError) as exc:
+            if getattr(session, "restarting", False):
+                return False
             error = CachedPlaybackError(
                 "SAMPLING_FAILED", str(exc), details=str(exc))
             self._capture_failure(error)
@@ -1785,6 +1793,8 @@ class CachedPlayback(object):
         for the duration of an upload.
         """
         processed = False
+        if getattr(self._streaming_session, "restarting", False):
+            return processed
         self._stop_draining_this_round = False
         if self._phase == "capturing" and self._capture_cancel_requested:
             self._capture_step()
@@ -1976,12 +1986,13 @@ class CachedPlayback(object):
         self._publish(diagnostic=diagnostic)
         return self._issued_retention
 
-    def discard(self):
+    def discard(self, verify_restoration=False):
+        recovery = None
         if not self._closed:
             self._remove_capture_timer()
             self._remove_playback_poller()
             self._discard_upload()
-            self._restore_capture_frame()
+            recovery = self._restore_capture_frame(verify=verify_restoration)
             # Every release of the lease already sent its own clear; without
             # the lease Unreal holds no cache of this connection, and during
             # linkage it would refuse the clear.
@@ -2001,3 +2012,4 @@ class CachedPlayback(object):
         self._closed = True
         self._phase = "detached"
         self._publish(current=0, total=0)
+        return recovery

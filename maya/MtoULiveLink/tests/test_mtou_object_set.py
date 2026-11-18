@@ -77,7 +77,7 @@ def secondary_scene():
 
 def ready(object_id, revision=1, set_revision=1, session_id=4242, **extra):
     reply = {
-        "type": "ready", "revision": revision,
+        "type": "ready", "revision": revision, "target_instance_id": object_id + "-target",
         "object_id": object_id, "set_revision": set_revision, "space_revision": 1,
         "session_id": session_id,
         "missing_in_unreal": [], "missing_in_maya": [], "bone_name_remaps": [],
@@ -88,7 +88,7 @@ def ready(object_id, revision=1, set_revision=1, session_id=4242, **extra):
 
 
 GREETING = {
-    "type": "hello_ack", "version": mtou_config.PROTOCOL_VERSION, "session_id": 4242,
+    "type": "hello_ack", "source_instance_id": "ue-source", "version": mtou_config.PROTOCOL_VERSION, "session_id": 4242,
     "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
     "targets": [
         {"object_id": CHARACTER, "kind": "binding_actor",
@@ -105,7 +105,7 @@ GREETING = {
 def run_worker(init_messages, replies):
     """Run one sender worker against scripted Unreal replies; return its status."""
     worker = mtou_session.SenderWorker(
-        init_messages, mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0))
+        init_messages, mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0, maya_subject_id="maya-subject"))
     stream = b"".join(mtou_protocol.encode_message(reply) for reply in replies)
 
     class HandshakeSocket(object):
@@ -121,8 +121,8 @@ def run_worker(init_messages, replies):
                 raise EOFError("closed")
             return chunk
 
-        def sendall(self, packet):
-            pass
+        def send(self, packet):
+            return len(packet)
 
         def close(self):
             pass
@@ -306,6 +306,9 @@ class FakeWorker(object):
         pass
 
     def end_ordered(self, discard_pending=True):
+        pass
+
+    def forget_target(self, object_id):
         pass
 
 
@@ -594,6 +597,15 @@ class PanelSession(object):
 
     def stop(self):
         self.stopped = True
+
+    def restart_status(self):
+        return None, None, None
+
+    def fence_for_disconnect(self, diagnostic):
+        self.release_restart_leases()
+
+    def release_restart_leases(self):
+        self.time_control.terminate()
 
 
 class PanelObjectTests(unittest.TestCase):

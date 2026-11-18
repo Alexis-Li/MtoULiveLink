@@ -2,7 +2,10 @@
 import contextlib
 import importlib.util
 import pathlib
+import socket
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -32,6 +35,9 @@ from mtou_livelink import (
 )
 from mtou_livelink import (
     mayaapi as mtou_mayaapi,
+)
+from mtou_livelink import (
+    protocol as mtou_protocol,
 )
 from mtou_livelink import (
     scene as mtou_scene,
@@ -907,10 +913,159 @@ class MayaHostTests(unittest.TestCase):
         self.assertTrue(FakeWorker.instance.init_message["blendshapes_enabled"])
         self.assertEqual(3, len(FakeWorker.instance.init_message["bones"][0]))
 
+    @staticmethod
+    def _send_restart_reply(peer, reply):
+        peer.sendall(mtou_protocol.encode_message(reply))
+
+    def _restart_peer_init(self, controller_session, peer, session_id, fresh=False):
+        peer.settimeout(3)
+        hello = mtou_protocol.recv_message(peer)
+        self.assertEqual("hello", hello["type"])
+        self._send_restart_reply(peer, {
+            "type": "hello_ack", "version": mtou_config.PROTOCOL_VERSION,
+            "session_id": session_id, "source_instance_id": "source",
+            "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES), "targets": [],
+            "space": {"space_revision": 1, "anchor": {
+                "translation": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": 1}},
+        })
+        if fresh:
+            deadline = time.monotonic() + 3
+            while controller_session.hello_reply is None:
+                self.assertLess(time.monotonic(), deadline)
+                threading.Event().wait(0.005)
+            controller_session.poll_connection()
+            mtou_mayaapi.drain_deferred()
+        return hello, mtou_protocol.recv_message(peer)
+
+    def _ready_restart_peer(self, active, peer, session_id, init, missing_in_unreal=()):
+        self._send_restart_reply(peer, {
+            "type": "ready", "revision": init["revision"], "workflow": init["workflow"],
+            "session_id": session_id, "target_instance_id": "target", "object_id": "character",
+            "set_revision": 1, "space_revision": 1,
+            "missing_in_unreal": list(missing_in_unreal), "missing_in_maya": [],
+            "bone_name_remaps": [], "target_morph_count": 0, "accepted_morph_count": 0,
+        })
+        deadline = time.monotonic() + 3
+        while not active.is_ready:
+            self.assertLess(time.monotonic(), deadline)
+            threading.Event().wait(0.005)
+
+    def _restart_listener(self):
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(3)
+        return listener
+
+    def test_workflow_and_evaluated_outfit_restart_once_on_a_fresh_tcp(self):
+        unused_group, root, unused_display = self._create_character_group()
+        body = cmds.polyCube(name="body")[0]
+        garment = cmds.polyCube(name="coat")[0]
+        cmds.skinCluster(root, body)
+        cmds.skinCluster(root, garment)
+        cmds.setAttr(garment + ".visibility", False)
+        controller = mtou_controller.Controller()
+        character = controller._capture_scene(root)
+        controller._set_connected = mock.Mock()
+        controller._show_error = mock.Mock()
+        controller._show_warning = mock.Mock()
+        self.addCleanup(controller.close)
+        listener = self._restart_listener()
+        with mock.patch.multiple(mtou_config, HOST="127.0.0.1", PORT=listener.getsockname()[1]):
+            controller.connect()
+            old_session = controller._session
+            with listener.accept()[0] as old_peer:
+                old_hello, init = self._restart_peer_init(old_session, old_peer, 19)
+                self._ready_restart_peer(old_session, old_peer, 19, init)
+                old_session._sample_and_submit(force=True)
+                self.assertEqual("frame", mtou_protocol.recv_message(old_peer)["type"])
+
+                controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
+                cmds.setAttr(body + ".visibility", False)
+                cmds.setAttr(garment + ".visibility", True)
+                mtou_mayaapi.drain_deferred()
+
+                while True:
+                    message = mtou_protocol.recv_message(old_peer)
+                    self.assertIn(message["type"], ("restart_request", "restart_prepared"))
+                    if (message["type"] == "restart_prepared"
+                            and message["source_revision"] == controller._input_revision):
+                        break
+                self._send_restart_reply(old_peer, {
+                    "type": "restart_state", "session_id": 19, "state": "permitted",
+                    "restart_token": "permission", "code": "", "detail": "",
+                })
+                self.assertEqual(b"", old_peer.recv(1))
+
+            old_session.poll_connection()
+            mtou_mayaapi.drain_deferred()
+            fresh = controller._session
+            self.assertIsNotNone(fresh)
+            self.assertIsNot(fresh, old_session)
+            with listener.accept()[0] as new_peer:
+                new_hello, new_init = self._restart_peer_init(fresh, new_peer, 20, fresh=True)
+                self.assertNotIn("restart_token", old_hello)
+                self.assertEqual("permission", new_hello["restart_token"])
+                self.assertEqual(old_hello["maya_subject_id"], new_hello["maya_subject_id"])
+                self.assertIs(character, controller._scene)
+                self.assertEqual(("|coat",), character.snapshot().mesh_paths)
+                self.assertGreater(new_init["revision"], init["revision"])
+                self.assertEqual("model", new_init["workflow"])
+                self._ready_restart_peer(fresh, new_peer, 20, new_init, ["MayaOnly"])
+                fresh._sample_and_submit(force=True)
+                self.assertEqual("frame", mtou_protocol.recv_message(new_peer)["type"])
+                self.assertIsNone(controller._restart)
+                self.assertEqual("BLENDSHAPE_MISMATCH", controller._last_diagnostic["code"])
+                controller._show_warning.assert_not_called()
+                controller._show_error.assert_not_called()
+
+    def test_restart_deadline_closes_tcp_with_maya_main_thread_blocked(self):
+        unused_group, root, unused_display = self._create_character_group()
+        mesh = cmds.polyCube(name="body")[0]
+        cmds.skinCluster(root, mesh)
+        controller = mtou_controller.Controller()
+        controller._capture_scene(root)
+        controller._set_connected = mock.Mock()
+        controller._show_error = mock.Mock()
+        self.addCleanup(controller.close)
+        listener = self._restart_listener()
+        with mock.patch.multiple(mtou_config, HOST="127.0.0.1", PORT=listener.getsockname()[1]), \
+                mock.patch.object(mtou_session, "RESTART_COORDINATION_SECONDS", 0.3):
+            controller.connect()
+            active = controller._session
+            self.assertIsNotNone(active)
+            with listener.accept()[0] as peer:
+                unused_hello, init = self._restart_peer_init(active, peer, 19)
+                self._ready_restart_peer(active, peer, 19, init)
+                active._sample_and_submit(force=True)
+                controller._cached_playback.enter()
+                while mtou_protocol.recv_message(peer)["type"] != "cache_enter":
+                    pass
+                peer.sendall(mtou_protocol.encode_message({
+                    "type": "restart_state", "session_id": 19, "state": "ending",
+                    "code": "", "detail": "UE changed its composition",
+                }))
+                # Maya's host thread stays in a blocking read. It never drains
+                # deferred work, samples the scene, or gives up the cache lease.
+                reply = mtou_protocol.recv_message(peer)
+                self.assertEqual(("restart_cancel", "RESTART_TIMEOUT"),
+                                 (reply["type"], reply["code"]))
+                self.assertEqual(b"", peer.recv(1))
+                self.assertTrue(active.time_control.cache_holds_connection())
+
+                active.poll_connection()
+                mtou_mayaapi.drain_deferred()
+                self.assertIsNone(controller._session)
+                self.assertIsNone(controller._restart)
+                self.assertIsNone(controller._cached_playback)
+                self.assertFalse(active.time_control.cache_holds_connection())
+                self.assertEqual("RESTART_TIMEOUT", controller._last_diagnostic["code"])
+                controller._show_error.assert_not_called()
+
     def test_termination_from_a_worker_thread_is_delivered_without_an_idle_loop(self):
         # mayapy never runs maya.utils.executeDeferred work; batch mode queues
         # it for the host loop instead, which drains it on the main thread.
-        import threading
         group, root, unused_display = self._create_character_group()
         del group, unused_display
         mesh = cmds.polyCube(name="body")[0]

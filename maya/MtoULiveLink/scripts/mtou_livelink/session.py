@@ -4,12 +4,12 @@
 """Real-time streaming session, sender worker and negotiation events."""
 
 import errno
-import json
 import queue
 import select
 import socket
 import threading
 import time
+from uuid import uuid4
 
 from . import config, mayaapi
 from .config import (
@@ -40,7 +40,12 @@ from .protocol import (
     make_hello_message,
     make_init_message,
     make_remove_object_message,
+    make_restart_cancel_message,
+    make_restart_prepared_message,
+    make_restart_request_message,
     recv_message,
+    RESTART_STOP_CODES,
+    validate_ready_identities,
     validate_reply,
 )
 from .scene import CharacterSceneError
@@ -152,8 +157,76 @@ def invalid_reply_diagnostic(error):
     return make_diagnostic("INVALID_MESSAGE", str(error), details=str(error))
 
 
+RESTART_COORDINATION_SECONDS = 5.0
+RESTART_TOTAL_SECONDS = 32.0
+HANDSHAKE_PHASE_SECONDS = 5.0
+NETWORK_POLL_SECONDS = 0.05
+
+
+class RestartWindow(object):
+    """Immutable deadlines and the first terminal result across TCP connections."""
+
+    def __init__(self, worker=None):
+        now = time.monotonic()
+        self.coordination_deadline = now + RESTART_COORDINATION_SECONDS
+        self.deadline = now + RESTART_TOTAL_SECONDS
+        self._lock = threading.Lock()
+        self._failure = None
+        self._worker = worker
+
+    @property
+    def failure(self):
+        with self._lock:
+            return self._failure
+
+    def stop(self, diagnostic):
+        with self._lock:
+            if self._failure is None:
+                self._failure = diagnostic
+            return self._failure
+
+    def handoff(self, worker):
+        with self._lock:
+            self._worker = worker
+
+    def remaining(self, worker, coordinating, awaiting):
+        with self._lock:
+            if self._worker is not worker or self._failure is not None:
+                raise _RestartInterrupted()
+            deadline = self.coordination_deadline if coordinating else self.deadline
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                self._failure = make_diagnostic("RESTART_TIMEOUT", details=awaiting)
+                raise _RestartInterrupted()
+            return remaining
+
+
+class _RestartInterrupted(Exception):
+    pass
+
+
+class _DeadlineReader(object):
+    """Keep the framing reader inside one phase budget, including partial reads."""
+
+    def __init__(self, worker, sock, deadline, awaiting):
+        self._worker = worker
+        self._socket = sock
+        self._deadline = deadline
+        self._awaiting = awaiting
+
+    def recv(self, size):
+        while True:
+            timeout = self._worker._remaining(self._deadline, self._awaiting)
+            try:
+                return self._socket.recv(size)
+            except (BlockingIOError, socket.timeout):
+                select.select([self._socket], [], [], timeout)
+
+
 class SenderWorker(threading.Thread):
-    def __init__(self, init_message, hello_message=None, on_reply=None):
+    def __init__(self, init_message, hello_message=None, on_reply=None,
+                 restart=None, expected_source=None, expected_targets=None,
+                 permit_session_id=None):
         threading.Thread.__init__(self, name="MtoULiveLinkSender")
         self.daemon = True
         # One init per object of the set, primary first; a single dict is the
@@ -162,17 +235,22 @@ class SenderWorker(threading.Thread):
             self._init_messages = [dict(message) for message in init_message]
         else:
             self._init_messages = [init_message]
-        self._init_message = self._init_messages[0]
         self._hello_message = hello_message
-        # The connection greeting precedes the object descriptions so a peer
-        # with a different protocol version refuses before it reads an object.
-        initial = b""
-        if hello_message is not None:
-            initial += encode_message(hello_message)
-        for message in self._init_messages:
-            initial += encode_message(message)
-        self._initial_packet = initial
+        self._expected_source = expected_source
+        self._expected_targets = expected_targets
+        self._permit_session_id = permit_session_id
+        self._target_identities = {}
         self._hello_reply = None
+        self._restart = restart
+        self._restart_phase = None
+        self._restart_token = None
+        self._restart_packets = []
+        self._prepared_revision = None
+        self._init_started = False
+        self._init_available = restart is None
+        self._message_in_flight = False
+        self._cancel_attempted = False
+        self._peer_stopped = False
         self._latest = LatestFrame()
         # Unbounded by design: the cached upload streams hundreds of frames
         # through the same ordered path. Linkage controls keep their own bound
@@ -201,12 +279,13 @@ class SenderWorker(threading.Thread):
         self._reason_at = None
 
     def submit(self, frame_message):
+        packet = encode_message(frame_message)
         with self._lock:
-            ordered_mode = self._ordered_mode
-        if ordered_mode:
-            self.submit_ordered(frame_message)
-            return
-        self._latest.put(encode_message(frame_message))
+            if self._restart_phase is None:
+                if self._ordered_mode:
+                    self._ordered.put(packet)
+                else:
+                    self._latest.put(packet)
 
     def begin_ordered(self):
         with self._send_lock:
@@ -226,7 +305,10 @@ class SenderWorker(threading.Thread):
             self._ordered.put(latest)
 
     def submit_ordered(self, frame_message):
-        self._ordered.put(encode_message(frame_message))
+        packet = encode_message(frame_message)
+        with self._lock:
+            if self._restart_phase is None:
+                self._ordered.put(packet)
 
     def submit_control(self, message):
         """Queue one control message in order, whichever delivery mode is on.
@@ -235,14 +317,14 @@ class SenderWorker(threading.Thread):
         made while live frames stream (结束预览 after 返回实时, a refused
         entry) travels through the carryover queue that precedes them.
         """
+        packet = encode_message(message)
         with self._send_lock:
             with self._lock:
-                ordered_mode = self._ordered_mode
-            packet = encode_message(message)
-            if ordered_mode:
-                self._ordered.put(packet)
-            else:
-                self._carryover.put(packet)
+                if self._restart_phase is None:
+                    if self._ordered_mode:
+                        self._ordered.put(packet)
+                    else:
+                        self._carryover.put(packet)
 
     def ordered_pending(self):
         """Approximate count of queued packets not yet sent to Unreal."""
@@ -314,7 +396,105 @@ class SenderWorker(threading.Thread):
             except OSError:
                 pass
 
+    def stop_with_reason(self, diagnostic):
+        with self._lock:
+            self._stop_event.set()
+            self._state = "disconnected"
+            if self._restart is not None:
+                diagnostic = self._restart.stop(diagnostic)
+                self._retire_restart_locked()
+            self._send_cancel_locked(diagnostic)
+        self.stop()
+
+    def restart_status(self):
+        with self._lock:
+            if self._restart_phase == "permitted" and self._socket is not None:
+                return self._restart, "coordinating", None
+            return self._restart, self._restart_phase, self._restart_token
+
+    def restart_identities(self):
+        with self._lock:
+            targets = self._target_identities or self._expected_targets
+            return self._hello_reply["source_instance_id"], dict(targets)
+
+    def forget_target(self, object_id):
+        with self._lock:
+            self._target_identities.pop(object_id, None)
+
+    def _begin_coordination_locked(self):
+        if self._restart_phase is None:
+            self._restart = self._restart or RestartWindow(self)
+            self._restart_phase = "coordinating"
+            self._state = "restarting"
+            self._latest.take()
+
+    def request_restart(self, revision):
+        """Fence the connection synchronously, before Maya captures or restores."""
+        with self._lock:
+            if self._state == "error":
+                return self._restart
+            if self._state == "disconnected" or self._stop_event.is_set():
+                return None
+            if self._restart_phase == "permitted":
+                return self._restart
+            if self._state != "ready" and self._restart is None:
+                return None
+            if not self._init_started:
+                self._init_available = False
+                if self._hello_reply:
+                    self._state = "preparing_init"
+                return self._restart
+            self._begin_coordination_locked()
+            self._restart_packets[:] = [make_restart_request_message(
+                self._hello_reply["session_id"], revision)]
+            return self._restart
+
+    def prepare_restart(self, revision):
+        with self._lock:
+            if self._restart_phase != "coordinating" or self._restart.failure:
+                return
+            self._restart_packets.append(make_restart_prepared_message(
+                self._hello_reply["session_id"], revision))
+
+    def prepare_init(self, messages):
+        with self._lock:
+            if self._restart_phase is None and not self._init_started:
+                self._init_messages = messages
+                self._init_available = True
+
+    def cancel_restart(self, diagnostic):
+        with self._lock:
+            if self._restart is not None:
+                self._restart.stop(diagnostic)
+
+    def _expire_restart(self, awaiting):
+        with self._lock:
+            operation = self._restart
+            coordinating = self._restart_phase == "coordinating"
+            prepared = self._prepared_revision is not None
+        if operation is None:
+            return float("inf")
+        if coordinating and not awaiting.startswith("sending restart_"):
+            awaiting = ("waiting for Unreal restoration and restart permission" if prepared
+                        else "waiting for Maya capture and resource restoration")
+        return operation.remaining(self, coordinating, awaiting)
+
+    def _remaining(self, deadline, awaiting):
+        operation_remaining = self._expire_restart(awaiting)
+        if self._stop_event.is_set():
+            raise _RestartInterrupted()
+        timeout = deadline - time.monotonic()
+        if timeout <= 0.0:
+            with self._lock:
+                operation = self._restart
+            if operation is not None:
+                operation.stop(make_diagnostic("RESTART_TIMEOUT", details=awaiting))
+                raise _RestartInterrupted()
+            raise socket.timeout("timed out " + awaiting)
+        return min(NETWORK_POLL_SECONDS, timeout, operation_remaining)
+
     def _connect(self):
+        self._expire_restart("connecting to Unreal")
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         with self._lock:
             self._socket = sock
@@ -327,218 +507,357 @@ class SenderWorker(threading.Thread):
         pending = (errno.EINPROGRESS, errno.EWOULDBLOCK)
         if result not in (0,) + pending:
             raise OSError(result, "connection failed")
-        deadline = time.time() + 2.0
+        deadline = time.monotonic() + 2.0
         while result:
-            if self._stop_event.is_set():
-                return None
-            timeout = deadline - time.time()
-            if timeout <= 0.0:
-                raise socket.timeout("timed out connecting to Unreal")
-            try:
-                _, writable, errors = select.select([], [sock], [sock], min(0.05, timeout))
-            except OSError:
-                if self._stop_event.is_set():
-                    return None
-                raise
+            timeout = self._remaining(deadline, "connecting to Unreal")
+            _, writable, errors = select.select([], [sock], [sock], timeout)
             if writable or errors:
                 result = sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
                 if result:
                     raise OSError(result, "connection failed")
-        if self._stop_event.is_set():
-            return None
         return sock
 
-    def _send_initial(self, sock):
-        packet = memoryview(self._initial_packet)
-        deadline = time.time() + 5.0
+    def _send_packet(self, sock, packet, deadline, awaiting, stream=False, initial=None):
+        packet = memoryview(packet)
+        started = False
         while packet:
+            timeout = self._remaining(deadline, awaiting)
             with self._lock:
+                # Finish an in-flight message to preserve framing on the
+                # coordination TCP. A fenced connection cannot start a pose,
+                # cached upload, group, or another init message.
                 if self._stop_event.is_set():
+                    raise _RestartInterrupted()
+                if not started and ((stream or initial) and self._restart_phase):
                     return False
-                timeout = deadline - time.time()
-                if timeout <= 0.0:
-                    raise socket.timeout("timed out sending init message")
+                if initial is not None and not started and (
+                        not self._init_available or initial is not self._init_messages):
+                    return False
                 try:
                     sent = sock.send(packet)
-                except OSError as exc:
-                    if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
-                        raise
+                except (BlockingIOError, socket.timeout):
                     sent = None
+                if sent:
+                    started = True
+                    self._message_in_flight = sent < len(packet)
+                    if initial is not None:
+                        self._init_started = True
+                        if self._restart_phase is None:
+                            self._state = "connecting"
             if sent is None:
-                select.select([], [sock], [], min(0.05, timeout))
+                select.select([], [sock], [], timeout)
             elif not sent:
-                raise EOFError("connection closed while sending init message")
+                raise EOFError("connection closed " + awaiting)
             else:
                 packet = packet[sent:]
         return True
 
-    def _read_handshake_reply(self, sock):
-        """Read until ready/error, recording the hello acknowledgement."""
-        deadline = time.time() + 5.0
+    def _send_initial(self, sock):
+        deadline = self._init_deadline
+        with self._lock:
+            messages = self._init_messages
+        for message in messages:
+            if not self._send_packet(sock, encode_message(message), deadline,
+                                     "sending init message", initial=messages):
+                return False
+        return True
+
+    def _receive(self, sock, deadline, awaiting):
+        return validate_reply(recv_message(_DeadlineReader(self, sock, deadline, awaiting)))
+
+    def _read_handshake_reply(self, sock, expected):
+        deadline = time.monotonic() + HANDSHAKE_PHASE_SECONDS
+        awaiting = "waiting for " + expected
         while not self._stop_event.is_set():
-            timeout = deadline - time.time()
-            if timeout <= 0.0:
-                raise socket.timeout("timed out waiting for the Unreal reply")
-            sock.settimeout(timeout)
-            reply = validate_reply(recv_message(sock))
-            reply_type = reply.get("type")
-            if reply_type == "hello_ack":
+            if expected == "ready" and self._restart is not None:
+                # Poll before starting a framed read so a local fence can
+                # switch to coordination even if Unreal never replies Ready.
                 with self._lock:
-                    self._hello_reply = dict(reply)
+                    if self._restart_phase is not None:
+                        return None
+                timeout = self._remaining(deadline, awaiting)
+                if not select.select([sock], [], [], timeout)[0]:
+                    continue
+            reply = self._receive(sock, deadline, awaiting)
+            kind = reply["type"]
+            if kind == "restart_state":
+                self._receive_restart_state(reply)
+                if self._restart_phase is not None:
+                    return None
                 continue
-            if reply_type == "mode_state":
+            if kind == "mode_state" and expected == "ready":
                 continue
+            if kind == "error":
+                self._fail(error_reply_diagnostic(reply))
+                return None
+            if kind != expected:
+                raise ValueError("expected {0}, received {1}".format(expected, kind))
             return reply
         return None
 
-    def _identity_mismatch(self, reply, init_message=None):
-        """Describe the first identity field the ready reply fails to echo."""
-        init_message = init_message or self._init_message
-        expected_object = init_message.get("object_id")
-        if expected_object is not None and reply.get("object_id") != expected_object:
-            return "object_id: expected {0!r}, ready reported {1!r}".format(
-                expected_object, reply.get("object_id"))
-        checks = (
-            ("session_id", self._hello_reply or {}),
-            ("set_revision", init_message),
-            ("space_revision", init_message),
-        )
-        for field, source in checks:
-            expected = exact_int(source.get(field))
-            if expected is None:
-                continue
-            actual = exact_int(reply.get(field))
-            if actual != expected:
+    def _greet(self, sock):
+        deadline = time.monotonic() + HANDSHAKE_PHASE_SECONDS
+        self._send_packet(sock, encode_message(self._hello_message), deadline, "sending hello")
+        reply = self._read_handshake_reply(sock, "hello_ack")
+        if reply is None:
+            return False
+        session_id = exact_int(reply["session_id"])
+        if session_id is None or not 0 < session_id <= 2147483647:
+            raise ValueError("hello_ack session_id must be a positive int32")
+        if self._expected_source is not None and reply["source_instance_id"] != self._expected_source:
+            self._fail(make_diagnostic("SUBJECT_CHANGED", details="Unreal Source instance changed"))
+            return False
+        with self._lock:
+            self._hello_reply = reply
+            if self._restart is not None:
+                self._init_available = False
+                self._state = "preparing_init"
+        return True
+
+    def _wait_for_init(self, sock):
+        deadline = self._init_deadline
+        awaiting = "waiting for the latest Maya snapshot after hello_ack"
+        while True:
+            timeout = self._remaining(deadline, awaiting)
+            with self._lock:
+                if self._restart_phase or self._init_available:
+                    return
+            if select.select([sock], [], [], timeout)[0]:
+                reply = self._receive(sock, deadline, awaiting)
+                if reply["type"] == "restart_state":
+                    self._receive_restart_state(reply)
+                elif reply["type"] == "error":
+                    self._fail(error_reply_diagnostic(reply))
+                    raise _RestartInterrupted()
+                elif reply["type"] != "mode_state":
+                    raise ValueError("expected no reply before init, received " + reply["type"])
+
+    def _identity_mismatch(self, reply, init_message):
+        """Describe the first field the Ready reply fails to echo."""
+        for field, source in (("object_id", init_message), ("session_id", self._hello_reply or {}),
+                              ("set_revision", init_message), ("space_revision", init_message),
+                              ("revision", init_message), ("workflow", init_message)):
+            expected = source.get(field)
+            actual = reply.get(field)
+            if field in ("session_id", "set_revision", "space_revision", "revision"):
+                actual = exact_int(actual)
+            if expected is not None and actual != expected:
                 return "{0}: expected {1!r}, ready reported {2!r}".format(
                     field, expected, reply.get(field))
         return None
 
     def _negotiate_set(self, sock):
-        """Read one ready per object of the set; returns the merged warning.
-
-        Any object Unreal refuses ends the whole set: the error reply becomes
-        the session's terminal status and nothing streams.
-        """
-        warnings = []
+        warnings, replies = [], []
         for init_message in self._init_messages:
-            reply = self._read_handshake_reply(sock)
+            reply = self._read_handshake_reply(sock, "ready")
             if reply is None:
-                return None
-            if reply.get("type") == "error":
-                diagnostic = error_reply_diagnostic(reply)
-                self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
-                return None
-            if reply.get("type") != "ready":
-                diagnostic = make_diagnostic(
-                    "INVALID_MESSAGE",
-                    "expected ready, received {0}".format(reply.get("type")))
-                self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
                 return None
             identity_error = self._identity_mismatch(reply, init_message)
             if identity_error is not None:
-                diagnostic = make_diagnostic(
-                    "INVALID_MESSAGE",
-                    "The ready reply does not echo the negotiated identity.",
-                    details=identity_error)
-                self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
-                return None
-            expected_revision = exact_int(init_message.get("revision"))
-            if (expected_revision is None
-                    or exact_int(reply.get("revision")) != expected_revision):
-                diagnostic = make_diagnostic(
-                    "INVALID_MESSAGE",
-                    "The ready reply does not echo the negotiated revision.",
-                    details="init revision {0!r}, ready revision {1!r}".format(
-                        init_message.get("revision"),
-                        reply.get("revision")))
-                self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
-                return None
+                raise ValueError("The Ready reply does not echo the negotiated identity. "
+                                 + identity_error)
             warnings.append(blendshape_warning_from_reply(
                 filter_bone_driven_differences(init_message, reply)))
-        return merge_object_warnings(warnings)
+            replies.append(reply)
+        objects = self._init_messages[0].get("set_objects", [CHARACTER_OBJECT_ID])
+        targets = validate_ready_identities(replies, objects)
+        if self._expected_targets is not None and targets != self._expected_targets:
+            self._fail(make_diagnostic("SUBJECT_CHANGED", details="Unreal actual target set changed"))
+            return None
+        self._expire_restart("waiting for all objects to become Ready")
+        with self._lock:
+            if self._restart_phase is not None:
+                return None
+            if self._restart is not None and self._restart.failure is not None:
+                raise _RestartInterrupted()
+            self._target_identities = targets
+            self._restart = None
+            self._init_started = True
+            self._state = "ready"
+            self._detail = "Connected"
+            self._warning = merge_object_warnings(warnings)
+        return self._warning
 
     def hello_reply(self):
         with self._lock:
             return dict(self._hello_reply) if self._hello_reply else None
 
+    def _receive_restart_state(self, reply):
+        with self._lock:
+            phase = reply["state"]
+            current = (self._hello_reply or {}).get("session_id")
+            issued_permit = (self._restart is not None and phase == "stopped"
+                             and reply["session_id"] == self._permit_session_id)
+            if reply["session_id"] != current and not issued_permit:
+                return
+            if phase == "ending":
+                if self._state == "ready" or self._restart is not None:
+                    self._begin_coordination_locked()
+            elif phase == "permitted":
+                if (self._restart_phase == "coordinating" and self._prepared_revision is not None
+                        and self._restart.failure is None):
+                    # Permission itself must arrive inside the coordination window.
+                    if time.monotonic() >= self._restart.coordination_deadline:
+                        self._restart.stop(make_diagnostic(
+                            "RESTART_TIMEOUT", details="waiting for Unreal restart permission"))
+                        raise _RestartInterrupted()
+                    self._restart_phase = "permitted"
+                    self._restart_token = reply["restart_token"]
+            elif self._restart_phase != "permitted":
+                # A stopped state may be the first observable event if Unreal
+                # already knows a changed subject cannot be reused.
+                self._begin_coordination_locked()
+                self._restart.stop(make_diagnostic(reply["code"], details=reply["detail"]))
+                self._peer_stopped = True
+                raise _RestartInterrupted()
+
+    def _pop_stream_packet(self):
+        with self._lock:
+            for pending in (self._carryover, self._ordered if self._ordered_mode else None):
+                if pending is not None:
+                    try:
+                        return pending.get_nowait(), pending
+                    except queue.Empty:
+                        pass
+            return self._latest.take(), None
+
+    def _run_connected(self, sock):
+        while not self._stop_event.is_set():
+            remaining = self._expire_restart("waiting for Maya to use the restart permit")
+            with self._lock:
+                phase = self._restart_phase
+                message = self._restart_packets.pop(0) if self._restart_packets else None
+            if phase == "permitted":
+                # Release the old TCP now, and keep the window enforced while
+                # Maya's main thread may be blocked before starting the new TCP.
+                self._close_socket()
+                while not self._stop_event.wait(NETWORK_POLL_SECONDS):
+                    self._expire_restart("waiting for Maya to use the restart permit")
+                return
+            if phase == "coordinating":
+                if message is not None:
+                    self._send_packet(sock, encode_message(message), float("inf"),
+                                      "sending " + message["type"])
+                    with self._lock:
+                        if message["type"] == "restart_prepared":
+                            self._prepared_revision = message["source_revision"]
+            else:
+                packet, pending = self._pop_stream_packet()
+                if packet is not None:
+                    try:
+                        self._send_packet(sock, packet, time.monotonic() + 0.25,
+                                          "sending streaming data", stream=True)
+                    finally:
+                        if pending is not None:
+                            pending.task_done()
+            if not select.select([sock], [], [], min(0.01, remaining))[0]:
+                continue
+            reply = self._receive(sock, time.monotonic() + 0.25, "receiving streaming data")
+            if reply["type"] == "restart_state":
+                self._receive_restart_state(reply)
+                continue
+            with self._lock:
+                restarting = self._restart_phase is not None
+                self._reason = None
+            if restarting:
+                # Poses and mode replies already in flight belong to the old
+                # stream. A failure from that same negotiation still stops it.
+                if reply["type"] == "error" and reply.get("kind") != "scheduling":
+                    self._fail(error_reply_diagnostic(reply))
+                    return
+                continue
+            if self._on_reply is None or not self._on_reply(reply):
+                raise ValueError("unexpected runtime reply: " + reply["type"])
+
+    def _fail(self, diagnostic):
+        with self._lock:
+            if self._restart is not None:
+                diagnostic = self._restart.stop(diagnostic)
+                self._retire_restart_locked()
+        self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
+
+    def _retire_restart_locked(self):
+        self._restart_phase = "stopped"
+        self._restart_token = None
+        self._restart_packets.clear()
+        self._prepared_revision = None
+        self._init_available = False
+
+    def _close_socket(self):
+        with self._lock:
+            sock, self._socket = self._socket, None
+        if sock is not None:
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _report_restart_failure(self):
+        with self._lock:
+            operation = self._restart
+        diagnostic = operation.failure if operation is not None else None
+        if diagnostic is not None:
+            self._fail(diagnostic)
+            with self._lock:
+                self._send_cancel_locked(diagnostic)
+
+    def _send_cancel_locked(self, diagnostic):
+        if (self._socket is None or not self._hello_reply or self._message_in_flight
+                or self._peer_stopped or self._cancel_attempted):
+            return
+        self._cancel_attempted = True
+        code = diagnostic["code"]
+        cancel = make_restart_cancel_message(
+            self._hello_reply["session_id"],
+            code if code in RESTART_STOP_CODES else "INTERNAL_ERROR",
+            diagnostic["details"])
+        try:
+            self._socket.send(encode_message(cancel))
+        except OSError:
+            pass
+
     def run(self):
         connected = False
         try:
+            if self._restart is not None:
+                self._restart.handoff(self)
             sock = self._connect()
             if sock is None or self._stop_event.is_set():
                 return
-            if not self._send_initial(sock):
+            if self._hello_message is not None and not self._greet(sock):
                 return
-            sock.settimeout(5.0)
-            warning = self._negotiate_set(sock)
-            if warning is None:
-                return
-            connected = True
-            self._set_status("ready", "Connected", warning=warning)
-            sock.settimeout(0.25)
-            while not self._stop_event.is_set():
-                with self._lock:
-                    ordered_mode = self._ordered_mode
-                    packet = None
-                    try:
-                        packet = self._carryover.get_nowait()
-                        from_carryover = True
-                    except queue.Empty:
-                        from_carryover = False
-                    if packet is None:
-                        if ordered_mode:
-                            try:
-                                packet = self._ordered.get_nowait()
-                            except queue.Empty:
-                                packet = None
-                        else:
-                            packet = self._latest.take()
-                if packet is not None:
-                    with self._send_lock:
-                        sock.sendall(packet)
-                    if from_carryover:
-                        self._carryover.task_done()
-                    elif ordered_mode:
-                        self._ordered.task_done()
-                readable, _, _ = select.select([sock], [], [], 0.01)
-                if readable:
-                    try:
-                        reply = validate_reply(recv_message(sock))
-                    except (ValueError, UnicodeError) as exc:
-                        diagnostic = invalid_reply_diagnostic(exc)
-                        self._set_status(
-                            "error", diagnostic["summary"], diagnostic=diagnostic)
-                        return
-                    with self._lock:
-                        # Only the message Unreal sent last explains its close.
-                        self._reason = None
-                    if self._on_reply is not None and self._on_reply(reply):
-                        continue
-                    diagnostic = make_diagnostic(
-                        "INVALID_MESSAGE",
-                        "unexpected runtime reply: {0}".format(reply.get("type")))
-                    self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
+            self._init_deadline = time.monotonic() + HANDSHAKE_PHASE_SECONDS
+            while not self._restart_phase:
+                if self._restart is not None:
+                    self._wait_for_init(sock)
+                if self._send_initial(sock):
+                    break
+            if not self._restart_phase:
+                ready = self._negotiate_set(sock)
+                if ready is None and not self._restart_phase:
                     return
+                connected = ready is not None
+            self._run_connected(sock)
+        except _RestartInterrupted:
+            pass
         except Exception as exc:
             if not self._stop_event.is_set():
                 reason = self._close_reason()
-                if isinstance(exc, (ValueError, UnicodeError, json.JSONDecodeError)):
+                if isinstance(exc, (ValueError, UnicodeError)):
                     diagnostic = invalid_reply_diagnostic(exc)
                 elif connected and reason is not None:
-                    # Unreal closed the connection after the error it reported.
                     diagnostic = reason
                 else:
-                    code = "STREAM_INTERRUPTED" if connected else "UNREAL_NOT_REACHABLE"
+                    code = ("STREAM_INTERRUPTED" if connected or self._restart_phase
+                            else "UNREAL_NOT_REACHABLE")
                     diagnostic = make_diagnostic(code, str(exc), details=str(exc))
-                self._set_status("error", diagnostic["summary"], diagnostic=diagnostic)
+                self._fail(diagnostic)
         finally:
-            with self._lock:
-                sock, self._socket = self._socket, None
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
+            try:
+                if not self._stop_event.is_set():
+                    self._report_restart_failure()
+            finally:
+                self._close_socket()
             if self._stop_event.is_set():
                 self._set_status("disconnected", "Disconnected")
 
@@ -577,11 +896,13 @@ def copy_session_payload(value):
 
 
 class StreamingSessionEvent(object):
-    def __init__(self, kind, warning=None, diagnostic=None, recapture_scene=False):
+    def __init__(self, kind, warning=None, diagnostic=None, recapture_scene=False,
+                 automatic=False):
         self._kind = kind
         self._warning = copy_session_payload(warning) if warning else None
         self._diagnostic = copy_session_payload(diagnostic) if diagnostic else None
         self._recapture_scene = bool(recapture_scene)
+        self.automatic = automatic
 
     @property
     def kind(self):
@@ -607,7 +928,8 @@ class StreamingSession(object):
                  playback_state=None, workflow=WORKFLOW_ANIMATION,
                  blendshapes_enabled=True, object_id=CHARACTER_OBJECT_ID,
                  set_revision=1, space_revision=1, scene_units=None,
-                 maya_version=None, secondary_scene=None, on_statement=None):
+                 maya_version=None, secondary_scene=None, on_statement=None,
+                 maya_subject_id=None, automatic_restart=None):
         if workflow not in WORKFLOWS:
             raise StreamingSessionError(
                 "INVALID_MESSAGE",
@@ -643,6 +965,9 @@ class StreamingSession(object):
         self._space_revision = int(space_revision)
         self._scene_units = tuple(scene_units or ("cm", 1.0))
         self._maya_version = maya_version
+        self._maya_subject_id = maya_subject_id or uuid4().hex
+        self._automatic_restart = automatic_restart
+        self._reported_restart_state = None
         self._worker = None
         self._worker_started = False
         self._callback_ids = []
@@ -711,6 +1036,60 @@ class StreamingSession(object):
         return self._worker.hello_reply()
 
     @property
+    def maya_subject_id(self):
+        return self._maya_subject_id
+
+    @property
+    def automatic(self):
+        return self._automatic_restart is not None
+
+    def restart_status(self):
+        if self._worker is None:
+            return None, None, None
+        return self._worker.restart_status()
+
+    @property
+    def restarting(self):
+        return self.restart_status()[0] is not None
+
+    def request_restart(self, revision):
+        if self._worker is None or self._outcome is not None:
+            return None
+        return self._worker.request_restart(revision)
+
+    def prepare_restart(self, revision):
+        self._worker.prepare_restart(revision)
+
+    def prepare_restart_init(self, snapshots, workflow, blendshapes_enabled):
+        if len(snapshots) > 1 and workflow != WORKFLOW_ANIMATION:
+            raise StreamingSessionError(
+                "OBJECT_SET_UNSUPPORTED", "模型工作流只支持单个角色。")
+        self._workflow = workflow
+        self._blendshapes_enabled = blendshapes_enabled
+        self._revision = snapshots[0].revision
+        if len(snapshots) > 1:
+            self._secondary_revision = snapshots[1].revision
+        self._worker.prepare_init([self._object_init(snapshot, object_id)
+                                  for snapshot, object_id in zip(snapshots, self.set_objects)])
+
+    def cancel_restart(self, diagnostic):
+        if self._worker is not None:
+            self._worker.cancel_restart(diagnostic)
+
+    def restart_identities(self):
+        return self._worker.restart_identities()
+
+    def release_restart_leases(self):
+        self._time_control.terminate()
+        if self._worker is not None:
+            self._worker.end_ordered(discard_pending=True)
+
+    def fence_for_disconnect(self, diagnostic):
+        if self._worker is not None:
+            self._worker.stop_with_reason(diagnostic)
+        self.release_restart_leases()
+
+    @property
     def revision(self):
         return self._revision
 
@@ -741,7 +1120,8 @@ class StreamingSession(object):
               playback_state=None, workflow=WORKFLOW_ANIMATION,
               blendshapes_enabled=True, object_id=CHARACTER_OBJECT_ID,
               set_revision=1, space_revision=1, scene_units=None,
-              maya_version=None, secondary_scene=None, on_statement=None):
+              maya_version=None, secondary_scene=None, on_statement=None,
+              maya_subject_id=None, automatic_restart=None):
         try:
             fps = validate_frame_rate(fps)
             snapshot = scene.snapshot()
@@ -761,7 +1141,7 @@ class StreamingSession(object):
         session = cls(scene, fps, on_event, playback_cap, playback_state,
                       workflow, blendshapes_enabled, object_id, set_revision,
                       space_revision, scene_units, maya_version, secondary_scene,
-                      on_statement)
+                      on_statement, maya_subject_id, automatic_restart)
         try:
             session._start(snapshot, secondary_snapshot)
         except Exception as exc:
@@ -796,11 +1176,18 @@ class StreamingSession(object):
             init_messages.append(
                 self._object_init(secondary_snapshot, SECONDARY_OBJECT_ID))
             self._secondary_revision = secondary_snapshot.revision
+        restart, token, expected_source, expected_targets, permit_session_id = (
+            self._automatic_restart or (None, None, None, None, None))
         hello_message = make_hello_message(
             self._maya_version or "unknown",
-            self._scene_units[0], self._scene_units[1], self._scene_fps)
+            self._scene_units[0], self._scene_units[1], self._scene_fps,
+            maya_subject_id=self._maya_subject_id, restart_token=token)
+        self._maya_subject_id = hello_message["maya_subject_id"]
+        restart_options = ({"restart": restart, "expected_source": expected_source,
+                            "expected_targets": expected_targets,
+                            "permit_session_id": permit_session_id} if restart else {})
         self._worker = SenderWorker(
-            init_messages, hello_message, on_reply=self._route_reply)
+            init_messages, hello_message, on_reply=self._route_reply, **restart_options)
         self._revision = snapshot.revision
         self._worker.start()
         self._worker_started = True
@@ -984,6 +1371,7 @@ class StreamingSession(object):
         self._secondary_revision = None
         self._set_revision = revision
         self._removal_pending = None
+        self._worker.forget_target(SECONDARY_OBJECT_ID)
         if not self._sampling_paused:
             self._sample_and_submit(force=True)
         return removed
@@ -1089,14 +1477,27 @@ class StreamingSession(object):
         if self._outcome is not None or self._worker is None:
             return False
         state, detail, unused_warning, diagnostic = self._worker.status()
-        return not self._fail_on_worker_state(state, detail, diagnostic)
+        if self._fail_on_worker_state(state, detail, diagnostic):
+            return False
+        self._notice_restart(state)
+        return True
+
+    def _notice_restart(self, state):
+        if state not in ("restarting", "preparing_init"):
+            return
+        operation, phase, unused_token = self.restart_status()
+        signature = (state, operation, phase)
+        if self._reported_restart_state != signature:
+            self._reported_restart_state = signature
+            self._emit(StreamingSessionEvent("restart"))
 
     def _fail_on_worker_state(self, state, detail, diagnostic):
         """Request the terminal failure for a failed worker; True when it did."""
         if state == "error":
+            operation, unused_phase, unused_token = self.restart_status()
             self._request_failure(
                 diagnostic or make_diagnostic("INTERNAL_ERROR", "Streaming failed."),
-                recapture_scene=False)
+                recapture_scene=False, automatic=self.automatic or operation is not None)
             return True
         if state == "disconnected":
             self._request_failure(
@@ -1114,10 +1515,15 @@ class StreamingSession(object):
         if self._fail_on_worker_state(state, detail, diagnostic):
             return
         if state != "ready":
+            self._notice_restart(state)
             return
         if self._phase == "connecting":
             self._phase = "ready"
-            self._emit(StreamingSessionEvent("ready", warning=warning))
+            automatic = self.automatic
+            self._automatic_restart = None
+            self._emit(StreamingSessionEvent("ready", warning=warning, automatic=automatic))
+            if not self.is_ready:
+                return
         if self._removal_pending is not None:
             # The old set is closed; the new one starts with Unreal's answer.
             return
@@ -1131,6 +1537,8 @@ class StreamingSession(object):
         try:
             frame = self._scene.sample()
         except CharacterSceneError as error:
+            if not self.is_ready:
+                return
             self._request_failure(
                 make_diagnostic(
                     error.code if error.code in DIAGNOSTICS else "SAMPLING_FAILED",
@@ -1153,6 +1561,8 @@ class StreamingSession(object):
             try:
                 secondary = self._secondary_scene.sample()
             except CharacterSceneError as error:
+                if not self.is_ready:
+                    return
                 self._request_failure(
                     make_diagnostic(
                         error.code if error.code in DIAGNOSTICS else "SAMPLING_FAILED",
@@ -1174,13 +1584,14 @@ class StreamingSession(object):
         self._worker.submit(make_frame_message(
             list(frame.transforms), list(frame.curves), rows))
 
-    def _request_failure(self, diagnostic, recapture_scene):
+    def _request_failure(self, diagnostic, recapture_scene, automatic=False):
         if self._outcome is not None:
             return
         self._outcome = "failed"
         self._phase = "terminal"
         self._terminal_event = StreamingSessionEvent(
-            "failed", diagnostic=diagnostic, recapture_scene=recapture_scene)
+            "failed", diagnostic=diagnostic, recapture_scene=recapture_scene,
+            automatic=automatic)
         if not self._cleanup_pending:
             self._cleanup_pending = True
             mayaapi.run_deferred(self._finish_terminal, cmds.evalDeferred)

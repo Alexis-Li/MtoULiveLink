@@ -4,6 +4,7 @@
 """Product controller: panel, session and scene state authority."""
 
 import time
+from uuid import uuid4
 
 from . import mayaapi
 from .cache import CachedPlayback, CachedPlaybackError
@@ -76,7 +77,14 @@ class Controller(object):
         self._pending_root = None
         self._capture_args = None
         self._script_jobs = []
-        self._outfit_change_was_connected = False
+        self._maya_subject_id = uuid4().hex
+        self._restart = None
+        self._input_revision = 1
+        self._restart_dispatch = None
+        self._restart_released = None
+        self._restart_prepared = None
+        self._restart_recovery_failure = None
+        self._connection_stop_diagnostic = None
         self._pending_stop_status = None
         self._last_diagnostic = make_diagnostic("INTERNAL_ERROR", "暂无诊断信息")
         self._last_warning = {"missing_in_unreal": [], "missing_in_maya": [],
@@ -505,8 +513,9 @@ class Controller(object):
         self._set_enabled(self._realtime_mode_button, realtime or can_leave)
         self._set_enabled(self._cached_mode_button,
                           connected and not can_cancel and not linking and not two_objects)
-        self._set_enabled(self._connect_button, not connected)
-        self._set_enabled(self._disconnect_button, connected or self._scene is not None)
+        self._set_enabled(self._connect_button, self._session is None and self._restart is None)
+        self._set_enabled(self._disconnect_button,
+                          self._session is not None or self._scene is not None)
         self._set_tooltip(
             self._capture_button, self._disabled_reason(can_capture, "capture"))
         self._set_tooltip(
@@ -599,11 +608,7 @@ class Controller(object):
         if workflow == self._workflow or workflow not in WORKFLOWS:
             return
         self._workflow = workflow
-        # Switching workflows disconnects and clears Animation cached
-        # playback while retaining the captured root, Display control, and
-        # current outfit. The Maya scene is never edited here.
-        self.disconnect(status="已切换到{0}工作流，请重新连接".format(
-            "模型" if workflow == WORKFLOW_MODEL else "动画"))
+        self._restart_for_input_change()
         self._update_mode_controls()
         self._update_workflow_controls()
 
@@ -617,8 +622,7 @@ class Controller(object):
         if value == self._blendshapes_enabled:
             return
         self._blendshapes_enabled = value
-        if self._session is not None:
-            self.disconnect(status="传递 BS 已切换，请重新连接")
+        self._restart_for_input_change()
 
     def _update_cache_text(self, summary=None):
         label, tooltip = cache_summary_text(summary)
@@ -736,6 +740,9 @@ class Controller(object):
     def _on_cached_playback_view(self, view):
         self._cached_view = view
         self._update_cache_text(view.cache_summary)
+        if self._restart is not None:
+            self._update_mode_controls()
+            return
         if (view.state == CachedPlayback.CAPTURING and view.total
                 and view.current == view.total):
             self._set_text(self._status_text, "缓存完成，正在上传…")
@@ -828,6 +835,8 @@ class Controller(object):
 
     def _set_connected(self, connected, status):
         label = "●  已连接" if connected else "●  未连接"
+        if self._restart is not None:
+            connected, label, status = False, "●  重新连接中", "正在重新连接 Unreal…"
         if self._light and cmds.control(self._light, exists=True):
             cmds.text(self._light, edit=True, label=label, backgroundColor=(
                 LIGHT_ON_BACKGROUND if connected else LIGHT_OFF_BACKGROUND))
@@ -937,7 +946,7 @@ class Controller(object):
 
     def set_role(self):
         require_maya()
-        self._clear_role()
+        replaced = self._clear_role("Maya character was explicitly set again")
         try:
             root = selected_root()
             secondary = self._secondary_scene
@@ -951,6 +960,8 @@ class Controller(object):
                 status += "（检测到 {0} 个重名骨骼，将由 UE 尝试映射）".format(
                     len(snapshot.duplicate_paths))
             status += bind_conflict_status(snapshot)
+            if replaced:
+                status = self._last_diagnostic["summary"] + " · " + status
             self._set_connected(False, status)
         except CharacterSceneError as error:
             if error.code == "AMBIGUOUS_DISPLAY":
@@ -1012,38 +1023,137 @@ class Controller(object):
         except CharacterSceneError as error:
             self._show_error(self._scene_diagnostic(error))
     def _on_character_scene_event(self, event):
-        if event.kind == "display_changed":
-            self._render_snapshot(event.snapshot)
-            return
         if event.kind == "character_change_started":
-            self._discard_cached_playback()
-            self._outfit_change_was_connected = self._session is not None
-            self.disconnect(status="衣服正在切换，正在刷新角色…")
-            return
-        if event.kind == "outfit_changed":
+            self._restart_for_input_change()
+        elif event.kind in ("outfit_changed", "display_changed"):
             self._render_snapshot(event.snapshot)
-            if self._outfit_change_was_connected:
-                status = (
-                    "衣服已切换为 {0}。请在 UE 删除旧 Actor，放置新 Binding 后重新连接。"
-                ).format(event.snapshot.outfit)
-            else:
-                status = "当前衣服已切换为 {0}。".format(event.snapshot.outfit)
-            status += bind_conflict_status(event.snapshot)
-            self._outfit_change_was_connected = False
-            self._set_connected(False, status)
-            return
-        if event.kind == "character_invalidated":
-            self._discard_cached_playback()
-            was_connected = self._session is not None
-            error = event.error
-            self.disconnect(status=error.message)
+            if event.kind == "outfit_changed":
+                if (self._session is None and self._restart is None
+                        and self._connection_stop_diagnostic is None):
+                    status = "当前衣服已切换为 {0}。".format(event.snapshot.outfit)
+                    self._set_connected(False, status + bind_conflict_status(event.snapshot))
+                else:
+                    self._schedule_restart(self._session)
+        elif event.kind == "character_invalidated":
+            self._on_character_invalidated(event.error)
             self._scene = None
             self._pending_root = None
+            self._capture_args = None
             self._clear_scene_text()
-            if was_connected:
-                diagnostic = self._scene_diagnostic(error, "SAMPLING_FAILED")
-                mayaapi.run_deferred(lambda: self._show_error(diagnostic, session=True),
-                                     cmds.evalDeferred)
+
+    def _on_character_invalidated(self, error):
+        if error.code == "CHARACTER_ROOT_DESTROYED":
+            self._maya_subject_id = uuid4().hex
+            self.disconnect(status=error.message, code="SUBJECT_CHANGED")
+        else:
+            self._restart_for_input_change()
+            if self._restart is not None and self._session is not None:
+                self._session.cancel_restart(self._scene_diagnostic(error))
+            else:
+                self.disconnect(status=error.message)
+
+    def _restart_for_input_change(self):
+        self._input_revision += 1
+        session = self._session
+        if session is None:
+            self._discard_cached_playback()
+            return
+        operation = session.request_restart(self._input_revision)
+        if operation is None:
+            if self._restart is None and session.poll_connection():
+                self.disconnect(status="连接输入已变更，请重新连接")
+            return
+        self._restart = operation
+        self._set_connected(False, "正在重新连接 Unreal…")
+        self._schedule_restart(session)
+
+    def _schedule_restart(self, session):
+        if session is None or self._restart_dispatch is session:
+            return
+        self._restart_dispatch = session
+
+        def advance():
+            if self._restart_dispatch is session:
+                self._restart_dispatch = None
+            if self._session is session:
+                self._advance_restart(session)
+
+        self._defer_ui(advance)
+
+    def _release_restart_resources(self, session):
+        if self._restart_released is session:
+            return None
+        self._restart_released = session
+        failures = []
+        if session is not None:
+            session.release_restart_leases()
+        try:
+            cache_failure = self._discard_cached_playback(verify_restoration=True)
+            if cache_failure:
+                failures.append(cache_failure)
+        except (RuntimeError, ValueError) as error:
+            failures.append(str(error))
+        failures.extend(self._shutdown_linkage())
+        if failures:
+            return make_diagnostic("RECOVERY_REFUSED", details="; ".join(failures))
+        return None
+
+    def _advance_restart(self, session):
+        operation, phase, token = session.restart_status()
+        if operation is None:
+            return
+        self._restart = operation
+        self._set_connected(False, "正在重新连接 Unreal…")
+        self._refresh_objects_window()
+        if phase is not None:
+            failure = self._release_restart_resources(session)
+            if failure:
+                self._restart_recovery_failure = failure
+                session.cancel_restart(failure)
+                return
+        if operation.failure is not None:
+            return
+        if phase is None and session.hello_reply is None:
+            return
+        try:
+            if (self._scene is not session.object_scenes()[session.object_id]
+                    or self._secondary_scene is not session.secondary_scene
+                    or session.removal_pending):
+                session.cancel_restart(make_diagnostic(
+                    "SUBJECT_CHANGED", details="Maya character or object set changed"))
+                return
+            scenes = session.object_scenes().values()
+            snapshots = [scene.refresh_for_restart() for scene in scenes]
+            if len(snapshots) > 1 and self._workflow != WORKFLOW_ANIMATION:
+                raise StreamingSessionError(
+                    "OBJECT_SET_UNSUPPORTED", "模型工作流只支持单个角色。")
+            fps = validate_frame_rate(frames_per_second(cmds.currentUnit(query=True, time=True)))
+            if self._session is not session or operation.failure is not None:
+                return
+            operation, phase, token = session.restart_status()
+            if operation is None:
+                return
+            if phase == "coordinating":
+                prepared = (session, self._input_revision)
+                if prepared != self._restart_prepared:
+                    session.prepare_restart(self._input_revision)
+                    self._restart_prepared = prepared
+            elif phase == "permitted":
+                source, targets = session.restart_identities()
+                permit_session_id = session.hello_reply["session_id"]
+                self._session = None
+                try:
+                    handoff = (operation, token, source, targets, permit_session_id)
+                    self._start_connection(fps, handoff,
+                                           session.maya_subject_id)
+                finally:
+                    session.stop()
+            else:
+                session.prepare_restart_init(snapshots, self._workflow, self._blendshapes_enabled)
+        except (CharacterSceneError, StreamingSessionError, RuntimeError, ValueError) as error:
+            code = getattr(error, "code", "INTERNAL_ERROR")
+            diagnostic = make_diagnostic(code, str(error), details=getattr(error, "details", str(error)))
+            session.cancel_restart(diagnostic)
 
     def _on_time_unit_changed(self, *unused):
         fps = self._refresh_fps()
@@ -1062,7 +1172,7 @@ class Controller(object):
 
     def connect(self):
         require_maya()
-        if self._session is not None:
+        if self._session is not None or self._restart is not None:
             return
         try:
             if self._scene is None:
@@ -1085,14 +1195,17 @@ class Controller(object):
             self._set_connected(False, diagnostic["summary"])
             self._show_error(diagnostic)
             return
+        self._start_connection(fps)
+
+    def _start_connection(self, fps, automatic_restart=None, maya_subject_id=None):
+        self._connection_stop_diagnostic = None
         secondary = self._secondary_scene
         if secondary is not None and self._workflow != WORKFLOW_ANIMATION:
             diagnostic = make_diagnostic(
                 "OBJECT_SET_UNSUPPORTED",
                 "模型工作流只支持单个角色。",
                 solution="切换到动画工作流，或在“对象配对”窗口中移除副对象后再连接。")
-            self._set_connected(False, diagnostic["summary"])
-            self._show_error(diagnostic)
+            self._report_connect_failure(diagnostic, automatic_restart)
             return
         self._last_warning = {"missing_in_unreal": [], "missing_in_maya": [],
                               "bone_name_remaps": [],
@@ -1117,29 +1230,54 @@ class Controller(object):
                 maya_version=cmds.about(version=True),
                 workflow=self._workflow,
                 blendshapes_enabled=self._blendshapes_enabled,
-                secondary_scene=secondary, on_statement=on_statement)
+                secondary_scene=secondary, on_statement=on_statement,
+                maya_subject_id=maya_subject_id or self._maya_subject_id,
+                automatic_restart=automatic_restart)
         except StreamingSessionError as error:
             diagnostic = make_diagnostic(
                 error.code if error.code in DIAGNOSTICS else "INTERNAL_ERROR",
                 error.message, details=error.details)
-            if error.recapture_scene:
+            if error.recapture_scene and automatic_restart is None:
                 self._clear_scene(keep_capture=True)
-            self._set_connected(False, diagnostic["summary"])
-            self._show_error(diagnostic)
+            self._report_connect_failure(diagnostic, automatic_restart)
+            return
+        except (RuntimeError, ValueError) as error:
+            self._report_connect_failure(make_diagnostic(
+                "INTERNAL_ERROR", details=str(error)), automatic_restart)
             return
         holder["session"] = session
         self._session = session
         self._update_mode_controls()
         self._refresh_objects_window()
 
+    def _report_connect_failure(self, diagnostic, automatic_restart):
+        if automatic_restart is not None:
+            diagnostic = automatic_restart[0].stop(diagnostic)
+            self._clear_restart()
+            self._last_diagnostic = diagnostic
+            self._connection_stop_diagnostic = diagnostic
+        self._set_connected(False, diagnostic["summary"])
+        if automatic_restart is None:
+            self._show_error(diagnostic)
+
+    def _clear_restart(self):
+        self._restart = None
+        self._restart_released = None
+        self._restart_prepared = None
+        self._restart_recovery_failure = None
+
     def _on_streaming_session_event(self, session, event):
         if session is None or self._session is not session:
+            return
+        if event.kind == "restart":
+            self._schedule_restart(session)
             return
         if event.kind == "time_control":
             # A lease was taken or released, or Unreal confirmed a cache clear.
             self._update_mode_controls()
             return
         if event.kind == "ready":
+            self._clear_restart()
             # Cached Playback keeps the single-character contract; a two-object
             # set streams realtime and linkage only.
             if self._workflow == WORKFLOW_ANIMATION and not self._session_has_secondary():
@@ -1153,7 +1291,8 @@ class Controller(object):
                         error.message, details=error.details)
                     self._last_diagnostic = diagnostic
                     self._set_connected(False, diagnostic["summary"])
-                    self._show_error(diagnostic)
+                    if not event.automatic:
+                        self._show_error(diagnostic)
                     session.stop()
                     return
                 self._cached_retention = None
@@ -1170,29 +1309,42 @@ class Controller(object):
             else:
                 self._set_connected(True, "已连接：UE 显示{0}实时姿势".format(objects))
             self._refresh_objects_window()
-            if warning["has_warning"] \
-                    and cmds.checkBox(self._warning_checkbox, query=True, value=True):
+            if warning["has_warning"]:
                 signature = self._warning_signature(warning)
                 if signature not in self._shown_warning_signatures:
                     self._shown_warning_signatures.add(signature)
-                    self._show_warning(warning)
+                    if event.automatic:
+                        self._last_diagnostic = self._warning_diagnostic(warning)
+                    elif self._warning_checkbox and cmds.checkBox(
+                            self._warning_checkbox, query=True, value=True):
+                        self._show_warning(warning)
             return
         cached_playback = self._cached_playback
-        if cached_playback is not None:
+        automatic = event.automatic or self._restart is not None
+        if automatic:
+            recovery = self._restart_recovery_failure or self._release_restart_resources(session)
+        elif cached_playback is not None:
             self._cached_retention = cached_playback.detach(event)
             self._cached_view = cached_playback.view
         self._session = None
         # The negotiated session is gone, so linkage can no longer answer
         # targets: release the pump, the session and every borrowed resource.
         self._shutdown_linkage()
+        self._clear_restart()
         self._refresh_objects_window()
         if event.kind == "failed":
             diagnostic = event.diagnostic or make_diagnostic("INTERNAL_ERROR")
+            if automatic and recovery is not None and diagnostic["code"] != "RECOVERY_REFUSED":
+                previous = diagnostic.get("details") or diagnostic["summary"]
+                diagnostic = make_diagnostic("RECOVERY_REFUSED", details="{0}\n{1}".format(
+                    recovery["details"], previous))
             self._last_diagnostic = diagnostic
+            if automatic:
+                self._connection_stop_diagnostic = diagnostic
             if event.recapture_scene:
                 self._clear_scene(keep_capture=True)
             self._set_connected(False, diagnostic["summary"])
-            if _error_signature(diagnostic) not in self._reported_errors:
+            if not automatic and _error_signature(diagnostic) not in self._reported_errors:
                 # Unreal closing after an error it reported shows that one dialog.
                 self._show_error(diagnostic)
             return
@@ -1294,7 +1446,7 @@ class Controller(object):
         except ImportError:
             cmds.warning("无法访问系统剪贴板。")
 
-    def _show_warning(self, warning):
+    def _warning_diagnostic(self, warning):
         has_blendshape_warning = bool(
             warning["missing_in_unreal"] or warning["missing_in_maya"])
         diagnostic = make_diagnostic(
@@ -1307,6 +1459,10 @@ class Controller(object):
         duplicate_paths = self._duplicate_paths()
         if warning["bone_name_remaps"] and duplicate_paths:
             diagnostic["duplicate_paths"] = list(duplicate_paths)
+        return diagnostic
+
+    def _show_warning(self, warning):
+        diagnostic = self._warning_diagnostic(warning)
         self._last_diagnostic = diagnostic
         buttons = ["确定", "查看详情"]
         if diagnostic.get("duplicate_paths"):
@@ -1335,7 +1491,7 @@ class Controller(object):
             self.show_diagnostics()
 
     def _on_scene_change(self, *unused):
-        self._clear_role()
+        self._clear_role("Maya scene changed")
         self._clear_secondary()
 
     def _on_before_scene_replaced(self, *unused):
@@ -1346,7 +1502,7 @@ class Controller(object):
         handler follows: a late one would clear the role set in the new scene.
         """
         del unused
-        self._clear_role()
+        self._clear_role("Maya scene was opened or replaced")
         self._clear_secondary()
 
     def _add_scene_replace_callback(self, message):
@@ -1371,8 +1527,7 @@ class Controller(object):
 
     def _on_maya_exiting(self, *unused):
         del unused
-        self._discard_cached_playback()
-        self._shutdown_linkage()
+        self.disconnect(status="Maya 正在退出", code="SUBJECT_CHANGED")
         # Maya tears the panel down after this callback; no Python object Qt
         # calls back into may outlive it.
         decorations = self._card_decorations
@@ -1392,16 +1547,35 @@ class Controller(object):
         except (AttributeError, RuntimeError, TypeError):
             pass
 
-    def disconnect(self, keep_error=False, status="已断开连接"):
+    def disconnect(self, keep_error=False, status="已断开连接", code=None):
         del keep_error
-        self._discard_cached_playback()
-        # The session is about to end: linkage must restore Maya's own state
-        # and drop its detail windows before the worker disappears.
-        self._shutdown_linkage()
         session = self._session
         if session is None:
+            self._discard_cached_playback()
+            self._shutdown_linkage()
             self._set_connected(False, status)
             return
+        operation, unused_phase, unused_token = session.restart_status()
+        diagnostic = make_diagnostic(code or "RESTART_CANCELLED", details=status)
+        if operation is not None:
+            diagnostic = operation.stop(diagnostic)
+        if operation is not None or code is not None:
+            session.fence_for_disconnect(diagnostic)
+            recovery = self._restart_recovery_failure or self._release_restart_resources(session)
+        else:
+            self._discard_cached_playback()
+            self._shutdown_linkage()
+            session.fence_for_disconnect(diagnostic)
+            recovery = None
+        self._clear_restart()
+        if recovery:
+            self._last_diagnostic = recovery
+            self._connection_stop_diagnostic = recovery
+            status = recovery["summary"]
+        elif code or operation is not None:
+            self._last_diagnostic = diagnostic
+            self._connection_stop_diagnostic = diagnostic
+            status = diagnostic["summary"]
         self._pending_stop_status = status
         session.stop()
 
@@ -1412,13 +1586,18 @@ class Controller(object):
         self._set_text(self._curve_text, "BlendShape 数：0")
         self._refresh_duplicate_button()
 
-    def _discard_cached_playback(self):
+    def _discard_cached_playback(self, verify_restoration=False):
         cached_playback, self._cached_playback = self._cached_playback, None
+        retention, self._cached_retention = self._cached_retention, None
+        if retention is not None:
+            retention._discard()
+        recovery = None
         if cached_playback is not None:
-            cached_playback.discard()
-        self._cached_retention = None
+            recovery = (cached_playback.discard(verify_restoration=True) if verify_restoration
+                        else cached_playback.discard())
         self._cached_view = None
         self._update_cache_text()
+        return recovery
 
     def _clear_scene(self, keep_pending=False, keep_capture=False):
         self._discard_cached_playback()
@@ -1430,10 +1609,14 @@ class Controller(object):
         if not keep_capture:
             self._capture_args = None
 
-    def _clear_role(self):
-        self.disconnect(status="未设置角色")
+    def _clear_role(self, replacement=None):
+        replaced = replacement is not None and self._session is not None
+        self.disconnect(status=replacement if replaced else "未设置角色",
+                        code="SUBJECT_CHANGED" if replaced else None)
+        self._maya_subject_id = uuid4().hex
         self._clear_scene()
         self._clear_scene_text()
+        return replaced
 
     # ------------------------------------------------------------- linkage
     def enter_linkage(self):
@@ -1562,7 +1745,7 @@ class Controller(object):
         acts on the current one.
         """
         session = self._session
-        if session is None:
+        if session is None or getattr(session, "restarting", False):
             return
         if received_session is not None and received_session is not session:
             return
@@ -1649,12 +1832,13 @@ class Controller(object):
         self._stop_linkage_pump()
         linkage, self._linkage = self._linkage, None
         if linkage is None:
-            return
+            return ()
         try:
-            linkage.close()
-        except (RuntimeError, ValueError, TypeError):
-            pass
+            residual = linkage.close()
+        except (RuntimeError, ValueError, TypeError) as error:
+            residual = (str(error),)
         self._linkage_last_recovery = list(linkage.recovery_records())
+        return residual or ()
 
     def _linkage_active(self):
         linkage = self._linkage
@@ -1718,6 +1902,8 @@ class Controller(object):
             # Unreal ended the connection; the session's terminal event then
             # restores Maya on the main thread.
             return
+        if getattr(session, "restarting", False):
+            return
         if linkage.confirmation_overdue():
             linkage.expire_unconfirmed()
             self._finish_linkage_exit(
@@ -1728,7 +1914,8 @@ class Controller(object):
         try:
             linkage.pump()
         except (LinkageError, StreamingSessionError) as error:
-            self._report_linkage_failure(error, repeat=True)
+            if not getattr(session, "restarting", False):
+                self._report_linkage_failure(error, repeat=True)
         except Exception as error:  # the timer must outlive one bad tick
             self._report_linkage_failure(
                 make_diagnostic("INTERNAL_ERROR", str(error), details=str(error)),
@@ -1791,8 +1978,8 @@ class Controller(object):
         return True
 
     def _show_runtime_error(self, diagnostic, session):
-        if _stopped_by_maya(session):
-            return  # Maya ended this connection before the dialog's turn came
+        if _stopped_by_maya(session) or getattr(session, "restarting", False):
+            return
         self._show_error(diagnostic)
 
     def _on_linkage_event(self, event):
@@ -1996,8 +2183,10 @@ class Controller(object):
             self._show_error(make_diagnostic(
                 "ROLE_SETUP_FAILED", str(exc), solution=str(exc), details=str(exc)))
             return
-        if self._session is not None:
-            self.disconnect(status="对象集合已变更：请重新连接")
+        replaced = self._session is not None
+        if replaced:
+            self.disconnect(status="Maya secondary object was replaced", code="SUBJECT_CHANGED")
+        self._maya_subject_id = uuid4().hex
         self._clear_secondary()
         try:
             scene = self._capture_secondary(root, display)
@@ -2007,9 +2196,10 @@ class Controller(object):
             return
         self._secondary_scene = scene
         snapshot = scene.snapshot()
-        self._set_connected(
-            self._session_ready(),
-            "副对象已设置（{0} 根骨骼），连接后与主角色一起预览".format(len(snapshot.bones)))
+        status = "副对象已设置（{0} 根骨骼），连接后与主角色一起预览".format(len(snapshot.bones))
+        if replaced:
+            status = self._last_diagnostic["summary"] + " · " + status
+        self._set_connected(self._session_ready(), status)
         self._refresh_objects_window()
 
     def _capture_secondary(self, root, display=None, display_attribute=None):
@@ -2030,7 +2220,14 @@ class Controller(object):
             self._refresh_objects_window()
             return
         session = self._session
+        if session is not None and getattr(session, "restarting", False):
+            self.disconnect(status="Maya secondary object was removed during negotiation",
+                            code="SUBJECT_CHANGED")
+            self._maya_subject_id = uuid4().hex
+            self._clear_secondary()
+            return
         if session is None or not self._session_has_secondary():
+            self._maya_subject_id = uuid4().hex
             self._clear_secondary()
             self._set_connected(self._session_ready(), "已移除副对象")
             self._refresh_objects_window()
@@ -2074,7 +2271,7 @@ class Controller(object):
                        self._finish_object_removal(reply, holder.get("session")))
 
     def _finish_object_removal(self, reply, session):
-        if session is None or session is not self._session:
+        if session is None or session is not self._session or getattr(session, "restarting", False):
             return
         try:
             removed = session.adopt_removal(reply)
@@ -2084,6 +2281,7 @@ class Controller(object):
                 error.message, details=error.details))
             return
         if removed is not None and removed is self._secondary_scene:
+            self._maya_subject_id = uuid4().hex
             self._clear_secondary()
         detail = reply.get("detail") or ""
         if reply.get("restored"):
@@ -2117,20 +2315,19 @@ class Controller(object):
         """The second object changed: the negotiated set no longer describes it."""
         if event.kind == "character_change_started":
             if self._session_has_secondary():
-                self.disconnect(status="副对象的衣服正在切换：连接已结束，请重新连接")
+                self._restart_for_input_change()
             return
         if event.kind in ("outfit_changed", "display_changed"):
             self._refresh_objects_window()
+            if event.kind == "outfit_changed":
+                self._schedule_restart(self._session)
             return
         if event.kind == "character_invalidated":
             was_connected = self._session_has_secondary()
             error = event.error
             self._secondary_scene = None
             if was_connected:
-                self.disconnect(status="副对象已删除或卸载：连接已结束，请重新连接")
-                diagnostic = self._scene_diagnostic(error, "SAMPLING_FAILED")
-                mayaapi.run_deferred(lambda: self._show_error(diagnostic, session=True),
-                                     cmds.evalDeferred)
+                self._on_character_invalidated(error)
             self._refresh_objects_window()
 
     def objects_state(self):
@@ -2150,7 +2347,9 @@ class Controller(object):
             except CharacterSceneError as error:
                 state["secondary_detail"] = "副对象：{0}".format(error.message)
         negotiated = self._session_has_secondary()
-        if getattr(session, "removal_pending", False):
+        if self._restart is not None:
+            state["state"] = "正在重新连接 Unreal…"
+        elif getattr(session, "removal_pending", False):
             state["state"] = "正在移除副对象，等待 Unreal 确认"
         elif negotiated and self._session_ready():
             state["state"] = "已连接：主角色和副对象一起预览"
@@ -2242,7 +2441,7 @@ class Controller(object):
         """Maya is closing the panel: release what it owns, never delete it again."""
         self._remove_maya_exit_callback()
         self._remove_scene_replace_callbacks()
-        self._clear_role()
+        self._clear_role("Maya panel closed")
         self._clear_secondary()
         self.close_objects_window()
         # Qt deletes the decorations with the panel.

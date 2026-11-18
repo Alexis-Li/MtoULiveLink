@@ -79,7 +79,7 @@ class UnrealSocket(object):
         # While set, cache clears are recorded but not yet confirmed.
         self.held_clears = None
         self.hung_up = False
-        self.push({"type": "hello_ack", "version": mtou_config.PROTOCOL_VERSION,
+        self.push({"type": "hello_ack", "source_instance_id": "ue-source", "version": mtou_config.PROTOCOL_VERSION,
                    "session_id": SESSION_ID,
                    "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
                    "targets": [],
@@ -87,7 +87,7 @@ class UnrealSocket(object):
                              "anchor": {"translation": [0.0, 0.0, 0.0],
                                         "rotation": [0.0, 0.0, 0.0, 1.0],
                                         "scale": 1.0}}})
-        self.push({"type": "ready", "session_id": SESSION_ID,
+        self.push({"type": "ready", "target_instance_id": "hero-target", "session_id": SESSION_ID,
                    "object_id": mtou_config.CHARACTER_OBJECT_ID,
                    "set_revision": 1, "space_revision": 1, "revision": REVISION,
                    "missing_in_unreal": [], "missing_in_maya": [],
@@ -116,7 +116,9 @@ class UnrealSocket(object):
             del self._inbound[:size]
         return chunk
 
-    def sendall(self, packet):
+    def send(self, packet):
+        packet = bytes(packet)
+        size_sent = len(packet)
         while packet:
             size = struct.unpack(">Q", packet[:8])[0]
             message = json.loads(packet[8:8 + size].decode("utf-8"))
@@ -128,6 +130,7 @@ class UnrealSocket(object):
                     self.held_clears.append(message["clear_id"])
                 else:
                     self.confirm_clear(message["clear_id"])
+        return size_sent
 
     def confirm_clear(self, clear_id):
         self.push({"type": "cache_cleared", "upload_id": 0, "play_id": 0,

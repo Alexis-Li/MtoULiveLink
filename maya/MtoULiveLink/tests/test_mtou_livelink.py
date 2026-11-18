@@ -774,6 +774,9 @@ class StreamingSessionTests(unittest.TestCase):
             def start(self):
                 pass
 
+            def restart_status(self):
+                return None, None, None
+
             def status(self):
                 return ("ready", "Connected", {
                     "missing_in_unreal": [], "missing_in_maya": [],
@@ -904,6 +907,9 @@ class StreamingSessionTests(unittest.TestCase):
             def start(self):
                 pass
 
+            def restart_status(self):
+                return None, None, None
+
             def status(self):
                 return ("error", "connection lost", None, diagnostic)
 
@@ -980,6 +986,9 @@ class StreamingSessionTests(unittest.TestCase):
 
             def start(self):
                 pass
+
+            def restart_status(self):
+                return None, None, None
 
             def status(self):
                 return ("ready", "Connected", {
@@ -1171,6 +1180,9 @@ class StreamingSessionTests(unittest.TestCase):
             def start(self):
                 pass
 
+            def restart_status(self):
+                return None, None, None
+
             def status(self):
                 return ("disconnected", "peer closed", None, None)
 
@@ -1220,6 +1232,9 @@ class StreamingSessionTests(unittest.TestCase):
 
             def start(self):
                 pass
+
+            def restart_status(self):
+                return None, None, None
 
             def status(self):
                 return (state["value"], "peer closed", None, None)
@@ -1460,7 +1475,7 @@ class SenderLifecycleTests(unittest.TestCase):
         class MismatchSocket(object):
             def __init__(self):
                 self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 8,
+                    "type": "ready", "target_instance_id": "hero-target", "object_id": "character", "revision": 8,
                     "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0,
@@ -1507,7 +1522,7 @@ class SenderLifecycleTests(unittest.TestCase):
             class ReadySocket(object):
                 def __init__(self):
                     self.reply = mtou_protocol.encode_message({
-                        "type": "ready", "revision": 7,
+                        "type": "ready", "target_instance_id": "hero-target", "revision": 7,
                         "object_id": init_message["object_id"],
                         "set_revision": init_message["set_revision"],
                         "space_revision": init_message["space_revision"],
@@ -1524,8 +1539,8 @@ class SenderLifecycleTests(unittest.TestCase):
                     chunk, self.reply = self.reply[:size], self.reply[size:]
                     return chunk
 
-                def sendall(self, packet):
-                    pass
+                def send(self, packet):
+                    return len(packet)
 
                 def close(self):
                     pass
@@ -1564,7 +1579,7 @@ class SenderLifecycleTests(unittest.TestCase):
     def test_ready_reply_must_echo_the_negotiated_identity(self):
         identity = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
         ready_reply = {
-            "type": "ready", "revision": 7,
+            "type": "ready", "target_instance_id": "hero-target", "revision": 7,
             "object_id": "character", "set_revision": 1, "space_revision": 1,
             "session_id": 4242,
             "missing_in_unreal": [], "missing_in_maya": [],
@@ -1572,7 +1587,7 @@ class SenderLifecycleTests(unittest.TestCase):
             "target_morph_count": 0, "accepted_morph_count": 0,
         }
         greeting = {
-            "type": "hello_ack", "version": mtou_config.PROTOCOL_VERSION,
+            "type": "hello_ack", "source_instance_id": "ue-source", "version": mtou_config.PROTOCOL_VERSION,
             "session_id": 4242,
             "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
             "targets": [{"object_id": "character", "kind": "skeletal_mesh",
@@ -1582,13 +1597,13 @@ class SenderLifecycleTests(unittest.TestCase):
                                  "rotation": [0, 0, 0, 1], "scale": [1, 1, 1]}},
         }
 
-        def run_with_ready_reply(reply, greeting=None):
+        def run_with_ready_reply(reply, greeting=greeting):
             init_message = mtou_protocol.make_init_message(
                 [["root", -1, identity]], ["Smile"], 7,
                 mtou_config.WORKFLOW_MODEL, True, "character", 1, 1)
             worker = mtou_session.SenderWorker(
                 init_message,
-                mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0))
+                mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0, maya_subject_id="maya-subject"))
             stream = b""
             if greeting is not None:
                 stream += mtou_protocol.encode_message(greeting)
@@ -1605,8 +1620,8 @@ class SenderLifecycleTests(unittest.TestCase):
                     chunk, self.reply = self.reply[:size], self.reply[size:]
                     return chunk
 
-                def sendall(self, packet):
-                    pass
+                def send(self, packet):
+                    return len(packet)
 
                 def close(self):
                     pass
@@ -1654,7 +1669,7 @@ class SenderLifecycleTests(unittest.TestCase):
     def _ready_then(*messages):
         """A socket that answers the handshake with ready, then ``messages``."""
         packet = mtou_protocol.encode_message({
-            "type": "ready", "revision": 7,
+            "type": "ready", "target_instance_id": "hero-target", "object_id": "character", "revision": 7,
             "missing_in_unreal": [], "missing_in_maya": [],
             "bone_name_remaps": [], "workflow": "animation",
             "target_morph_count": 0, "accepted_morph_count": 0,
@@ -1844,7 +1859,7 @@ class SenderLifecycleTests(unittest.TestCase):
             def __init__(self):
                 self.sent = []
                 self.reply = mtou_protocol.encode_message({
-                    "type": "ready", "revision": 7,
+                    "type": "ready", "target_instance_id": "hero-target", "object_id": "character", "revision": 7,
                     "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0})
@@ -1858,8 +1873,9 @@ class SenderLifecycleTests(unittest.TestCase):
                 chunk, self.reply = self.reply[:size], self.reply[size:]
                 return chunk or b"\x00"
 
-            def sendall(self, packet):
+            def send(self, packet):
                 self.sent.append(bytes(packet))
+                return len(packet)
 
             def close(self):
                 pass
@@ -1898,7 +1914,7 @@ class SenderLifecycleTests(unittest.TestCase):
             def __init__(self):
                 self.sent = []
                 self._reply = mtou_protocol.encode_message({
-                    "type": "ready", "missing_in_unreal": [], "missing_in_maya": [],
+                    "type": "ready", "target_instance_id": "hero-target", "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0})
 
@@ -1968,7 +1984,7 @@ class SenderLifecycleTests(unittest.TestCase):
             def __init__(self):
                 self.sent = []
                 self._reply = mtou_protocol.encode_message({
-                    "type": "ready", "missing_in_unreal": [], "missing_in_maya": [],
+                    "type": "ready", "target_instance_id": "hero-target", "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0})
 
@@ -2046,9 +2062,6 @@ class SenderLifecycleTests(unittest.TestCase):
             def close(self):
                 pass
 
-            def sendall(self, packet):
-                self.sent.append(bytes(packet))
-
             def send(self, packet):
                 if not resume_write.is_set():
                     raise OSError(errno.EWOULDBLOCK, "send would block")
@@ -2081,7 +2094,7 @@ class SenderLifecycleTests(unittest.TestCase):
         class BlockingSendSocket(object):
             def __init__(self):
                 self._reply = mtou_protocol.encode_message({
-                    "type": "ready", "missing_in_unreal": [], "missing_in_maya": [],
+                    "type": "ready", "target_instance_id": "hero-target", "missing_in_unreal": [], "missing_in_maya": [],
                     "bone_name_remaps": [], "workflow": "animation",
                     "target_morph_count": 0, "accepted_morph_count": 0})
                 self.closed = False
@@ -2142,7 +2155,7 @@ class SenderLifecycleTests(unittest.TestCase):
         class FakeClock(object):
             now = 0.0
 
-            def time(self):
+            def monotonic(self):
                 return self.now
 
         clock = FakeClock()
@@ -2153,7 +2166,8 @@ class SenderLifecycleTests(unittest.TestCase):
                 return 1
 
         worker = mtou_session.SenderWorker({"type": "init", "revision": 7})
-        with mock.patch.object(time, "time", side_effect=clock.time):
+        with mock.patch.object(time, "monotonic", side_effect=clock.monotonic):
+            worker._init_deadline = 5.0
             with self.assertRaisesRegex(socket.timeout,
                                         "timed out sending init message"):
                 worker._send_initial(PartialSendSocket())
@@ -2209,7 +2223,7 @@ class VersionMismatchHandshakeTests(unittest.TestCase):
 
     def hello_ack(self, version):
         return {
-            "type": "hello_ack", "version": version, "session_id": 4242,
+            "type": "hello_ack", "source_instance_id": "ue-source", "version": version, "session_id": 4242,
             "capabilities": dict(mtou_protocol.DEFAULT_CAPABILITIES),
             "targets": [],
             "space": {"space_revision": 1,
@@ -2221,7 +2235,7 @@ class VersionMismatchHandshakeTests(unittest.TestCase):
         identity = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1]
         init_message = mtou_protocol.make_init_message(
             [["root", -1, identity]], [], 7)
-        hello_message = mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0)
+        hello_message = mtou_protocol.make_hello_message("2024", "cm", 1.0, 24.0, maya_subject_id="maya-subject")
         worker = mtou_session.SenderWorker(init_message, hello_message)
         peer = _ScriptedPeerSocket(replies)
         states = []
@@ -2239,9 +2253,9 @@ class VersionMismatchHandshakeTests(unittest.TestCase):
              mock.patch.object(worker, "_set_status", side_effect=record):
             worker.run()
         # The refusal is final: the session never became ready, and nothing
-        # but the opening packet (hello, then init) went to the peer.
+        # but hello went to the peer.
         self.assertEqual(["error"], states)
-        self.assertEqual(worker._initial_packet, peer.sent)
+        self.assertEqual(mtou_protocol.encode_message(hello_message), peer.sent)
         self.assertEqual([], peer.send_all_calls)
         self.assertTrue(peer.closed)
         state, _, _, diagnostic = worker.status()
@@ -4042,6 +4056,7 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_disconnecting_discards_cached_state_before_stopping_session(self):
         controller = mtou_controller.Controller()
         controller._session = mock.Mock()
+        controller._session.restart_status.return_value = (None, None, None)
         controller._discard_cached_playback = mock.Mock()
         controller._set_connected = mock.Mock()
 
@@ -4236,6 +4251,7 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_same_warning_signature_does_not_interrupt_twice(self):
         controller = mtou_controller.Controller()
+        controller._warning_checkbox = 'showWarnings'
         session = object()
         controller._session = session
         controller._workflow = mtou_config.WORKFLOW_ANIMATION
@@ -4463,6 +4479,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         calls = []
         session = mock.Mock()
         session.is_ready = True
+        session.restart_status.return_value = (None, None, None)
         session.stop.side_effect = lambda: calls.append("stop")
         snapshot = character_snapshot(
             1, "|root", "Clothes01", [("root", -1)], [])
@@ -4644,31 +4661,45 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(model_visibility[controller._cache_text])
         self.assertTrue(model_visibility[controller._bs_checkbox])
 
-    def test_switching_workflow_disconnects_and_clears_cached_playback(self):
+    def test_workflow_change_fences_then_releases_cached_playback_before_prepared(self):
         controller = mtou_controller.Controller()
         session, lease = cached_session()
+        window = mtou_session.RestartWindow()
+        session.request_restart.return_value = window
+        session.restart_status.return_value = (window, "coordinating", None)
+        session.release_restart_leases.side_effect = session.time_control.terminate
+        session.secondary_scene = None
+        session.removal_pending = False
         cached = mock.Mock()
-        cached.discard.side_effect = lease.release
+        cached.discard.return_value = None
         controller._session = session
         controller._cached_playback = cached
         snapshot = character_snapshot(
             3, "|Group|root", "Clothes01", [("root", -1)], ["Smile"])
         scene = mock.Mock()
-        scene.snapshot.return_value = snapshot
+        scene.refresh_for_restart.return_value = snapshot
         controller._scene = scene
+        session.object_scenes.return_value = {session.object_id: scene}
         controller._set_connected = mock.Mock()
-        controller._show_error = mock.Mock()
+        queued = []
+        controller._defer_ui = queued.append
+        fake_cmds = mock.Mock()
+        fake_cmds.currentUnit.return_value = "film"
 
-        controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
+        with patch_global("cmds", fake_cmds):
+            controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
+            session.request_restart.assert_called_once_with(2)
+            self.assertTrue(lease.active)
+            session.prepare_restart.assert_not_called()
+            queued.pop(0)()
 
         self.assertEqual(mtou_config.WORKFLOW_MODEL, controller._workflow)
         self.assertEqual(mtou_config.REALTIME_MODE, controller._mode)
-        session.stop.assert_called_once_with()
-        cached.discard.assert_called_once_with()
+        session.stop.assert_not_called()
+        cached.discard.assert_called_once_with(verify_restoration=True)
+        session.prepare_restart.assert_called_once_with(2)
         self.assertIs(scene, controller._scene)
-        self.assertIs(snapshot, controller._scene.snapshot())
-        self.assertEqual("Clothes01", controller._scene.snapshot().outfit)
-        self.assertEqual("|Group|root", controller._scene.snapshot().root)
+        scene.refresh_for_restart.assert_called_once_with()
 
     def test_switching_back_to_animation_keeps_model_disconnected_state(self):
         controller = mtou_controller.Controller()
@@ -4684,6 +4715,8 @@ class WorkflowTests(unittest.TestCase):
         controller = mtou_controller.Controller()
         controller._bs_checkbox = "bsCheckBox"
         controller._session = mock.Mock()
+        controller._session.request_restart.return_value = mtou_session.RestartWindow()
+        controller._defer_ui = mock.Mock()
         controller._blendshapes_enabled = True
 
         fake_cmds.checkBox.side_effect = None
@@ -4692,7 +4725,8 @@ class WorkflowTests(unittest.TestCase):
             controller._on_blendshapes_toggled()
 
         self.assertFalse(controller._blendshapes_enabled)
-        controller._session.stop.assert_called_once_with()
+        controller._session.request_restart.assert_called_once_with(2)
+        controller._session.stop.assert_not_called()
 
     def test_toggling_blendshapes_while_disconnected_keeps_state_only(self):
         fake_cmds = self._fake_ui_cmds()
@@ -4751,7 +4785,7 @@ class WorkflowTests(unittest.TestCase):
         worker = mock.Mock()
         worker.status.return_value = ("connecting", "Connecting", None, None)
 
-        def worker_factory(init_messages, hello_message=None, on_reply=None):
+        def worker_factory(init_messages, hello_message=None, on_reply=None, **kwargs):
             # One init per object of the set; a one-character set sends one.
             self.assertEqual(1, len(init_messages))
             captured["init"] = init_messages[0]
@@ -4846,11 +4880,12 @@ class WorkflowTests(unittest.TestCase):
 
         self.assertEqual("INVALID_MESSAGE", caught.exception.code)
 
-    def test_clothes_change_disconnects_session_and_refreshes_outfit_manifest(self):
+    def test_clothes_change_fences_session_and_refreshes_outfit_manifest(self):
         controller = mtou_controller.Controller()
         session = mock.Mock()
         controller._session = session
-        controller._outfit_change_was_connected = True
+        session.request_restart.return_value = mtou_session.RestartWindow()
+        controller._defer_ui = mock.Mock()
         before = character_snapshot(
             1, "|root", "Clothes01", [("root", -1)], ["OldSmile"])
         after = character_snapshot(
@@ -4864,7 +4899,8 @@ class WorkflowTests(unittest.TestCase):
         controller._on_character_scene_event(
             mtou_scene.CharacterSceneEvent("character_change_started", snapshot=before))
 
-        session.stop.assert_called_once_with()
+        session.request_restart.assert_called_once_with(2)
+        session.stop.assert_not_called()
 
         controller._on_character_scene_event(
             mtou_scene.CharacterSceneEvent("outfit_changed", snapshot=after))
@@ -4876,7 +4912,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual("Clothes02", rendered.outfit)
         self.assertEqual(("NewSmile",), rendered.curve_names)
         status = controller._set_connected.call_args[0][1]
-        self.assertIn("Clothes02", status)
+        self.assertIn("正在重新连接", status)
 
 
 class _LinkageHost(object):
