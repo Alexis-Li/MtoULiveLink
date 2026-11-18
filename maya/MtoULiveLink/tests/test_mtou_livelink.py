@@ -4919,6 +4919,23 @@ class ProtocolTests(unittest.TestCase):
     def _assert_maya_conformance_case(self, case):
         operation = case["operation"]
         expected = case["expected"]
+        if operation == "ready_set":
+            if expected["accepted"]:
+                actual = mtou_protocol.validate_ready_identities(case["payloads"], case["negotiated_set"])
+                self.assertEqual({row["object_id"]: row["target_instance_id"] for row in case["payloads"]}, actual)
+            else:
+                with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                    mtou_protocol.validate_ready_identities(case["payloads"], case["negotiated_set"])
+            return
+        if operation.startswith("restart_"):
+            if expected["accepted"]:
+                self.assertEqual(case["payload"], mtou_protocol.validate_restart_message(case["payload"]))
+                if operation == "restart_state":
+                    self.assertEqual(case["payload"], mtou_protocol.validate_reply(case["payload"]))
+            else:
+                with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                    mtou_protocol.validate_restart_message(case["payload"])
+            return
         if operation == "framing":
             if "raw_hex" in case:
                 raw = bytes.fromhex(case["raw_hex"])
@@ -5147,7 +5164,9 @@ class ProtocolTests(unittest.TestCase):
             actual = mtou_protocol.make_hello_message(
                 payload["maya_version"], scene["linear_unit"],
                 scene["unit_scale_cm"], scene["fps"],
-                plugin_version=payload.get("plugin_version"))
+                plugin_version=payload.get("plugin_version"),
+                maya_subject_id=payload.get("maya_subject_id"),
+                restart_token=payload.get("restart_token"))
             self.assertEqual(payload, actual)
             self.assertEqual(1.0, mtou_space.centimeters_per_unit(scene["linear_unit"]))
             self.assertEqual(
@@ -5155,6 +5174,12 @@ class ProtocolTests(unittest.TestCase):
                 scene["unit_scale_cm"])
             self.assertEqual(scene["fps"], mtou_space.validate_frame_rate(scene["fps"]))
             self.assertTrue(mtou_protocol.encode_message(actual))
+            return
+        if "maya_subject_id" in expected.get("keywords", []) or "restart_token" in expected.get("keywords", []):
+            with self.assertRaisesRegex(ValueError, "|".join(expected["keywords"])):
+                mtou_protocol.make_hello_message(
+                    payload["maya_version"], scene["linear_unit"], scene["unit_scale_cm"], scene["fps"],
+                    maya_subject_id=payload.get("maya_subject_id"), restart_token=payload.get("restart_token"))
             return
         if scene["linear_unit"] != "cm":
             # A peer whose scene is not the common centimetre space is refused

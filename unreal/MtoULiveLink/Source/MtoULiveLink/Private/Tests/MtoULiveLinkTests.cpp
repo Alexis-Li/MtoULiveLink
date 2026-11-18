@@ -1428,6 +1428,43 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             continue;
         }
 
+        if (Operation.StartsWith(TEXT("restart_")))
+        {
+            TArray<uint8> Bytes;
+            FString Error, ErrorCode;
+            if (!CaseBytes(Case, Bytes, Error)) { AddError(Error); continue; }
+            FMtoURestartMessage Message;
+            bool bAccepted = false;
+            if (Operation == TEXT("restart_request"))
+                bAccepted = FMtoUProtocol::ParseRestartRequest(Bytes, Message, Error, &ErrorCode);
+            else if (Operation == TEXT("restart_prepared"))
+                bAccepted = FMtoUProtocol::ParseRestartPrepared(Bytes, Message, Error, &ErrorCode);
+            else if (Operation == TEXT("restart_cancel"))
+                bAccepted = FMtoUProtocol::ParseRestartCancel(Bytes, Message, Error, &ErrorCode);
+            else if (Operation == TEXT("restart_state"))
+                bAccepted = FMtoUProtocol::ParseRestartState(Bytes, Message, Error, &ErrorCode);
+            TestEqual(*(Id + TEXT(" acceptance")), bAccepted, bExpectedAccepted);
+            TestEqual(*(Id + TEXT(" close classification")), !bAccepted, bExpectedClose);
+            if (!bAccepted)
+            {
+                TestEqual(*(Id + TEXT(" stable error code")), ErrorCode, Expected->GetStringField(TEXT("error_code")));
+                if (Keywords) TestTrue(*(Id + TEXT(" diagnostic")), ContainsKeywords(Error, *Keywords));
+            }
+            else if (Operation == TEXT("restart_state"))
+            {
+                const TArray<uint8> Packet = FMtoUProtocol::EncodeRestartState(
+                    Message.SessionId, Message.State, Message.Code, Message.Detail, Message.RestartToken);
+                FMtoUFrameDecoder Decoder;
+                Decoder.Append(Packet.GetData(), Packet.Num());
+                TArray<uint8> RoundTrip;
+                TestTrue(*(Id + TEXT(" encoded state")), Decoder.Pop(RoundTrip, Error) == EMtoUDecodeResult::Message);
+                FMtoURestartMessage Decoded;
+                TestTrue(*(Id + TEXT(" round trip")), FMtoUProtocol::ParseRestartState(RoundTrip, Decoded, Error));
+                TestEqual(*(Id + TEXT(" token")), Decoded.RestartToken, Message.RestartToken);
+            }
+            continue;
+        }
+
         if (Operation == TEXT("unknown_type"))
         {
             // A type the protocol does not define, a retired one included. The
@@ -1743,7 +1780,7 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             continue;
         }
 
-        if (Operation == TEXT("ready") || Operation == TEXT("error")
+        if (Operation == TEXT("hello_ack") || Operation == TEXT("ready") || Operation == TEXT("error")
             || Operation == TEXT("cache_ready") || Operation == TEXT("cache_playing")
             || Operation == TEXT("cache_progress")
             || Operation == TEXT("cache_complete") || Operation == TEXT("cache_stopped")
@@ -1789,7 +1826,8 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                         : INDEX_NONE,
                     Source->HasField(TEXT("space_revision"))
                         ? static_cast<int32>(Source->GetNumberField(TEXT("space_revision")))
-                        : INDEX_NONE);
+                        : INDEX_NONE,
+                    Source->GetStringField(TEXT("target_instance_id")));
             }
             else if (Operation == TEXT("hello_ack"))
             {
@@ -1823,7 +1861,8 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                     Space.IsValid()
                         ? static_cast<int32>(Space->GetNumberField(TEXT("space_revision")))
                         : 1,
-                    Space.IsValid() ? Space->GetObjectField(TEXT("anchor")) : nullptr);
+                    Space.IsValid() ? Space->GetObjectField(TEXT("anchor")) : nullptr,
+                    Source->GetStringField(TEXT("source_instance_id")));
             }
             else if (Operation == TEXT("mode_state"))
             {
@@ -2048,7 +2087,8 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                         TEXT("revision"),
                         TEXT("missing_in_unreal"), TEXT("missing_in_maya"),
                         TEXT("bone_name_remaps"), TEXT("workflow"),
-                        TEXT("target_morph_count"), TEXT("accepted_morph_count")};
+                        TEXT("target_morph_count"), TEXT("accepted_morph_count"),
+                        TEXT("object_id"), TEXT("target_instance_id")};
                 }
                 else if (Operation == TEXT("error"))
                 {
@@ -2095,7 +2135,7 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                 }
                 else if (Operation == TEXT("hello_ack"))
                 {
-                    RequiredFields = {TEXT("version"), TEXT("session_id"), TEXT("capabilities"),
+                    RequiredFields = {TEXT("source_instance_id"), TEXT("version"), TEXT("session_id"), TEXT("capabilities"),
                         TEXT("targets"), TEXT("space")};
                 }
                 else if (Operation == TEXT("mode_state"))
@@ -2134,6 +2174,9 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                 }
                 if (Operation == TEXT("ready"))
                 {
+                    TestEqual(*(Id + TEXT(" actual target identity")),
+                        Encoded->GetStringField(TEXT("target_instance_id")),
+                        Source->GetStringField(TEXT("target_instance_id")));
                     // v10 echoes the negotiated identity so a peer can refuse
                     // a reply that belongs to another session or object set.
                     for (const TCHAR* IdentityField : {TEXT("session_id"), TEXT("set_revision"),
@@ -2156,6 +2199,9 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                 }
                 if (Operation == TEXT("hello_ack"))
                 {
+                    TestEqual(*(Id + TEXT(" Source instance identity")),
+                        Encoded->GetStringField(TEXT("source_instance_id")),
+                        Source->GetStringField(TEXT("source_instance_id")));
                     TestEqual(*FString::Printf(TEXT("%s declares the adapter version"), *Id),
                         static_cast<int32>(Encoded->GetNumberField(TEXT("version"))),
                         FMtoUProtocol::Version);
