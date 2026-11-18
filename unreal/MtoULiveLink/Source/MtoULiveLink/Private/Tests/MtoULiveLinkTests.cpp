@@ -12475,12 +12475,14 @@ FString PoseTransformsJson(const FReferenceSkeleton& Skeleton)
 }
 
 /** The greeting the Maya client opens a connection with. */
-TArray<uint8> LinkageHelloPacket()
+TArray<uint8> LinkageHelloPacket(const FString& Permit = FString())
 {
-    return Packet(
+    const FString RestartField = Permit.IsEmpty() ? FString()
+        : FString::Printf(TEXT(",\"restart_token\":\"%s\""), *Permit);
+    return Packet(FString::Printf(
         TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD ",\"maya_subject_id\":\"automation-subject\",\"host\":\"maya\",\"maya_version\":\"2024\","
              "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1.0,\"fps\":24.0},"
-             "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
+             "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}%s}"), *RestartField));
 }
 
 /**
@@ -16838,6 +16840,14 @@ public:
     { FScopeLock Lock(&Source.RestartMutex); return Source.Restart; }
     static bool ValidSubjects(FMtoULiveLinkSource& Source) { return Source.ValidateSubjectsOnGameThread(); }
     static void SmallSendBuffer(FMtoULiveLinkSource& Source) { Source.RestartTestSendBuffer.Store(4096); }
+    static void HoldHelloReply(FMtoULiveLinkSource& Source, bool bHold)
+    {
+        Source.bRestartTestHoldHelloReply.Store(bHold);
+    }
+    static int32 HeldHelloPolls(const FMtoULiveLinkSource& Source)
+    {
+        return Source.RestartTestHeldHelloPolls.Load();
+    }
     static void Backpressure(FMtoULiveLinkSource& Source)
     {
         const uint64 Session = Source.GreetedSession;
@@ -16960,13 +16970,14 @@ struct FMtoUSessionEndFixture
         }, TimeoutSeconds);
     }
 
-    TArray<uint8> InitPacket(const TCHAR* SetObjects = TEXT("[\"character\"]")) const
+    TArray<uint8> InitPacket(const TCHAR* SetObjects = TEXT("[\"character\"]"),
+        const TCHAR* ObjectId = FMtoUObjectIds::Character) const
     {
         return Packet(FString::Printf(
-            TEXT("{\"type\":\"init\",\"revision\":9," MTOU_PROTOCOL_VERSION_FIELD ",\"object_id\":\"character\","
+            TEXT("{\"type\":\"init\",\"revision\":9," MTOU_PROTOCOL_VERSION_FIELD ",\"object_id\":\"%s\","
                  "\"set_revision\":1,\"space_revision\":1,\"set_objects\":%s,\"workflow\":\"animation\","
                  "\"blendshapes_enabled\":true,\"bones\":[%s],\"curves\":[]}"),
-            SetObjects, *Bones));
+            ObjectId, SetObjects, *Bones));
     }
 
     bool HasSubject() const
@@ -17081,32 +17092,65 @@ struct FMtoUSessionEndMaya
     }
     void Pump() { Fixture.Pump(); }
 
-    /** Connects and greets; negotiates the character as well when asked. */
-    bool Connect(FAutomationTestBase& Test, bool bNegotiate)
+    bool Send(const TArray<uint8>& Bytes) const
+    {
+        return Socket && SendBytes(*Socket, Bytes.GetData(), Bytes.Num());
+    }
+
+    bool ReadReply(const TCHAR* Type, TSharedPtr<FJsonObject>& Json)
+    {
+        TArray<uint8> Payload;
+        return Socket && Reader.Next(*Socket, Type, Payload, [this]() { Pump(); }, 5.0)
+            && JsonObjectFromBytes(Payload, Json);
+    }
+
+    bool SendGreeting(FAutomationTestBase& Test, const FString& Permit = FString())
     {
         Socket = ConnectLoopback(*Fixture.Sockets, Fixture.Port);
-        if (!Test.TestNotNull(TEXT("Maya connects"), Socket))
-        {
-            return false;
-        }
-        const TArray<uint8> Hello = LinkageHelloPacket();
-        if (!Test.TestTrue(TEXT("the greeting is sent"),
-                SendBytes(*Socket, Hello.GetData(), Hello.Num())))
-        {
-            return false;
-        }
-        TArray<uint8> Payload;
+        return Test.TestNotNull(TEXT("Maya connects"), Socket)
+            && Test.TestTrue(TEXT("the greeting is sent"), Send(LinkageHelloPacket(Permit)));
+    }
+
+    bool ReceiveGreeting(FAutomationTestBase& Test)
+    {
         TSharedPtr<FJsonObject> Ack;
-        if (!Test.TestTrue(TEXT("the greeting is answered"),
-                Reader.Next(*Socket, TEXT("hello_ack"), Payload, [this]() { Pump(); }, 5.0))
-            || !Test.TestTrue(TEXT("the greeting answer is JSON"), JsonObjectFromBytes(Payload, Ack)))
+        if (!Test.TestTrue(TEXT("the greeting is answered"), ReadReply(TEXT("hello_ack"), Ack)))
         {
             return false;
         }
         SessionId = static_cast<int32>(Ack->GetNumberField(TEXT("session_id")));
-        Test.TestTrue(TEXT("the greeting names one session"), SessionId >= 1);
         Test.TestFalse(TEXT("greeting alone requests no background updates"), Fixture.Source->GetTimeControlView().bConnected);
-        return !bNegotiate || Negotiate(Test);
+        return Test.TestTrue(TEXT("the greeting names one session"), SessionId >= 1);
+    }
+
+    /** Connects and greets; negotiates the character as well when asked. */
+    bool Connect(FAutomationTestBase& Test, bool bNegotiate)
+    {
+        return SendGreeting(Test) && ReceiveGreeting(Test) && (!bNegotiate || Negotiate(Test));
+    }
+
+    bool FinishCoordination(FAutomationTestBase& Test, int32 SourceRevision, FString& Permit)
+    {
+        TSharedPtr<FJsonObject> State;
+        if (!Test.TestTrue(TEXT("Maya receives ending"), ReadReply(TEXT("restart_state"), State))
+            || !Test.TestEqual(TEXT("coordination starts with ending"), State->GetStringField(TEXT("state")), FString(TEXT("ending")))
+            || !Test.TestEqual(TEXT("ending names the acknowledged session"),
+                static_cast<int32>(State->GetNumberField(TEXT("session_id"))), SessionId))
+        {
+            return false;
+        }
+        const TArray<uint8> Prepared = Packet(FString::Printf(
+            TEXT("{\"type\":\"restart_prepared\",\"session_id\":%d,\"source_revision\":%d}"),
+            SessionId, SourceRevision));
+        if (!Test.TestTrue(TEXT("Maya prepares after receiving ending"), Send(Prepared))
+            || !Test.TestTrue(TEXT("Maya receives permit state"), ReadReply(TEXT("restart_state"), State))
+            || !Test.TestEqual(TEXT("the recovered session issues a permit"), State->GetStringField(TEXT("state")), FString(TEXT("permitted"))))
+        {
+            return false;
+        }
+        Permit = State->GetStringField(TEXT("restart_token"));
+        return Test.TestFalse(TEXT("the permit has a token"), Permit.IsEmpty())
+            && Test.TestTrue(TEXT("permitting closes the coordination TCP"), PeerClosed());
     }
 
     bool Negotiate(FAutomationTestBase& Test, const TCHAR* SetObjects = TEXT("[\"character\"]"))
@@ -18246,6 +18290,195 @@ bool FMtoURestartPermitTest::RunTest(const FString& Parameters)
         TEXT("error"), Payload, [&]() { F.Pump(); }, 2.0));
     TestTrue(TEXT("refusal identifies the subject contract"), FromUtf8(Payload).Contains(TEXT("SUBJECT_CHANGED")));
     TestTrue(TEXT("spent-token transport closes"), Replay.PeerClosed());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartGreetingOrderTest,
+    "MtoULiveLink.Source.Restart.GreetingBeforeEnding",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURestartGreetingOrderTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    FMtoUSessionEndMaya Initial(F);
+    TSharedPtr<FJsonObject> Ready;
+    if (!Initial.Connect(*this, false)
+        || !TestTrue(TEXT("initial character negotiates"),
+            Initial.Send(F.InitPacket()) && Initial.ReadReply(TEXT("ready"), Ready)))
+    {
+        return false;
+    }
+    const FString PrimaryInstance = Ready->GetStringField(TEXT("target_instance_id"));
+    FMtoURestartTestAccess::Clock(*F.Source, 100);
+    MtoURequestStreamingSessionEnd(*F.Actor);
+    FString Permit;
+    if (!Initial.FinishCoordination(*this, 2, Permit)) { return false; }
+    Initial.Drop();
+
+    FMtoUSessionEndMaya Next(F);
+    FMtoURestartTestAccess::HoldHelloReply(*F.Source, true);
+    if (!Next.SendGreeting(*this, Permit)
+        || !TestTrue(TEXT("the automatic greeting is admitted with its reply held"), PollUntil([&]()
+        {
+            F.Pump();
+            return FMtoURestartTestAccess::Operation(*F.Source).Phase == FMtoURestartOperation::EPhase::Reconnecting
+                && FMtoURestartTestAccess::HeldHelloPolls(*F.Source) > 0;
+        }, 2.0)))
+    {
+        return false;
+    }
+    const auto Admitted = FMtoURestartTestAccess::Operation(*F.Source);
+    FMtoURestartTestAccess::Clock(*F.Source, 101);
+    MtoURequestStreamingSessionEnd(*F.Actor);
+    const auto Ending = FMtoURestartTestAccess::Operation(*F.Source);
+    TestEqual(TEXT("another edit keeps the original coordination deadline"),
+        Ending.CoordinationDeadline, Admitted.CoordinationDeadline);
+    TestEqual(TEXT("another edit keeps the original total deadline"),
+        Ending.OperationDeadline, Admitted.OperationDeadline);
+    const int32 HeldPolls = FMtoURestartTestAccess::HeldHelloPolls(*F.Source);
+    // One pass could already be in flight when the edit is applied.
+    const bool bWorkerSawEdit = PollUntil([&]()
+    {
+        return FMtoURestartTestAccess::HeldHelloPolls(*F.Source) >= HeldPolls + 2;
+    }, 2.0);
+    FMtoURestartTestAccess::HoldHelloReply(*F.Source, false);
+    if (!TestTrue(TEXT("worker services restart while the greeting is held"), bWorkerSawEdit)
+        || !Next.ReceiveGreeting(*this)
+        || !TestFalse(TEXT("Maya must not see or discard ending before learning the session ID"),
+            Next.Reader.OtherTypes.Contains(TEXT("restart_state"))))
+    {
+        return false;
+    }
+    TestEqual(TEXT("the acknowledgement names the fenced transport"),
+        static_cast<uint64>(Next.SessionId), Ending.OldSession);
+
+    // Maya may start init immediately after hello_ack. Unreal must keep this
+    // transport fenced and let Maya prepare in response to ending.
+    if (!TestTrue(TEXT("init on the fenced transport can arrive"), Next.Send(F.InitPacket()))
+        || !Next.FinishCoordination(*this, 3, Permit))
+    {
+        return false;
+    }
+    TestFalse(TEXT("the fenced init never returns Ready"), Next.Reader.OtherTypes.Contains(TEXT("ready")));
+    Next.Drop();
+
+    FMtoUSessionEndMaya Final(F);
+    if (!Final.SendGreeting(*this, Permit) || !Final.ReceiveGreeting(*this)
+        || !TestTrue(TEXT("a fresh transport negotiates the latest inputs"),
+            Final.Send(F.InitPacket()) && Final.ReadReply(TEXT("ready"), Ready)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the reconnected session is new"), Final.SessionId > Next.SessionId);
+    TestEqual(TEXT("the primary stays pinned across both greetings"),
+        Ready->GetStringField(TEXT("target_instance_id")), PrimaryInstance);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartRemovedSecondaryTest,
+    "MtoULiveLink.Source.Restart.RemovedSecondary",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURestartRemovedSecondaryTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    AMtoULiveLinkActor* Secondary = F.Place();
+    if (!TestNotNull(TEXT("the secondary exists"), Secondary)
+        || !TestTrue(TEXT("the secondary is paired"), PairLinkageTarget(Secondary, TEXT("secondary"))))
+    {
+        return false;
+    }
+    FMtoUSessionEndMaya Maya(F);
+    const TCHAR* Both = TEXT("[\"character\",\"secondary\"]");
+    TSharedPtr<FJsonObject> Ready;
+    if (!Maya.Connect(*this, false)
+        || !TestTrue(TEXT("the primary is Ready"), Maya.Send(F.InitPacket(Both)) && Maya.ReadReply(TEXT("ready"), Ready)))
+    {
+        return false;
+    }
+    const FString PrimaryInstance = Ready->GetStringField(TEXT("target_instance_id"));
+    if (!TestTrue(TEXT("the secondary is Ready"),
+        Maya.Send(F.InitPacket(Both, FMtoUObjectIds::Secondary)) && Maya.ReadReply(TEXT("ready"), Ready)))
+    {
+        return false;
+    }
+    TestEqual(TEXT("the second reply is for the secondary"), Ready->GetStringField(TEXT("object_id")), FString(TEXT("secondary")));
+
+    const TArray<uint8> Remove = Packet(FString::Printf(
+        TEXT("{\"type\":\"remove_object\",\"session_id\":%d,\"object_id\":\"secondary\","
+             "\"set_revision\":2,\"detail\":\"remove secondary\"}"), Maya.SessionId));
+    TSharedPtr<FJsonObject> Removal;
+    if (!TestTrue(TEXT("secondary removal is confirmed"),
+        Maya.Send(Remove) && Maya.ReadReply(TEXT("object_removed"), Removal)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the removed target was restored"), Removal->GetBoolField(TEXT("restored")));
+    TestFalse(TEXT("the secondary left the Live Link set"), Secondary->IsInLiveLinkSet());
+
+    const FReferenceSkeleton& Skeleton = F.Actor->GetBinding()->SkeletalMesh->GetRefSkeleton();
+    const auto PublishesFrame = [&](FMtoUSessionEndMaya& Connection, double Offset)
+    {
+        TArray<FString> Transforms;
+        const double ExpectedX = Skeleton.GetRefBonePose()[0].GetTranslation().X + Offset;
+        for (int32 Index = 0; Index < Skeleton.GetNum(); ++Index)
+        {
+            FTransform Transform = Skeleton.GetRefBonePose()[Index];
+            if (Index == 0) { Transform.AddToTranslation(FVector(Offset, 0, 0)); }
+            Transforms.Add(TransformJson(Transform));
+        }
+        const TArray<uint8> Frame = Packet(FString::Printf(
+            TEXT("{\"type\":\"frame\",\"transforms\":[%s],\"curves\":[]}"),
+            *FString::Join(Transforms, TEXT(","))));
+        return Connection.Send(Frame) && PollUntil([&]()
+        {
+            F.Pump();
+            FLiveLinkSubjectFrameData Data;
+            if (!F.LiveLink->EvaluateFrameFromSource_AnyThread(
+                FLiveLinkSubjectKey(F.SourceGuid, FName(TEXT("MtoU_Character"))),
+                ULiveLinkAnimationRole::StaticClass(), Data))
+            {
+                return false;
+            }
+            const auto* FrameData = Data.FrameData.Cast<FLiveLinkAnimationFrameData>();
+            return FrameData && FrameData->Transforms.Num() == Skeleton.GetNum()
+                && FMath::IsNearlyEqual(FrameData->Transforms[0].GetTranslation().X, ExpectedX, 1.0e-3);
+        }, 2.0);
+    };
+    MtoUClearLinkageTarget(*Secondary);
+    if (!TestTrue(TEXT("the same primary session publishes after unpairing the former secondary"),
+        PublishesFrame(Maya, 10.0)))
+    {
+        return false;
+    }
+    TestEqual(TEXT("unpairing preserves the original session ID"), MtoUGetLinkageView().Identity.SessionId, Maya.SessionId);
+    if (!TestTrue(TEXT("the former secondary can be deleted"), Secondary->Destroy())
+        || !TestTrue(TEXT("the primary still publishes after deletion"), PublishesFrame(Maya, 20.0)))
+    {
+        return false;
+    }
+
+    MtoURequestStreamingSessionEnd(*F.Actor);
+    FString Permit;
+    if (!Maya.FinishCoordination(*this, 2, Permit)) { return false; }
+    Maya.Drop();
+    FMtoUSessionEndMaya Next(F);
+    if (!Next.SendGreeting(*this, Permit) || !Next.ReceiveGreeting(*this)
+        || !TestTrue(TEXT("the primary alone negotiates the new session"),
+            Next.Send(F.InitPacket()) && Next.ReadReply(TEXT("ready"), Ready)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("the restart uses a new session"), Next.SessionId > Maya.SessionId);
+    TestEqual(TEXT("the restart keeps the original primary instance"),
+        Ready->GetStringField(TEXT("target_instance_id")), PrimaryInstance);
+    TestTrue(TEXT("the reconnected primary publishes its pose"), PublishesFrame(Next, 30.0));
     return true;
 }
 

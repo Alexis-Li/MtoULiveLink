@@ -1169,9 +1169,12 @@ uint32 FMtoULiveLinkSource::Run()
             if (Restart.Expire(RestartNow())) { bRestartStatusDirty = true; }
             if (Restart.ActiveSession == ActiveSession && ActiveSession != 0)
             {
-                if (Restart.bStatePending && !(bSessionEndCleanupDeferred
-                    && Restart.Phase == FMtoURestartOperation::EPhase::Stopped
-                    && Restart.Code != TEXT("RESTART_TIMEOUT")))
+                // Maya can only coordinate for a session it learned from hello_ack.
+                // Keep ending and permission pending until that reply is on the wire.
+                // A stopped operation must still release the socket even without a greeting.
+                const bool bStopped = Restart.Phase == FMtoURestartOperation::EPhase::Stopped;
+                if (Restart.bStatePending && (bHelloReplySent || bStopped)
+                    && !(bSessionEndCleanupDeferred && bStopped && Restart.Code != TEXT("RESTART_TIMEOUT")))
                 {
                     const FString State = Restart.Phase == FMtoURestartOperation::EPhase::Ending ? TEXT("ending")
                         : Restart.Phase == FMtoURestartOperation::EPhase::Permitted ? TEXT("permitted")
@@ -1183,9 +1186,10 @@ uint32 FMtoULiveLinkSource::Run()
                     }
                     Restart.bStatePending = false;
                 }
-                bCloseRestartTransport = Restart.Phase == FMtoURestartOperation::EPhase::Permitted
+                bCloseRestartTransport = bHelloReplySent
+                    && Restart.Phase == FMtoURestartOperation::EPhase::Permitted
                     && Restart.OldSession == ActiveSession;
-                bStopRestartTransport = Restart.Phase == FMtoURestartOperation::EPhase::Stopped
+                bStopRestartTransport = bStopped
                     && (!bSessionEndCleanupDeferred || Restart.Code == TEXT("RESTART_TIMEOUT"));
             }
         }
@@ -1299,8 +1303,14 @@ uint32 FMtoULiveLinkSource::Run()
 
         if (ClientSocket)
         {
+            bool bHoldHelloReply = false;
+#if WITH_DEV_AUTOMATION_TESTS
+            // Hold the queued acknowledgement while the worker still services restart state.
+            bHoldHelloReply = bHelloReceived && !bHelloReplySent && bRestartTestHoldHelloReply.Load();
+            if (bHoldHelloReply) { RestartTestHeldHelloPolls.IncrementExchange(); }
+#endif
             FMtoUOutgoing Reply;
-            while (OutgoingReplies.Dequeue(Reply))
+            while (!bHoldHelloReply && OutgoingReplies.Dequeue(Reply))
             {
                 // The slot is returned once the reply leaves the queue, sent
                 // or not: a reply of an ended session is dropped here and
@@ -2601,6 +2611,8 @@ void FMtoULiveLinkSource::RemoveSecondaryObjectOnGameThread(
         FMtoUSessionObject Removed = MoveTemp(SessionObjects[Index]);
         SessionObjects.RemoveAt(Index);
         SetObjects.Remove(ObjectId);
+        ProtectedSubjects.RemoveAll([&ObjectId](const FProtectedSubject& Subject)
+            { return Subject.ObjectId == ObjectId; });
         ParticipatingActors.Remove(Removed.Actor);
         if (AMtoULiveLinkActor* RemovedActor = Removed.Actor.Get())
         {

@@ -525,6 +525,8 @@ private:
 #if WITH_DEV_AUTOMATION_TESTS
     TAtomic<double> RestartTestClock{-1.0};
     TAtomic<int32> RestartTestSendBuffer{0};
+    TAtomic<bool> bRestartTestHoldHelloReply{false};
+    TAtomic<int32> RestartTestHeldHelloPolls{0};
 #endif
     double RestartNow() const
     {
