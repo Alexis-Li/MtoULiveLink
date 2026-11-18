@@ -749,7 +749,7 @@ private:
         }
     }
 
-    bool EditPart(const FString& PartName, bool bEnable, USkeletalMesh* Replacement = nullptr)
+    bool EditPart(const FString& PartName, bool bEnable, TOptional<USkeletalMesh*> Replacement = {})
     {
         FMtoUCharacterPart* Part = Binding->AdditionalParts.FindByPredicate(
             [&PartName](const FMtoUCharacterPart& Item) { return Item.PartName == PartName; });
@@ -763,9 +763,9 @@ private:
         Binding->Modify();
         Binding->PreEditChange(Property);
         Part->bEnabled = bEnable;
-        if (Replacement)
+        if (Replacement.IsSet())
         {
-            Part->SkeletalMesh = Replacement;
+            Part->SkeletalMesh = Replacement.GetValue();
         }
         FPropertyChangedEvent Change(Property, EPropertyChangeType::ValueSet);
         Binding->PostEditChangeProperty(Change);
@@ -810,6 +810,19 @@ private:
             return GEditor->RedoTransaction() || Abort(TEXT("Unreal could not redo the part transaction"));
         }, false);
 
+        BeginProbe(TEXT("part-missing-mesh"));
+        Add(TEXT("enable a named part without a Skeletal Mesh"), 30.0, [this, Part]()
+        {
+            return EditPart(Part, true, static_cast<USkeletalMesh*>(nullptr));
+        });
+        AddStopped(TEXT("part-missing-mesh"), TEXT("INVALID_BINDING"), 1, true, true,
+            FString::Printf(TEXT("Additional Part '%s': is enabled but has no Skeletal Mesh."), *Part));
+        Add(TEXT("undo the missing Skeletal Mesh edit while stopped"), 30.0, [this]()
+        {
+            return GEditor->UndoTransaction() || Abort(TEXT("Unreal could not undo the missing mesh transaction"));
+        });
+        AddManualConnect(TEXT("missing Skeletal Mesh restored"), 1);
+
         BeginProbe(TEXT("part-incompatible"));
         Add(TEXT("enable a part from an incompatible Skeleton"), 30.0, [this, Part]()
         {
@@ -829,10 +842,10 @@ private:
     }
 
     void AddStopped(const FString& Stage, const FString& Code, int32 NewAttempts,
-        bool bActorReason, bool bObserveFullWindow = false)
+        bool bActorReason, bool bObserveFullWindow = false, const FString& ExpectedDetail = {})
     {
         Add(Stage + TEXT(": both hosts stop with their reason and no retries"), 65.0,
-            [this, Stage, Code, NewAttempts, bActorReason, bObserveFullWindow]()
+            [this, Stage, Code, NewAttempts, bActorReason, bObserveFullWindow, ExpectedDetail]()
         {
             if (AttemptCount() > OldAttempts + NewAttempts)
             {
@@ -851,8 +864,9 @@ private:
             Connection->TryGetStringField(TEXT("code"), MayaCode);
             Connection->TryGetStringField(TEXT("status"), MayaStatus);
             const FString ActorDetail = Actor.IsValid() ? Actor->GetConnectionDetail() : FString();
-            if (MayaCode != Code || MayaStatus.IsEmpty() || !SourceStatus().Contains(Code)
-                || (bActorReason && !ActorDetail.Contains(Code)))
+            const bool bHasReason = MayaCode == Code && !MayaStatus.IsEmpty() && SourceStatus().Contains(Code)
+                && (!bActorReason || ActorDetail.Contains(Code));
+            if (ExpectedDetail.IsEmpty() && !bHasReason)
             {
                 return false;
             }
@@ -860,6 +874,26 @@ private:
             if (bObserveFullWindow && !Settled(32.0))
             {
                 return false;
+            }
+            if (!ExpectedDetail.IsEmpty())
+            {
+                if (!SendOnce(TEXT("panel_shot"), Field(TEXT("name"), MakeShared<FJsonValueString>(Stage))))
+                {
+                    return false;
+                }
+                FString MayaDiagnostic;
+                const TSharedPtr<FJsonObject>* Diagnostics = nullptr;
+                if (MayaResult->TryGetObjectField(TEXT("panel_diagnostics"), Diagnostics))
+                {
+                    (*Diagnostics)->TryGetStringField(Stage, MayaDiagnostic);
+                }
+                if (!bHasReason || !MayaDiagnostic.Contains(TEXT("Error code: ") + Code)
+                    || !MayaDiagnostic.Contains(ExpectedDetail) || !ActorDetail.Contains(ExpectedDetail)
+                    || !SourceStatus().Contains(ExpectedDetail))
+                {
+                    return Abort(FString::Printf(TEXT("%s: expected %s and '%s' on both hosts; Maya diagnostics:\n%s"),
+                        *Stage, *Code, *ExpectedDetail, *MayaDiagnostic));
+                }
             }
             Log(FString::Printf(TEXT("%s: Maya %s (%s), Source '%s', Actor '%s', attempts %d -> %d"),
                 *Stage, *MayaCode, *MayaStatus, *SourceStatus(), *ActorDetail, OldAttempts, AttemptCount()));

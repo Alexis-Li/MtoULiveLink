@@ -1465,6 +1465,8 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                 TestTrue(*(Id + TEXT(" encoded state")), Decoder.Pop(RoundTrip, Error) == EMtoUDecodeResult::Message);
                 FMtoURestartMessage Decoded;
                 TestTrue(*(Id + TEXT(" round trip")), FMtoUProtocol::ParseRestartState(RoundTrip, Decoded, Error));
+                TestEqual(*(Id + TEXT(" code")), Decoded.Code, Message.Code);
+                TestEqual(*(Id + TEXT(" detail")), Decoded.Detail, Message.Detail);
                 TestEqual(*(Id + TEXT(" token")), Decoded.RestartToken, Message.RestartToken);
             }
             continue;

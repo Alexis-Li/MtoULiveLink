@@ -41,7 +41,8 @@ Commands (``{"id": n, "action": ...}``): ``enter``, ``connect``, ``disconnect``,
 ``animation``/``model``), ``mode`` (``target`` ``realtime``/``cached``),
 ``capture`` (``range`` ``[start, end]``), ``time`` (``frame``), ``snapshot``,
 ``fatal_protocol`` (send a malformed frame over this test session),
-``panel_shot`` (with ``name``), ``stage`` (with ``name``: every dialog is
+``panel_shot`` (with ``name``, reads the visible 诊断详情 text into
+``panel_diagnostics`` under the shot name), ``stage`` (with ``name``: every dialog is
 recorded with the latest stage, so the test can tell which ones a scenario
 expects), ``sample_plugins`` (with ``name``), ``set_secondary``,
 ``remove_secondary`` (the 对象配对 window's **设为副对象** and **移除副对象**),
@@ -667,8 +668,14 @@ def run_command(command):
             RESULT, command.get("name") or "sample", RESULT.get("stage", "startup"),
             cmds.pluginInfo(query=True, listPlugins=True) or [], time.time() - STARTED)
     elif action == "panel_shot":
+        from mtou_livelink.controller import DIAGNOSTIC_WINDOW_NAME
+
         CONTROLLER.show_diagnostics()
-        grab_windows(command.get("name", "panel"))
+        field, = [name for name in cmds.lsUI(type="scrollField", long=True) or []
+                  if name.startswith(DIAGNOSTIC_WINDOW_NAME + "|")]
+        name = command.get("name", "panel")
+        RESULT.setdefault("panel_diagnostics", {})[name] = cmds.scrollField(field, query=True, text=True)
+        grab_windows(name)
     elif action == "time":
         preserve = command.get("preserve_undo") and cmds.undoInfo(query=True, state=True)
         if preserve:

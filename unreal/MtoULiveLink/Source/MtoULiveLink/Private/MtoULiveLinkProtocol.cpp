@@ -936,6 +936,7 @@ bool FMtoUProtocol::IsRestartStopCode(const FString& Code)
         TEXT("CACHE_SEEK_INVALID"),
         TEXT("EVAL_STALE"),
         TEXT("INTERNAL_ERROR"),
+        TEXT("INVALID_BINDING"),
         TEXT("INVALID_MESSAGE"),
         TEXT("LINKAGE_APPLY_FAILED"),
         TEXT("LINKAGE_NOT_ACTIVE"),

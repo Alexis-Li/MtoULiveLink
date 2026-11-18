@@ -280,7 +280,11 @@ on `/Engine/Maps/Entry`. The fixture adds a `reconnect` object to the ordinary
 GUI workflow. Set `oracle_frames` to two different displayed poses, `part_name`
 to a compatible part already listed in `parts`, and `incompatible_mesh` to an
 asset from another Skeleton. `failure_code` is the expected diagnostic for
-that negotiation. Each `visibility_cases` and `outfit_cases` entry gives a
+that negotiation. The test also enables `part_name` with its mesh cleared in
+an unsaved Binding transaction. It reads Maya's 诊断详情 window and checks that
+both hosts report `INVALID_BINDING`, name the part and describe the missing
+Skeletal Mesh. It then undoes the edit and explicitly connects.
+Each `visibility_cases` and `outfit_cases` entry gives a
 stage name, editable Maya plugs and values in `edits`, and one `present` and
 one `absent` mesh path to check. Visibility cases also specify whether the
 visible set changes in `restarts`. Each outfit edit is repeated through Maya

@@ -10152,6 +10152,25 @@
           "unknown"
         ]
       }
+    },
+    {
+      "id": "restart-state-invalid-binding",
+      "operation": "restart_state",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "restart_state",
+        "session_id": 41,
+        "state": "stopped",
+        "code": "INVALID_BINDING",
+        "detail": "Additional Part 'Sleeves': is enabled but has no Skeletal Mesh."
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
     }
   ],
   "limits": {

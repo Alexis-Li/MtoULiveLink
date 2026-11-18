@@ -58,7 +58,7 @@ LIMIT_KEYS = (
 # Stable rejection codes from protocol/README.md; the message text is diagnostic
 # only, so a rejected corpus case must name one of these.
 ERROR_CODES = {
-    "PROTOCOL_VERSION_MISMATCH", "INVALID_MESSAGE",
+    "PROTOCOL_VERSION_MISMATCH", "INVALID_MESSAGE", "INVALID_BINDING",
     "PAIRING_REQUIRED", "TARGET_UNKNOWN", "TARGET_ALREADY_PAIRED",
     "WRITER_NOT_ISOLATABLE", "SHARED_WRITER", "MOVING_SOCKET",
     "ANCHOR_MISMATCH", "OBJECT_SET_UNSUPPORTED",

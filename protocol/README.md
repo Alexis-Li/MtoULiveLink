@@ -469,9 +469,10 @@ exactly `input_changed`. `detail` is a diagnostic string, possibly empty.
 `state` is exactly `ending`, `permitted` or `stopped`. For `ending` and
 `permitted`, `code` is the empty string; for `stopped` and `restart_cancel`, it
 is a defined stable rejection code, including `SUBJECT_CHANGED`,
-`RESTART_TIMEOUT`, `RESTART_CANCELLED`, `RECOVERY_REFUSED` or
-`PREVIEW_NOT_READY`. Text never determines the category. `permitted` requires a
-non-empty opaque `restart_token`; other states must omit that known field.
+`RESTART_TIMEOUT`, `RESTART_CANCELLED`, `RECOVERY_REFUSED`,
+`PREVIEW_NOT_READY` or `INVALID_BINDING`. Text never determines the category.
+`permitted` requires a non-empty opaque `restart_token`; other states must omit
+that known field.
 Unknown enum values, missing fields, empty identities and wrong JSON types
 are structural `INVALID_MESSAGE` and close the connection.
 
@@ -611,6 +612,7 @@ it. A message whose `type` is not defined is always a structural failure.
 | `RESTART_CANCELLED` | explicit user disconnect/cancellation stopped the automatic operation; revokes permission |
 | `SECOND_CLIENT_REJECTED` | a second Maya connects while one is connected |
 | `NO_BINDING_ACTOR`, `MULTIPLE_BINDING_ACTORS` | no placed Binding Actor, or several without an explicit pairing |
+| `INVALID_BINDING` | the selected Actor lacks a usable Binding or character composition, such as an enabled Additional Part with no Skeletal Mesh; the diagnostic identifies the invalid input |
 | `SKELETON_MISMATCH` | the Maya bones cannot drive the required Unreal bones of every enabled display |
 | `BIND_POSE_INVALID` | a bind or pose transform needed for retargeting cannot be inverted |
 | `PREVIEW_NOT_READY`, `PREVIEW_MORPH_MISMATCH` | Model needs a ready generated preview; a non-empty BlendShape manifest shares no name with the Morphs of the Generated Preview, Primary Driver and enabled Additional Parts together |
