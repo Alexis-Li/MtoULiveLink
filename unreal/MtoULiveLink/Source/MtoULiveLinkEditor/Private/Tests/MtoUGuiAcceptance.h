@@ -356,6 +356,29 @@ inline int32 CheckMayaDialogs(FAutomationTestBase& Test, const TSharedPtr<FJsonO
 }
 
 /**
+ * A Maya joint's world rotation in Unreal axes, under the actor's placement.
+ * The bone's local axes can differ by a fixed rotation, so compare the change
+ * between frames rather than the absolute world rotations.
+ */
+inline bool MayaWorldRotation(const TSharedPtr<FJsonObject>& Joint, const FQuat& Anchor, FQuat& Out)
+{
+    const TArray<TSharedPtr<FJsonValue>>* A = nullptr;
+    if (!Joint->TryGetArrayField(TEXT("axes"), A) || A->Num() != 9)
+    {
+        return false;
+    }
+    const auto Axis = [A](int32 Row)
+    {
+        return FVector((*A)[Row * 3]->AsNumber(), (*A)[Row * 3 + 2]->AsNumber(), (*A)[Row * 3 + 1]->AsNumber());
+    };
+    FMatrix Matrix = FMatrix::Identity;
+    const FVector X = Axis(0), Y = Axis(2), Z = Axis(1);
+    Matrix.SetAxes(&X, &Y, &Z);
+    Out = Anchor * FQuat(Matrix);
+    return true;
+}
+
+/**
  * The weight each display of the actor shows for one Morph target, read where
  * the displays' own verification reads it. Displays without the target are
  * skipped, so an empty result means no display owns it.

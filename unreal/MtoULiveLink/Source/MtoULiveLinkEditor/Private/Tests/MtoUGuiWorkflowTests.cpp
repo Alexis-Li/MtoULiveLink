@@ -998,6 +998,12 @@ private:
         }
     }
 
+    struct FOracleRotation
+    {
+        FQuat Maya;
+        FQuat Shown;
+    };
+
     bool ComparePose(const FString& Name, int32 DistinctPose = INDEX_NONE, bool bMorphs = true)
     {
         const TSharedPtr<FJsonObject> Snapshot = MayaResult->GetObjectField(TEXT("snapshot"));
@@ -1005,7 +1011,7 @@ private:
         const FTransform Placement = Actor->GetActorTransform();
         double MaxWorld = 0.0;
         int32 Bones = 0;
-        TMap<FName, FVector> DisplayedPose;
+        TMap<FName, FOracleRotation> DisplayedPose;
         for (const TPair<FString, TSharedPtr<FJsonValue>>& Joint : Snapshot->GetObjectField(TEXT("joints"))->Values)
         {
             const FName Bone(*Joint.Key);
@@ -1019,7 +1025,14 @@ private:
                 FVector(World[0]->AsNumber(), World[2]->AsNumber(), World[1]->AsNumber()));
             const FVector Shown = Primary->GetSocketLocation(Bone);
             MaxWorld = FMath::Max(MaxWorld, FVector::Distance(Expected, Shown));
-            DisplayedPose.Add(Bone, Shown);
+            if (DistinctPose != INDEX_NONE)
+            {
+                FQuat Rotation;
+                if (MtoUGuiAcceptance::MayaWorldRotation(Joint.Value->AsObject(), Placement.GetRotation(), Rotation))
+                {
+                    DisplayedPose.Add(Bone, {Rotation, Primary->GetSocketQuaternion(Bone)});
+                }
+            }
             ++Bones;
         }
         double MaxMorph = 0.0;
@@ -1045,9 +1058,10 @@ private:
         }
         const double WorldTolerance = Fixture->GetNumberField(TEXT("world_tolerance_cm"));
         const double MorphTolerance = Fixture->GetNumberField(TEXT("morph_tolerance"));
+        double ExpectedRotation = 0.0, DisplayedRotation = 0.0, RotationError = 0.0;
         if (DistinctPose != INDEX_NONE)
         {
-            if (Bones < 3 || MaxWorld >= WorldTolerance || Morphs == 0
+            if (DisplayedPose.Num() < 3 || MaxWorld >= WorldTolerance || Morphs == 0
                 || MaxExpected <= 0.05 || MaxMorph >= MorphTolerance)
             {
                 return false;
@@ -1058,16 +1072,29 @@ private:
             }
             else
             {
-                double Motion = 0.0;
-                for (const TPair<FName, FVector>& Pair : DisplayedPose)
+                for (const TPair<FName, FOracleRotation>& Pair : DisplayedPose)
                 {
-                    if (const FVector* First = FirstOraclePose.Find(Pair.Key))
+                    if (const FOracleRotation* First = FirstOraclePose.Find(Pair.Key))
                     {
-                        Motion = FMath::Max(Motion, FVector::Distance(Pair.Value, *First));
+                        const FQuat MayaChange = Pair.Value.Maya * First->Maya.Inverse();
+                        const FQuat ShownChange = Pair.Value.Shown * First->Shown.Inverse();
+                        ExpectedRotation = FMath::Max(ExpectedRotation,
+                            FMath::RadiansToDegrees(MayaChange.AngularDistance(FQuat::Identity)));
+                        DisplayedRotation = FMath::Max(DisplayedRotation,
+                            FMath::RadiansToDegrees(ShownChange.AngularDistance(FQuat::Identity)));
+                        RotationError = FMath::Max(RotationError,
+                            FMath::RadiansToDegrees(MayaChange.AngularDistance(ShownChange)));
                     }
                 }
-                Test->TestTrue(*(Name + TEXT(": the real display changes between oracle frames")), Motion > WorldTolerance);
-                Log(FString::Printf(TEXT("%s: displayed bones moved up to %.4f cm"), *Name, Motion));
+                constexpr double RotationTolerance = 0.5;
+                if (RotationError >= RotationTolerance)
+                {
+                    return false;
+                }
+                Test->TestTrue(*(Name + TEXT(": the real display changes between oracle frames")),
+                    ExpectedRotation > RotationTolerance && DisplayedRotation > RotationTolerance);
+                Log(FString::Printf(TEXT("%s: bone rotation Maya %.4f deg, displayed %.4f deg, max error %.4f deg"),
+                    *Name, ExpectedRotation, DisplayedRotation, RotationError));
             }
         }
         double MayaTime = 0.0;
@@ -1081,6 +1108,12 @@ private:
         Record->SetNumberField(TEXT("max_morph"), MaxMorph);
         Record->SetNumberField(TEXT("morphs"), Morphs);
         Record->SetObjectField(TEXT("maya_snapshot"), Snapshot);
+        if (DistinctPose == 1)
+        {
+            Record->SetNumberField(TEXT("expected_rotation_deg"), ExpectedRotation);
+            Record->SetNumberField(TEXT("displayed_rotation_deg"), DisplayedRotation);
+            Record->SetNumberField(TEXT("max_rotation_error_deg"), RotationError);
+        }
         WriteJsonFile(FPaths::Combine(EvidenceDir, FString::Printf(TEXT("pose-%02d.json"), PoseIndex++)), Record);
         Test->TestTrue(*(Name + TEXT(": the primary display has the oracle bones")), Bones >= 3);
         Test->TestTrue(*(Name + TEXT(": Unreal shows Maya's world pose")),
@@ -1215,7 +1248,7 @@ private:
     int32 OldSession = 0, OldAttempts = 0;
     bool bUnrealReconnecting = false;
     TArray<TSharedPtr<FJsonValue>> UnrealHistory;
-    TMap<FName, FVector> FirstOraclePose;
+    TMap<FName, FOracleRotation> FirstOraclePose;
     TArray<FString> OldCapturePaths;
     const TArray<TSharedPtr<FJsonValue>>* DetailsWidths = nullptr;
     TArray<FStep> Steps;

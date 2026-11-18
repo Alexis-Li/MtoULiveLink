@@ -129,31 +129,6 @@ TSharedPtr<ISequencer> OpenSequencerOf(ULevelSequence* Sequence)
 }
 
 /**
- * One Maya joint's world rotation in Unreal axes, placed by the anchor's
- * rotation. Maya (x, y, z) is Unreal (x, z, y), so Unreal's X, Y and Z axes are
- * Maya's X, Z and Y axes with their components swizzled the same way. A bone's
- * own local axes may differ from the joint's by a fixed rotation, so compare
- * rotation changes between frames rather than these values themselves.
- */
-bool MayaWorldRotation(const TSharedPtr<FJsonObject>& Joint, const FQuat& Anchor, FQuat& Out)
-{
-    const TArray<TSharedPtr<FJsonValue>>* A = nullptr;
-    if (!Joint->TryGetArrayField(TEXT("axes"), A) || A->Num() != 9)
-    {
-        return false;
-    }
-    const auto Axis = [A](int32 Row)
-    {
-        return FVector((*A)[Row * 3]->AsNumber(), (*A)[Row * 3 + 2]->AsNumber(), (*A)[Row * 3 + 1]->AsNumber());
-    };
-    FMatrix Matrix = FMatrix::Identity;
-    const FVector X = Axis(0), Y = Axis(2), Z = Axis(1);
-    Matrix.SetAxes(&X, &Y, &Z);
-    Out = Anchor * FQuat(Matrix);
-    return true;
-}
-
-/**
  * The Binding a fixture object names: a transient copy of its `binding` asset,
  * or a transient Binding of its `skeletal_mesh` and optional `parts`.
  */
@@ -1466,7 +1441,7 @@ private:
             const FVector Shown = Primary->GetSocketLocation(Bone);
             Out.MaxWorld = FMath::Max(Out.MaxWorld, FVector::Distance(Expected, Shown));
             FQuat MayaRotation;
-            if (MayaWorldRotation(Entry, LinkageAnchor.GetRotation(), MayaRotation))
+            if (MtoUGuiAcceptance::MayaWorldRotation(Entry, LinkageAnchor.GetRotation(), MayaRotation))
             {
                 Rotations.Add(Bone, {MayaRotation, Primary->GetSocketQuaternion(Bone)});
             }
