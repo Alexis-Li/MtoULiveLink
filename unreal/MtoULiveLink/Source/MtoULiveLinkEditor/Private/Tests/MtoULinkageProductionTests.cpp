@@ -3283,7 +3283,7 @@ private:
                     Test->TestEqual(*(Label + TEXT(": Maya restored its panel camera")),
                         MayaResult->GetStringField(TEXT("panel_camera")), MayaCameraBefore);
                     Test->TestTrue(*(Label + TEXT(": the old Sequencer writers are unmuted")),
-                        WritersMuted(false, Label));
+                        WritersMuted(false, *Label));
                 }
                 Log(FString::Printf(TEXT("%s: old set %d ended, both objects ready on %d; attempts %d -> %d"),
                     *Label, SwapSession, View.Identity.SessionId, SwapAttempts, MayaAttempts()));
