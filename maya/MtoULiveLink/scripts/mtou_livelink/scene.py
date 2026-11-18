@@ -397,7 +397,7 @@ def bind_world_candidates(subject):
             # Structural transforms have no joint bindPose/dagPose; when they
             # are not skin influences they fall back to the capture-time
             # local re-anchored to the parent bind frame in
-            # capture_bind_local_transforms.
+            # _capture_bind_local_transforms.
             continue
         plug = bone["path"] + ".bindPose"
         for pose_plug in cmds.listConnections(
@@ -413,12 +413,16 @@ def bind_world_candidates(subject):
     return candidates
 
 
-def capture_bind_local_transforms(subject):
+def _capture_bind_local_transforms(subject, previous_fallbacks):
     candidates = bind_world_candidates(subject)
-    current_world = [bone["dag_path"].inclusiveMatrix() for bone in subject["bones"]]
+    bones = subject["bones"]
     bind_world = []
+    bind_world_inverse = []
+    bind_local = []
+    fallbacks = {}
     conflicts = 0
-    for index, bone in enumerate(subject["bones"]):
+    for bone in bones:
+        parent = bone["parent"]
         records = candidates[bone["path"]]
         if records:
             # Skin clusters can legitimately disagree when outfits were bound
@@ -427,33 +431,34 @@ def capture_bind_local_transforms(subject):
             # candidates must agree so node naming cannot choose the pose.
             matrix, conflict = select_bind_world_candidate(bone["path"], records)
             conflicts += int(conflict)
-        elif bone["parent"] >= 0:
-            # Bones with no stored bind data (for example corrective slider
-            # joints added after binding) use their capture-time local offset
-            # re-anchored to the parent's bind frame.
-            parent = bone["parent"]
-            parent_inverse = matrix_inverse(
-                current_world[parent], bone["path"],
-                "capture-time parent matrix")
-            matrix = current_world[index] * parent_inverse \
-                * bind_world[parent]
+            local = matrix * bind_world_inverse[parent] if parent >= 0 else matrix
         else:
-            matrix = current_world[index]
+            # With no stored bind data, the capture-time local is the bind
+            # input. Keep it for the same Maya node and parent across refreshes.
+            node = om.MFnDependencyNode(bone["dag_path"].node()).uuid().asString()
+            parent_node = None
+            if parent >= 0:
+                parent_node = om.MFnDependencyNode(
+                    bones[parent]["dag_path"].node()).uuid().asString()
+            key = (node, parent_node)
+            local = previous_fallbacks.get(key)
+            if local is None:
+                local = bone["dag_path"].inclusiveMatrix()
+                if parent >= 0:
+                    parent_inverse = matrix_inverse(
+                        bones[parent]["dag_path"].inclusiveMatrix(), bone["path"],
+                        "capture-time parent matrix")
+                    local = local * parent_inverse
+            fallbacks[key] = local
+            matrix = local * bind_world[parent] if parent >= 0 else local
         bind_world.append(matrix)
-
-    bind_world_inverse = [
-        matrix_inverse(matrix, bone["path"], "resolved bind world matrix")
-        for bone, matrix in zip(subject["bones"], bind_world)]
-    bind_local = []
-    for index, bone in enumerate(subject["bones"]):
-        matrix = bind_world[index]
-        if bone["parent"] >= 0:
-            matrix = matrix * bind_world_inverse[bone["parent"]]
-        bind_local.append(sample_matrix(matrix, subject["unit_scale"]))
-    return bind_local, conflicts
+        bind_world_inverse.append(
+            matrix_inverse(matrix, bone["path"], "resolved bind world matrix"))
+        bind_local.append(sample_matrix(local, subject["unit_scale"]))
+    return bind_local, conflicts, fallbacks
 
 
-def discover_curve_plugs(bone_paths, visible_meshes=None):
+def discover_curve_plugs(bone_paths, visible_meshes=None, curve_order=()):
     if visible_meshes is None:
         visible_meshes = visible_mesh_shapes(skinned_mesh_candidates(bone_paths))
     deformers = set()
@@ -478,10 +483,12 @@ def discover_curve_plugs(bone_paths, visible_meshes=None):
             by_name[curve["name"]] = group
             grouped.append(group)
         group["plugs"].append(curve["plug"])
+    if by_name.keys() == set(curve_order):
+        return [by_name[name] for name in curve_order]
     return grouped
 
 
-def capture_subject(root=None):
+def capture_subject(root=None, bind_fallbacks=None, curve_order=()):
     require_maya()
     root = root or selected_root()
     bones = build_hierarchy(root, maya_children, allow_duplicates=True)
@@ -496,11 +503,14 @@ def capture_subject(root=None):
                "meshes": mesh_paths,
                "mesh_shapes": shapes,
                "curves": discover_curve_plugs(
-                   [bone["path"] for bone in bones], shapes),
+                   [bone["path"] for bone in bones], shapes, curve_order),
                "unit_scale": centimeters_per_unit(
                    cmds.currentUnit(query=True, linear=True))}
-    subject["bind_local_transforms"], subject["bind_conflict_count"] = \
-        capture_bind_local_transforms(subject)
+    bind_local, conflicts, fallbacks = _capture_bind_local_transforms(
+        subject, bind_fallbacks or {})
+    subject["bind_local_transforms"] = bind_local
+    subject["bind_conflict_count"] = conflicts
+    subject["bind_fallbacks"] = fallbacks
     return subject
 
 
@@ -680,10 +690,9 @@ class CharacterScene(object):
         self._candidate_paths = []
         self._graph_dirty = False
         self._paths_dirty = False
-        self._refresh_pending = False
+        self._refresh_token = None
         self._root_dag = None
         self._display_dag = None
-        self._refresh_generation = 0
         self._refreshing = False
         self._closed = False
         self._terminal_error = None
@@ -691,7 +700,7 @@ class CharacterScene(object):
 
     @classmethod
     def capture(cls, root, display=None, display_attribute=None, on_event=None,
-                display_optional=True):
+                display_optional=True, saved_display_uuid=None):
         """Capture one object scene.
 
         Display is an optional label source for both primary and secondary
@@ -701,8 +710,12 @@ class CharacterScene(object):
         scene = None
         try:
             root = cls._resolve_root(root)
-            display, display_attribute = cls._resolve_display(
-                root, display, display_attribute, display_optional)
+            if saved_display_uuid is None:
+                display, display_attribute = cls._resolve_display(
+                    root, display, display_attribute, display_optional)
+            else:
+                display, display_attribute = cls._resolve_saved_display(
+                    root, saved_display_uuid, display_attribute)
             scene = cls(root, display, display_attribute, on_event)
             scene._commit_capture(revision=1)
             scene._register_callbacks()
@@ -768,6 +781,20 @@ class CharacterScene(object):
                 context={"attribute_candidates": tuple(sorted(by_name))})
         return display, display_attribute
 
+    @classmethod
+    def _resolve_saved_display(cls, root, display_uuid, display_attribute):
+        # Recovery may follow a rename, deletion, or replacement of the
+        # explicitly selected label source. Only the same usable node qualifies.
+        matches = cmds.ls(display_uuid, long=True) or []
+        if len(matches) == 1:
+            try:
+                return cls._resolve_display(root, matches[0], display_attribute)
+            except CharacterSceneError as error:
+                if error.code not in ("INVALID_DISPLAY", "INVALID_DISPLAY_ATTRIBUTE",
+                                      "AMBIGUOUS_DISPLAY_ATTRIBUTE"):
+                    raise
+        return None, None
+
     @staticmethod
     def _wrap_error(code, error):
         if isinstance(error, CharacterSceneError):
@@ -784,7 +811,10 @@ class CharacterScene(object):
 
     def _capture_values(self, revision):
         try:
-            subject = capture_subject(self._root)
+            subject = capture_subject(
+                self._root,
+                (self._subject or {}).get("bind_fallbacks"),
+                self._snapshot.curve_names if self._snapshot is not None else ())
             record = self._display_record()
             outfit = (current_enum_label(record) if record is not None
                       else mesh_label(subject["meshes"]))
@@ -849,8 +879,8 @@ class CharacterScene(object):
         if not self._refreshing:
             self._ensure_available()
             self._check_evaluated_inputs()
-        if self._refresh_pending or self._refreshing:
-            self._refresh_inputs(self._refresh_generation)
+        if self._refresh_token is not None or self._refreshing:
+            self._refresh_inputs()
         return self.snapshot()
 
     def set_display_controller(self, display, display_attribute=None):
@@ -878,7 +908,7 @@ class CharacterScene(object):
         if self._closed:
             return
         self._closed = True
-        self._refresh_generation += 1
+        self._refresh_token = None
         self._refreshing = False
         self._remove_callbacks()
         self._subject = None
@@ -999,11 +1029,10 @@ class CharacterScene(object):
         self._queue_refresh()
 
     def _queue_refresh(self):
-        if self._closed or self._refresh_pending:
+        if self._closed or self._refresh_token is not None:
             return
-        self._refresh_pending = True
-        generation = self._refresh_generation
-        mayaapi.run_deferred(lambda: self._refresh_inputs(generation), cmds.evalDeferred)
+        token = self._refresh_token = object()
+        mayaapi.run_deferred(lambda: self._refresh_inputs(token), cmds.evalDeferred)
 
     def _begin_change(self):
         if not self._refreshing:
@@ -1032,7 +1061,7 @@ class CharacterScene(object):
         # Visibility can be animated or driven without an attribute-set event.
         # Only cached candidates are queried on the normal per-frame path.
         if self._graph_dirty or self._paths_dirty:
-            self._refresh_inputs(self._refresh_generation)
+            self._refresh_inputs()
             return
         try:
             meshes, identities, outfit = self._visible_inputs()
@@ -1044,10 +1073,12 @@ class CharacterScene(object):
         except (RuntimeError, ValueError) as exc:
             self._invalidate(self._wrap_error("ROLE_SETUP_FAILED", exc))
 
-    def _refresh_inputs(self, generation):
-        if self._closed or generation != self._refresh_generation:
+    def _refresh_inputs(self, token=None):
+        if self._closed or (token is not None and token is not self._refresh_token):
             return
-        self._refresh_pending = False
+        # A synchronous refresh consumes the queued request as well. Its
+        # deferred callback must leave any later request's dirty state alone.
+        self._refresh_token = None
         previous = self._snapshot
         try:
             graph_dirty, self._graph_dirty = self._graph_dirty, False
@@ -1072,7 +1103,8 @@ class CharacterScene(object):
                     subject["curves"] = discover_curve_plugs(
                         [bone["path"] for bone in subject["bones"]],
                         visible_mesh_shapes([
-                            path.fullPathName() for path in self._candidate_paths]))
+                            path.fullPathName() for path in self._candidate_paths]),
+                        previous.curve_names)
                     grouped = duplicate_bone_paths(subject["bones"])
                     duplicates = [path for name in sorted(grouped) for path in grouped[name]]
                 candidate = CharacterSnapshot(
@@ -1089,7 +1121,7 @@ class CharacterScene(object):
             or candidate.bind_local_transforms != previous.bind_local_transforms)
         if changed:
             self._begin_change()
-        if self._closed or generation != self._refresh_generation:
+        if self._closed:
             return
         if not changed:
             candidate = CharacterSnapshot(
@@ -1122,7 +1154,7 @@ class CharacterScene(object):
             return
         self._terminal_error = error
         self._closed = True
-        self._refresh_generation += 1
+        self._refresh_token = None
         self._refreshing = False
         self._remove_callbacks()
         self._subject = None

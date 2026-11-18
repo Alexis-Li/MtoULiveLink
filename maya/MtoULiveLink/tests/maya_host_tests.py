@@ -463,6 +463,123 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual("renamedOutfit", scene.snapshot().outfit)
         self.assertEqual(["display_changed"], [event.kind for event in events])
 
+    def test_unrelated_dag_edit_preserves_bind_locals_during_animation(self):
+        root = cmds.joint(name="root")
+        self._skinned_outfit(root, "outfit", "Smile")
+        middle = cmds.createNode("transform", name="middle", parent=root)
+        cmds.createNode("joint", name="tip", parent=middle)
+        cmds.setKeyframe(middle, attribute="translateX", time=1, value=1.0)
+        cmds.setKeyframe(middle, attribute="translateX", time=2, value=3.0)
+        cmds.currentTime(1)
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        before = scene.snapshot()
+        old_frame = scene.sample()
+
+        cmds.currentTime(2)
+        cmds.spaceLocator(name="unrelated")
+        frame = scene.sample()
+        mtou_mayaapi.drain_deferred()
+
+        self.assertNotEqual(old_frame.transforms, frame.transforms)
+        self.assertEqual(before.bind_local_transforms, scene.snapshot().bind_local_transforms)
+        self.assertEqual(before.revision, frame.revision)
+        self.assertEqual([], events)
+
+    def test_deformer_rename_keeps_negotiated_curve_order_and_values(self):
+        root = cmds.joint(name="root")
+        self._skinned_outfit(root, "aOutfit", "Smile")
+        self._skinned_outfit(root, "bOutfit", "Jaw")
+        cmds.setAttr("bOutfitBS.weight[0]", 0.75)
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        before = scene.snapshot()
+        self.assertEqual(("Smile", "Jaw"), before.curve_names)
+
+        deformer = cmds.rename("aOutfitBS", "zOutfitBS")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(before.curve_names, scene.snapshot().curve_names)
+        self.assertEqual((0.25, 0.75), scene.sample().curves)
+
+        cmds.setAttr(deformer + ".weight[0]", 0.5)
+        cmds.spaceLocator(name="unrelated")
+        frame = scene.sample()
+        self.assertEqual(before.curve_names, scene.snapshot().curve_names)
+        self.assertEqual((0.5, 0.75), frame.curves)
+        self.assertEqual(before.revision, frame.revision)
+        self.assertEqual([], events)
+
+    def test_manual_connect_recovers_the_explicit_display_by_identity(self):
+        for change, outfit in (("delete", "outfit"), ("replace", "outfit"),
+                               ("remove_enum", "outfit"), ("rename", "ClothesChosen")):
+            with self.subTest(change=change):
+                cmds.file(new=True, force=True)
+                group, root, _ = self._create_character_group()
+                root = cmds.ls(root, long=True)[0]
+                self._skinned_outfit(root, "outfit")
+                chosen = cmds.createNode("transform", name="alternateLabel", parent=group)
+                chosen = cmds.ls(chosen, long=True)[0]
+                cmds.addAttr(chosen, longName="wardrobe", attributeType="enum",
+                             enumName="ClothesChosen")
+                controller = mtou_controller.Controller()
+                controller._render_snapshot = mock.Mock()
+                controller._set_connected = mock.Mock()
+                controller._show_error = mock.Mock()
+                controller._selected_display = mock.Mock(return_value=chosen)
+                self.addCleanup(controller._clear_scene)
+                controller._capture_scene(root)
+                controller.set_display_controller()
+                mtou_mayaapi.drain_deferred()
+                scene = controller._scene
+                self.assertEqual("ClothesChosen", scene.snapshot().outfit)
+                if change in ("delete", "replace"):
+                    cmds.delete(chosen)
+                if change == "replace":
+                    replacement = cmds.createNode(
+                        "transform", name="alternateLabel", parent=group)
+                    cmds.addAttr(replacement, longName="wardrobe", attributeType="enum",
+                                 enumName="ClothesReplacement")
+                elif change == "remove_enum":
+                    cmds.deleteAttr(chosen + ".wardrobe")
+                elif change == "rename":
+                    cmds.rename(chosen, "renamedLabel")
+                mtou_mayaapi.drain_deferred()
+                self.assertEqual(outfit, scene.snapshot().outfit)
+
+                def on_event(event):
+                    controller._on_streaming_session_event(session, event)
+
+                session = mtou_session.StreamingSession(scene, 24.0, on_event)
+                session._worker = mock.Mock()
+                session._worker.status.return_value = ("ready", "", None, None)
+                session._phase = "ready"
+                controller._session = session
+                with mock.patch.object(mtou_scene, "sample_pose",
+                                       side_effect=RuntimeError("bad evaluated pose")):
+                    session._sample_and_submit(force=True)
+                mtou_mayaapi.drain_deferred()
+                self.assertIsNone(controller._scene)
+                self.assertIsNone(controller._session)
+                self.assertEqual("SAMPLING_FAILED", controller._show_error.call_args[0][0]["code"])
+                controller._show_error.reset_mock()
+
+                with mock.patch.object(mtou_session.StreamingSession, "start") as start:
+                    controller.connect()
+                controller._session = None
+                start.assert_called_once()
+                controller._show_error.assert_not_called()
+                self.assertEqual(outfit, controller._scene.snapshot().outfit)
+
+                outside = cmds.createNode("transform", name="outside")
+                controller._selected_display.return_value = outside
+                controller.set_display_controller()
+                self.assertIn("inside the character",
+                              controller._show_error.call_args[0][0]["message"])
+                self.assertEqual(outfit, controller._scene.snapshot().outfit)
+                controller._clear_scene()
+
     def test_curve_manifest_and_bind_input_changes_increase_revision(self):
         root = cmds.joint(name="root")
         self._skinned_outfit(root, "outfit", "Smile")
