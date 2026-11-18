@@ -918,11 +918,13 @@ class Controller(object):
             diagnostic["duplicate_paths"] = list(error.duplicate_paths)
         return diagnostic
 
-    def _capture_scene(self, root, display=None, display_attribute=None):
+    def _capture_scene(self, root, display=None, display_attribute=None,
+                       saved_display_uuid=None):
         try:
             scene = CharacterScene.capture(
                 root, display=display, display_attribute=display_attribute,
-                on_event=self._on_character_scene_event)
+                on_event=self._on_character_scene_event,
+                saved_display_uuid=saved_display_uuid)
         except CharacterSceneError as error:
             if error.code == "AMBIGUOUS_DISPLAY_ATTRIBUTE" and display is not None:
                 attribute = self._choose_enum(
@@ -931,7 +933,9 @@ class Controller(object):
             raise
         self._scene = scene
         self._pending_root = None
-        self._capture_args = (root, display, display_attribute)
+        if display is not None:
+            saved_display_uuid = cmds.ls(display, uuid=True)[0]
+        self._capture_args = (root, saved_display_uuid, display_attribute)
         self._render_snapshot(scene.snapshot())
         return scene
 
@@ -1007,7 +1011,7 @@ class Controller(object):
         try:
             if self._scene is not None:
                 self._scene.set_display_controller(display, attribute)
-                self._capture_args = (root, display, attribute)
+                self._capture_args = (root, cmds.ls(display, uuid=True)[0], attribute)
                 self._set_connected(self._session_ready(), "服装名称来源已设置")
                 return
             # One clean termination before the replacement: the old Streaming
@@ -1177,7 +1181,9 @@ class Controller(object):
         try:
             if self._scene is None:
                 if self._capture_args is not None:
-                    self._capture_scene(*self._capture_args)
+                    root, display_uuid, attribute = self._capture_args
+                    self._capture_scene(root, display_attribute=attribute,
+                                        saved_display_uuid=display_uuid)
                 else:
                     self.set_role()
             if self._scene is None:

@@ -519,6 +519,21 @@ class CharacterSceneTests(unittest.TestCase):
         scene.close()
         self.assertEqual([1, 2, 101], removed)
 
+    def test_synchronous_sample_retires_its_queued_refresh(self):
+        scene, _, deferred, _, _ = self._capture()
+        scene._on_graph_changed()
+        self.assertEqual(1, scene.sample().revision)
+
+        scene._on_graph_changed()
+        scene._on_graph_changed()
+        self.assertEqual(2, len(deferred))
+        with mock.patch.object(scene, "_visible_inputs", wraps=scene._visible_inputs) as inputs:
+            deferred[0]()
+            inputs.assert_not_called()
+            deferred[1]()
+            inputs.assert_called_once()
+        self.assertEqual(1, scene.snapshot().revision)
+
     def test_close_invalidates_deferred_refresh(self):
         scene, callbacks, deferred, removed, _ = self._capture()
 
@@ -4518,7 +4533,10 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller._set_connected = mock.Mock()
         controller.disconnect = mock.Mock()
         controller._capture_scene = mock.Mock()
-        with mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
+        fake_cmds = mock.Mock()
+        fake_cmds.ls.return_value = ["display-uuid"]
+        with patch_global("cmds", fake_cmds), \
+             mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
                                return_value=("|Display_ctrl", "wardrobe")):
             controller.set_display_controller()
         scene.set_display_controller.assert_called_once_with("|Display_ctrl", "wardrobe")
