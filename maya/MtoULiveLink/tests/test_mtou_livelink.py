@@ -376,6 +376,11 @@ class CharacterSceneTests(unittest.TestCase):
 
         class FakeNodeMessage(object):
             kAttributeSet = 1
+            kConnectionMade = 2
+            kConnectionBroken = 4
+            kAttributeAdded = 8
+            kAttributeRemoved = 16
+            kAttributeRenamed = 32
 
             @staticmethod
             def addNodeDestroyedCallback(node, callback):
@@ -417,6 +422,17 @@ class CharacterSceneTests(unittest.TestCase):
         }
         display = {"attribute": "clothes", "entries": ["Clothes01", "Clothes02"],
                    "plug": "|Group|Display_ctrl.clothes"}
+
+        def register(scene):
+            scene._callback_ids.extend([
+                FakeNodeMessage.addNodeDestroyedCallback(None, scene._on_root_destroyed),
+                FakeNodeMessage.addNodeDestroyedCallback(None, scene._on_display_destroyed),
+                FakeNodeMessage.addAttributeChangedCallback(None, scene._on_input_changed)])
+
+        def visible_inputs(scene):
+            return (subject["meshes"], tuple(subject["meshes"]),
+                    mtou_scene.current_enum_label(display))
+
         patches = [
             patch_global("cmds", fake_cmds),
             patch_global("om", fake_om),
@@ -425,6 +441,10 @@ class CharacterSceneTests(unittest.TestCase):
             mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
                               return_value=("|Group|Display_ctrl", "clothes")),
             patch_global("capture_subject", return_value=subject),
+            mock.patch.object(mtou_scene.CharacterScene, "_register_callbacks", register),
+            mock.patch.object(mtou_scene.CharacterScene, "_visible_inputs", visible_inputs),
+            mock.patch.object(mtou_scene.CharacterScene, "_rebuild_input_observers"),
+            patch_global("mesh_identities", side_effect=tuple),
             patch_global("enum_attributes", return_value=[display]),
             patch_global("current_enum_label", return_value="Clothes01"),
             patch_global("dag_path", return_value=FakeDagPath()),
@@ -454,7 +474,7 @@ class CharacterSceneTests(unittest.TestCase):
         with self.assertRaises(AttributeError):
             snapshot.revision = 2
 
-    def test_display_change_pauses_sampling_and_coalesces_refresh(self):
+    def test_display_label_change_coalesces_without_changing_revision(self):
         events = []
         scene, callbacks, deferred, _, _ = self._capture(events.append)
 
@@ -468,19 +488,11 @@ class CharacterSceneTests(unittest.TestCase):
         with patch_global("current_enum_label", return_value="Clothes02"):
             changed(1, FakePlug(), None, None)
             changed(1, FakePlug(), None, None)
-
-        self.assertEqual(["character_change_started"], [event.kind for event in events])
-        with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
-            scene.sample()
-        self.assertEqual("CHARACTER_SCENE_REFRESHING", caught.exception.code)
-        self.assertEqual(2, len(deferred))
-
-        deferred[0]()
-        self.assertEqual(["character_change_started"], [event.kind for event in events])
-        deferred[1]()
-        self.assertEqual(
-            ["character_change_started", "outfit_changed"],
-            [event.kind for event in events])
+            self.assertEqual(1, scene.sample().revision)
+            self.assertEqual(1, len(deferred))
+            deferred[0]()
+        self.assertEqual(["display_changed"], [event.kind for event in events])
+        self.assertEqual("Clothes02", scene.snapshot().outfit)
         self.assertEqual(1, scene.snapshot().revision)
 
     def test_sampling_failure_does_not_terminate_scene(self):
@@ -528,7 +540,8 @@ class CharacterSceneTests(unittest.TestCase):
 
     def test_refresh_failure_enters_terminal_state(self):
         events = []
-        scene, callbacks, deferred, removed, _ = self._capture(events.append)
+        scene, callbacks, deferred, removed, subject = self._capture(events.append)
+        subject["meshes"] = ["|Group|replacement"]
 
         class FakePlug(object):
             @staticmethod
@@ -555,6 +568,7 @@ class CharacterSceneTests(unittest.TestCase):
     def test_event_consumer_failure_does_not_break_scene(self):
         scene, callbacks, _, _, _ = self._capture(
             lambda event: (_ for _ in ()).throw(RuntimeError("consumer failed")))
+        scene._subject["meshes"] = ["|Group|replacement"]
 
         class FakePlug(object):
             @staticmethod
@@ -594,6 +608,10 @@ class CharacterSceneTests(unittest.TestCase):
 
         fake_om = type("FakeOpenMaya", (), {
             "MNodeMessage": FailingNodeMessage,
+            "MDagMessage": type("FailingDagMessage", (), {
+                "addAllDagChangesCallback": staticmethod(
+                    lambda callback: (_ for _ in ()).throw(RuntimeError("registration failed"))),
+            }),
             "MMessage": type("FakeMessage", (), {
                 "removeCallback": staticmethod(removed.append),
             }),
@@ -617,6 +635,7 @@ class CharacterSceneTests(unittest.TestCase):
              mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
                                return_value=("|Group|Display_ctrl", "clothes")), \
              patch_global("capture_subject", return_value=subject), \
+             patch_global("mesh_identities", return_value=("body-uuid",)), \
              patch_global("enum_attributes", return_value=[display]), \
              patch_global("current_enum_label", return_value="Clothes01"), \
              patch_global("dag_path", return_value=FakeDagPath()):
@@ -4417,7 +4436,9 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller._capture_scene = mock.Mock(return_value=scene)
         controller._set_connected = mock.Mock()
 
-        controller.set_display_controller()
+        with mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
+                               return_value=("|Display_ctrl", "clothes")):
+            controller.set_display_controller()
 
         status = controller._set_connected.call_args[0][1]
         self.assertIn("已按绑定姿势解析 2 处蒙皮绑定矩阵冲突", status)
@@ -4462,10 +4483,30 @@ class ControllerLifecycleTests(unittest.TestCase):
 
         controller._clear_scene = clear_scene
         controller._capture_scene = capture_scene
-        with patch_global("cmds", fake_cmds):
+        with patch_global("cmds", fake_cmds), \
+             mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
+                               return_value=("|Display_ctrl", "clothes")):
             controller.set_display_controller()
 
         self.assertEqual(["stop", "clear", "capture"], calls)
+
+    def test_display_label_selection_keeps_live_session_and_scene(self):
+        controller = mtou_controller.Controller()
+        scene = mock.Mock()
+        scene.snapshot.return_value = character_snapshot(
+            1, "|root", "outfit", [("root", -1)], [])
+        controller._scene = scene
+        controller._session = mock.Mock()
+        controller._selected_display = mock.Mock(return_value="|Display_ctrl")
+        controller._set_connected = mock.Mock()
+        controller.disconnect = mock.Mock()
+        controller._capture_scene = mock.Mock()
+        with mock.patch.object(mtou_scene.CharacterScene, "_resolve_display",
+                               return_value=("|Display_ctrl", "wardrobe")):
+            controller.set_display_controller()
+        scene.set_display_controller.assert_called_once_with("|Display_ctrl", "wardrobe")
+        controller.disconnect.assert_not_called()
+        controller._capture_scene.assert_not_called()
 
     def test_invalid_display_selection_keeps_live_session_and_scene(self):
         fake_cmds = mock.MagicMock()
@@ -5487,6 +5528,7 @@ class CharacterPartDiscoveryTests(unittest.TestCase):
                 parents[current] = [parent] if parent else []
                 current = parent
         parents["|Group"] = []
+        parents.update((shape, [path]) for path, shape in shapes.items())
 
         def list_relatives(path, **kwargs):
             if kwargs.get("parent"):

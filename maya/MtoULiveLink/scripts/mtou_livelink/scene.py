@@ -219,14 +219,10 @@ def effective_mesh_transform(geometry):
                                     fullPath=True, type="mesh") or []
         if not shapes:
             return None
-        shape = shapes[0]
+        return transform if any(effective_mesh_transform(shape) for shape in shapes) else None
     if cmds.getAttr(shape + ".intermediateObject"):
         return None
-    if not (cmds.ls(shape, visible=True, long=True) or []):
-        return None
-    if not cmds.getAttr(shape + ".visibility"):
-        return None
-    current = transform
+    current = shape
     while current:
         if cmds.attributeQuery("visibility", node=current, exists=True) \
                 and not cmds.getAttr(current + ".visibility"):
@@ -239,27 +235,59 @@ def effective_mesh_transform(geometry):
             if cmds.attributeQuery("overrideVisibility", node=current, exists=True) \
                     and not cmds.getAttr(current + ".overrideVisibility"):
                 return None
-            if cmds.attributeQuery("overrideDisplayType", node=current, exists=True) \
-                    and cmds.getAttr(current + ".overrideDisplayType") != 0:
-                return None
         parents = cmds.listRelatives(current, parent=True, fullPath=True) or []
         current = parents[0] if parents else None
     return transform
 
 
-def visible_skinned_meshes(bone_paths):
+def skinned_mesh_candidates(bone_paths):
+    """All skin outputs, including hidden outfits, for evaluated visibility checks."""
     skin_clusters = set()
     for path in bone_paths:
         skin_clusters.update(cmds.listConnections(path, type="skinCluster") or [])
-    meshes = []
-    seen = set()
+    geometries = set()
     for skin_cluster in sorted(skin_clusters):
         for geometry in cmds.skinCluster(skin_cluster, query=True, geometry=True) or []:
-            transform = effective_mesh_transform(geometry)
-            if transform and transform not in seen:
-                seen.add(transform)
-                meshes.append(transform)
-    return sorted(meshes)
+            geometries.update(cmds.ls(geometry, long=True) or [])
+    return sorted(geometries)
+
+
+def visible_skinned_meshes(bone_paths):
+    return mesh_transforms(visible_mesh_shapes(skinned_mesh_candidates(bone_paths)))
+
+
+def mesh_transforms(shapes):
+    return sorted(set(parent for shape in shapes for parent in
+                      (cmds.listRelatives(shape, parent=True, fullPath=True) or [])))
+
+
+def visible_mesh_shapes(candidates):
+    """Keep skin output shape identity, including multi-shape transforms."""
+    visible = set()
+    for path in candidates:
+        shapes = ([path] if cmds.nodeType(path) == "mesh" else cmds.listRelatives(
+            path, shapes=True, noIntermediate=True, fullPath=True, type="mesh") or [])
+        visible.update(shape for shape in shapes if effective_mesh_transform(shape))
+    return sorted(visible)
+
+
+def mesh_identities(mesh_paths):
+    return tuple(sorted(set(cmds.ls(path, uuid=True)[0] for path in mesh_paths)))
+
+
+def mesh_label(mesh_paths):
+    """Use the shortest unambiguous DAG suffix, in deterministic path order."""
+    paths = sorted(set(mesh_paths))
+    labels = []
+    for path in paths:
+        parts = path.strip("|").split("|")
+        for length in range(1, len(parts) + 1):
+            suffix = "|".join(parts[-length:])
+            if sum(other == "|" + suffix or other.endswith("|" + suffix)
+                   for other in paths) == 1:
+                break
+        labels.append(suffix)
+    return ", ".join(labels)
 
 
 def skin_clusters_for_meshes(mesh_paths):
@@ -347,7 +375,7 @@ def select_bind_world_candidate(bone_path, records):
 def bind_world_candidates(subject):
     candidates = dict((bone["path"], []) for bone in subject["bones"])
     bone_paths = set(candidates)
-    for skin_cluster in skin_clusters_for_meshes(subject["meshes"]):
+    for skin_cluster in skin_clusters_for_meshes(subject.get("mesh_shapes", subject["meshes"])):
         selection = om.MSelectionList()
         selection.add(skin_cluster)
         function = oma.MFnSkinCluster(selection.getDependNode(0))
@@ -427,7 +455,7 @@ def capture_bind_local_transforms(subject):
 
 def discover_curve_plugs(bone_paths, visible_meshes=None):
     if visible_meshes is None:
-        visible_meshes = visible_skinned_meshes(bone_paths)
+        visible_meshes = visible_mesh_shapes(skinned_mesh_candidates(bone_paths))
     deformers = set()
     for geometry in visible_meshes:
         deformers.update(node for node in cmds.listHistory(geometry, pruneDagObjects=True) or []
@@ -460,13 +488,15 @@ def capture_subject(root=None):
     ensure_complete_capture(root, bones)
     for bone in bones:
         bone["dag_path"] = dag_path(bone["path"])
-    mesh_paths = visible_skinned_meshes([bone["path"] for bone in bones])
+    shapes = visible_mesh_shapes(skinned_mesh_candidates([bone["path"] for bone in bones]))
+    mesh_paths = mesh_transforms(shapes)
     if not mesh_paths:
         raise ValueError("NO_VISIBLE_SKINNED_MESH")
     subject = {"root": root, "bones": bones,
                "meshes": mesh_paths,
+               "mesh_shapes": shapes,
                "curves": discover_curve_plugs(
-                   [bone["path"] for bone in bones], mesh_paths),
+                   [bone["path"] for bone in bones], shapes),
                "unit_scale": centimeters_per_unit(
                    cmds.currentUnit(query=True, linear=True))}
     subject["bind_local_transforms"], subject["bind_conflict_count"] = \
@@ -540,7 +570,7 @@ class CharacterSceneError(RuntimeError):
 class CharacterSnapshot(object):
     def __init__(self, revision, root, outfit, bones, curve_names,
                  duplicate_paths=(), mesh_paths=(), bind_local_transforms=(),
-                 bind_conflict_count=0):
+                 bind_conflict_count=0, mesh_identities=()):
         self._revision = int(revision)
         self._root = root
         self._outfit = outfit
@@ -548,6 +578,7 @@ class CharacterSnapshot(object):
         self._curve_names = tuple(curve_names)
         self._duplicate_paths = tuple(duplicate_paths)
         self._mesh_paths = tuple(mesh_paths)
+        self._mesh_identities = tuple(mesh_identities)
         self._bind_conflict_count = int(bind_conflict_count)
         self._bind_local_transforms = tuple(
             tuple(value for value in transform) for transform in bind_local_transforms)
@@ -581,6 +612,10 @@ class CharacterSnapshot(object):
     @property
     def mesh_paths(self):
         return self._mesh_paths
+
+    @property
+    def mesh_identities(self):
+        return self._mesh_identities
 
     @property
     def bind_local_transforms(self):
@@ -641,6 +676,13 @@ class CharacterScene(object):
         self._subject = None
         self._snapshot = None
         self._callback_ids = []
+        self._input_callback_ids = []
+        self._candidate_paths = []
+        self._graph_dirty = False
+        self._paths_dirty = False
+        self._refresh_pending = False
+        self._root_dag = None
+        self._display_dag = None
         self._refresh_generation = 0
         self._refreshing = False
         self._closed = False
@@ -649,12 +691,11 @@ class CharacterScene(object):
 
     @classmethod
     def capture(cls, root, display=None, display_attribute=None, on_event=None,
-                display_optional=False):
+                display_optional=True):
         """Capture one object scene.
 
-        ``display_optional`` is for the independent object beside the primary
-        character: a skeletal prop has no Display controller, so a root
-        without one captures without an outfit instead of being refused.
+        Display is an optional label source for both primary and secondary
+        objects. ``display_optional`` remains accepted for existing callers.
         """
         require_maya()
         scene = None
@@ -685,17 +726,18 @@ class CharacterScene(object):
         return matches[0]
 
     @staticmethod
-    def _resolve_display(root, display, display_attribute, display_optional=False):
+    def _resolve_display(root, display, display_attribute, display_optional=True):
+        del display_optional
         if display is None:
-            candidates = display_candidates(root)
-            if not candidates and display_optional:
-                return None, None
+            candidates = [(node, attributes[0]["attribute"])
+                          for node in display_candidates(root)
+                          for attributes in [enum_attributes(node)]
+                          if len(attributes) == 1]
             if len(candidates) != 1:
-                raise CharacterSceneError(
-                    "AMBIGUOUS_DISPLAY",
-                    "Unable to identify exactly one Display controller.",
-                    context={"display_candidates": tuple(candidates)})
-            display = candidates[0]
+                return None, None
+            display, inferred_attribute = candidates[0]
+            if display_attribute is None:
+                display_attribute = inferred_attribute
         else:
             try:
                 display = long_transform(display)
@@ -733,19 +775,19 @@ class CharacterScene(object):
         return CharacterSceneError(code, str(error), details=str(error))
 
     def _display_record(self):
+        if self._display_path is None:
+            return None
         for record in enum_attributes(self._display_path):
             if record["attribute"] == self._display_attribute:
                 return record
-        raise CharacterSceneError(
-            "INVALID_DISPLAY_ATTRIBUTE",
-            "The configured Clothes enum attribute is no longer available.")
+        return None
 
     def _capture_values(self, revision):
         try:
             subject = capture_subject(self._root)
-            outfit = ""
-            if self._display_path is not None:
-                outfit = current_enum_label(self._display_record())
+            record = self._display_record()
+            outfit = (current_enum_label(record) if record is not None
+                      else mesh_label(subject["meshes"]))
         except BindPoseError as exc:
             raise self._wrap_error("BIND_POSE_INVALID", exc)
         except (RuntimeError, ValueError) as exc:
@@ -763,7 +805,8 @@ class CharacterScene(object):
             duplicate_paths,
             subject["meshes"],
             subject["bind_local_transforms"],
-            subject.get("bind_conflict_count", 0))
+            subject.get("bind_conflict_count", 0),
+            mesh_identities(subject.get("mesh_shapes", subject["meshes"])))
         return subject, snapshot
 
     def _commit_capture(self, revision):
@@ -773,15 +816,26 @@ class CharacterScene(object):
 
     def _register_callbacks(self):
         try:
+            self._root_dag = self._subject["bones"][0]["dag_path"]
             self._callback_ids.append(om.MNodeMessage.addNodeDestroyedCallback(
-                self._subject["bones"][0]["dag_path"].node(),
+                self._root_dag.node(),
                 self._on_root_destroyed))
-            if self._display_path is None:
-                return
-            self._callback_ids.append(om.MNodeMessage.addNodeDestroyedCallback(
-                dag_path(self._display_path).node(), self._on_display_destroyed))
-            self._callback_ids.append(om.MNodeMessage.addAttributeChangedCallback(
-                dag_path(self._display_path).node(), self._on_display_changed))
+            if self._display_path is not None:
+                self._display_dag = dag_path(self._display_path)
+            self._callback_ids.append(om.MDagMessage.addAllDagChangesCallback(
+                self._on_graph_changed))
+            for node_type in ("skinCluster", "mesh", "joint", "blendShape", "displayLayer"):
+                self._callback_ids.append(om.MDGMessage.addNodeAddedCallback(
+                    self._on_graph_changed, node_type))
+                self._callback_ids.append(om.MDGMessage.addNodeRemovedCallback(
+                    self._on_graph_changed, node_type))
+            for event in ("Undo", "Redo"):
+                self._callback_ids.append(om.MEventMessage.addEventCallback(
+                    event, self._on_graph_changed))
+            for event in (om.MSceneMessage.kBeforeNew, om.MSceneMessage.kBeforeOpen):
+                self._callback_ids.append(om.MSceneMessage.addCallback(
+                    event, self._on_root_destroyed))
+            self._rebuild_input_observers()
         except (RuntimeError, ValueError) as exc:
             self._remove_callbacks()
             raise self._wrap_error("ROLE_SETUP_FAILED", exc)
@@ -790,7 +844,18 @@ class CharacterScene(object):
         self._ensure_available()
         return self._snapshot
 
+    def set_display_controller(self, display, display_attribute=None):
+        """Choose a label source without replacing the captured character."""
+        self._ensure_available()
+        display, attribute = self._resolve_display(self._root, display, display_attribute)
+        self._display_path, self._display_attribute = display, attribute
+        self._display_dag = dag_path(display) if display is not None else None
+        self._rebuild_input_observers()
+        self._queue_refresh()
+
     def sample(self):
+        self._ensure_available()
+        self._check_evaluated_inputs()
         self._ensure_available()
         revision = self._snapshot.revision
         subject = self._subject
@@ -823,7 +888,12 @@ class CharacterScene(object):
                 "CHARACTER_SCENE_REFRESHING", "The character scene is refreshing.")
 
     def _remove_callbacks(self):
-        callback_ids, self._callback_ids = self._callback_ids, []
+        callback_ids = self._callback_ids + self._input_callback_ids
+        self._callback_ids, self._input_callback_ids = [], []
+        self._candidate_paths = []
+        self._remove_callback_ids(callback_ids)
+
+    def _remove_callback_ids(self, callback_ids):
         for callback_id in callback_ids:
             try:
                 om.MMessage.removeCallback(callback_id)
@@ -844,61 +914,199 @@ class CharacterScene(object):
                 except Exception:
                     pass
 
-    def _on_display_changed(self, message, plug, other_plug, client_data):
+    def _rebuild_input_observers(self):
+        old_ids, self._input_callback_ids = self._input_callback_ids, []
+        self._remove_callback_ids(old_ids)
+        self._update_paths()
+        bones = build_hierarchy(self._root, maya_children, allow_duplicates=True)
+        candidates = skinned_mesh_candidates([bone["path"] for bone in bones])
+        self._candidate_paths = [dag_path(path) for path in candidates]
+        nodes = set(candidates + [bone["path"] for bone in bones])
+        if self._display_path is not None:
+            nodes.add(self._display_dag.fullPathName())
+            self._input_callback_ids.append(om.MNodeMessage.addNodeDestroyedCallback(
+                self._display_dag.node(), self._on_display_destroyed))
+        for path in list(nodes):
+            current = path
+            while current:
+                nodes.add(current)
+                parents = cmds.listRelatives(current, parent=True, fullPath=True) or []
+                current = parents[0] if parents else None
+        # Observe outputs, ancestors, hidden variants and their deformation
+        # inputs. Layer membership itself can change, so observe layers too.
+        for path in candidates:
+            nodes.update(cmds.listHistory(path, pruneDagObjects=True) or [])
+        nodes.update(cmds.ls(type="displayLayer") or [])
+        for path in sorted(nodes):
+            selection = om.MSelectionList()
+            selection.add(path)
+            node = selection.getDependNode(0)
+            self._input_callback_ids.append(om.MNodeMessage.addAttributeChangedCallback(
+                node, self._on_input_changed))
+            self._input_callback_ids.append(om.MNodeMessage.addNameChangedCallback(
+                node, self._on_name_changed))
+
+    def _on_name_changed(self, node, *unused):
+        if self._closed:
+            return
+        if any(node == bone["dag_path"].node() for bone in self._subject["bones"]):
+            self._on_graph_changed()
+            return
+        self._paths_dirty = True
+        self._queue_refresh()
+
+    def _on_input_changed(self, message, plug, other_plug, client_data):
         del other_plug, client_data
         if self._closed or self._terminal_error is not None:
             return
-        if not (message & om.MNodeMessage.kAttributeSet):
+        graph_messages = (om.MNodeMessage.kConnectionMade | om.MNodeMessage.kConnectionBroken
+                          | om.MNodeMessage.kAttributeAdded | om.MNodeMessage.kAttributeRemoved
+                          | om.MNodeMessage.kAttributeRenamed)
+        if message & graph_messages:
+            self._on_graph_changed()
             return
-        if plug.partialName(useLongNames=True) != self._display_attribute:
+        if not message & om.MNodeMessage.kAttributeSet:
             return
-        try:
-            if current_enum_label(self._display_record()) == self._snapshot.outfit:
-                return
-        except CharacterSceneError as error:
-            self._invalidate(error)
+        attribute = plug.partialName(useLongNames=True).split("[", 1)[0].split(".", 1)[0]
+        if attribute in ("bindPreMatrix", "bindPose"):
+            self._on_graph_changed()
             return
+        if attribute in ("worldMatrix", "matrix"):
+            # Bone animation changes worldMatrix continually; bind inputs are
+            # meaningful only on dependency nodes (skinCluster / dagPose).
+            if om.MFnDependencyNode(plug.node()).typeName in ("skinCluster", "dagPose"):
+                self._on_graph_changed()
+            return
+        if attribute not in ("visibility", "lodVisibility", "overrideEnabled",
+                             "overrideVisibility", "intermediateObject", "drawInfo",
+                             "displayType", "overrideDisplayType", self._display_attribute):
+            return
+        self._queue_refresh()
+
+    def _on_graph_changed(self, *unused):
+        if self._closed:
+            return
+        self._graph_dirty = True
+        self._queue_refresh()
+
+    def _queue_refresh(self):
+        if self._closed or self._refresh_pending:
+            return
+        self._refresh_pending = True
+        generation = self._refresh_generation
+        mayaapi.run_deferred(lambda: self._refresh_inputs(generation), cmds.evalDeferred)
+
+    def _begin_change(self):
         if not self._refreshing:
             self._refreshing = True
             self._emit(CharacterSceneEvent(
                 "character_change_started", snapshot=self._snapshot))
-        self._refresh_generation += 1
-        generation = self._refresh_generation
-        mayaapi.run_deferred(lambda: self._refresh_after_display_change(generation),
-                             cmds.evalDeferred)
 
-    def _refresh_after_display_change(self, generation):
-        if self._closed or generation != self._refresh_generation:
+    def _visible_inputs(self):
+        self._update_paths()
+        shapes = visible_mesh_shapes([path.fullPathName() for path in self._candidate_paths])
+        meshes = mesh_transforms(shapes)
+        record = self._display_record()
+        outfit = current_enum_label(record) if record is not None else mesh_label(meshes)
+        return meshes, mesh_identities(shapes), outfit
+
+    def _update_paths(self):
+        self._root = self._root_dag.fullPathName()
+        if not self._root or not cmds.objExists(self._root):
+            raise CharacterSceneError(
+                "CHARACTER_ROOT_DESTROYED", "The character root was deleted or unloaded.")
+        if self._display_dag is not None:
+            path = self._display_dag.fullPathName()
+            self._display_path = path if path and cmds.objExists(path) else None
+
+    def _check_evaluated_inputs(self):
+        # Visibility can be animated or driven without an attribute-set event.
+        # Only cached candidates are queried on the normal per-frame path.
+        if self._graph_dirty or self._paths_dirty:
+            self._refresh_inputs(self._refresh_generation)
             return
         try:
-            subject, candidate = self._capture_values(self._snapshot.revision + 1)
-        except CharacterSceneError as error:
-            self._invalidate(error)
+            meshes, identities, outfit = self._visible_inputs()
+            if identities != self._snapshot.mesh_identities:
+                self._begin_change()
+            if (self._refreshing or tuple(meshes) != self._snapshot.mesh_paths
+                    or outfit != self._snapshot.outfit):
+                self._queue_refresh()
+        except (RuntimeError, ValueError) as exc:
+            self._invalidate(self._wrap_error("ROLE_SETUP_FAILED", exc))
+
+    def _refresh_inputs(self, generation):
+        if self._closed or generation != self._refresh_generation:
             return
+        self._refresh_pending = False
         previous = self._snapshot
+        try:
+            graph_dirty, self._graph_dirty = self._graph_dirty, False
+            paths_dirty, self._paths_dirty = self._paths_dirty, False
+            if graph_dirty or paths_dirty:
+                self._rebuild_input_observers()
+            meshes, identities, outfit = self._visible_inputs()
+            if identities != previous.mesh_identities:
+                self._begin_change()
+            if self._closed:
+                return
+            if graph_dirty or identities != previous.mesh_identities:
+                subject, candidate = self._capture_values(previous.revision + 1)
+            else:
+                subject = self._subject
+                duplicates = previous.duplicate_paths
+                if paths_dirty:
+                    subject = dict(subject)
+                    subject["bones"] = [dict(bone, path=bone["dag_path"].fullPathName())
+                                        for bone in subject["bones"]]
+                    subject["root"], subject["meshes"] = self._root, meshes
+                    subject["curves"] = discover_curve_plugs(
+                        [bone["path"] for bone in subject["bones"]],
+                        visible_mesh_shapes([
+                            path.fullPathName() for path in self._candidate_paths]))
+                    grouped = duplicate_bone_paths(subject["bones"])
+                    duplicates = [path for name in sorted(grouped) for path in grouped[name]]
+                candidate = CharacterSnapshot(
+                    previous.revision + 1, self._root, outfit, previous.bones,
+                    [curve["name"] for curve in subject["curves"]], duplicates, meshes,
+                    previous.bind_local_transforms, previous.bind_conflict_count, identities)
+        except (RuntimeError, ValueError) as error:
+            self._invalidate(self._wrap_error("ROLE_SETUP_FAILED", error))
+            return
         changed = (
-            candidate.outfit != previous.outfit
+            candidate.mesh_identities != previous.mesh_identities
             or candidate.bones != previous.bones
             or candidate.curve_names != previous.curve_names
-            or candidate.duplicate_paths != previous.duplicate_paths)
+            or candidate.bind_local_transforms != previous.bind_local_transforms)
+        if changed:
+            self._begin_change()
+        if self._closed or generation != self._refresh_generation:
+            return
         if not changed:
             candidate = CharacterSnapshot(
                 previous.revision, candidate.root, candidate.outfit,
                 candidate.bones, candidate.curve_names, candidate.duplicate_paths,
                 candidate.mesh_paths, candidate.bind_local_transforms,
-                candidate.bind_conflict_count)
+                candidate.bind_conflict_count, candidate.mesh_identities)
         self._subject = subject
         self._snapshot = candidate
-        self._refreshing = False
-        self._emit(CharacterSceneEvent("outfit_changed", snapshot=candidate))
+        was_refreshing, self._refreshing = self._refreshing, False
+        if changed or was_refreshing:
+            self._emit(CharacterSceneEvent("outfit_changed", snapshot=candidate))
+        elif (candidate.outfit != previous.outfit or candidate.mesh_paths != previous.mesh_paths
+              or candidate.root != previous.root
+              or candidate.duplicate_paths != previous.duplicate_paths
+              or candidate.bind_conflict_count != previous.bind_conflict_count):
+            self._emit(CharacterSceneEvent("display_changed", snapshot=candidate))
 
     def _on_root_destroyed(self, *unused):
         self._invalidate(CharacterSceneError(
             "CHARACTER_ROOT_DESTROYED", "The character root was deleted or unloaded."))
 
     def _on_display_destroyed(self, *unused):
-        self._invalidate(CharacterSceneError(
-            "DISPLAY_DESTROYED", "The Display controller was deleted or unloaded."))
+        self._display_path = self._display_dag = None
+        self._display_attribute = None
+        self._queue_refresh()
 
     def _invalidate(self, error):
         if self._closed or self._terminal_error is not None:

@@ -325,7 +325,7 @@ class Controller(object):
                                       marginWidth=CARD_MARGIN, marginHeight=CARD_MARGIN - 3)
         cmds.formLayout(width=CARD_CONTENT)
         display = cmds.button(label="选择 Display 控制器", height=BUTTON_HEIGHT,
-                              annotation="检测到多个服装属性时，选中 Display 控制器后点击。",
+                              annotation="可选：选择提供服装名称的 Display 控制器。",
                               command=lambda *_: self.set_display_controller())
         self._duplicate_button = cmds.button(
             label="选中重名骨骼（0）", height=BUTTON_HEIGHT, enable=False,
@@ -979,23 +979,42 @@ class Controller(object):
             # Validate the requested selection first: an invalid selection
             # must never tear down the live session or a usable scene.
             display = self._selected_display()
+            try:
+                display, attribute = CharacterScene._resolve_display(root, display, None)
+            except CharacterSceneError as error:
+                if error.code != "AMBIGUOUS_DISPLAY_ATTRIBUTE":
+                    raise
+                attribute = self._choose_enum(error.context.get("attribute_candidates", ()))
+                display, attribute = CharacterScene._resolve_display(root, display, attribute)
+        except CharacterSceneError as error:
+            self._show_error(self._scene_diagnostic(error))
+            return
         except (RuntimeError, ValueError) as exc:
             code = str(exc) if str(exc) in DIAGNOSTICS else "ROLE_SETUP_FAILED"
             self._show_error(make_diagnostic(code, str(exc), solution=str(exc), details=str(exc)))
             return
         try:
+            if self._scene is not None:
+                self._scene.set_display_controller(display, attribute)
+                self._capture_args = (root, display, attribute)
+                self._set_connected(self._session_ready(), "服装名称来源已设置")
+                return
             # One clean termination before the replacement: the old Streaming
             # session ends while the old Character scene is still usable, so
             # a late old-session event can never close the new capture.
             self.disconnect(status="正在更换 Display 控制器，请重新连接")
             self._clear_scene(keep_pending=True)
             self._pending_root = root
-            snapshot = self._capture_scene(root, display=display).snapshot()
+            snapshot = self._capture_scene(root, display=display,
+                                           display_attribute=attribute).snapshot()
             status = "Display 控制器已设置，可以连接"
             self._set_connected(False, status + bind_conflict_status(snapshot))
         except CharacterSceneError as error:
             self._show_error(self._scene_diagnostic(error))
     def _on_character_scene_event(self, event):
+        if event.kind == "display_changed":
+            self._render_snapshot(event.snapshot)
+            return
         if event.kind == "character_change_started":
             self._discard_cached_playback()
             self._outfit_change_was_connected = self._session is not None
@@ -2100,7 +2119,7 @@ class Controller(object):
             if self._session_has_secondary():
                 self.disconnect(status="副对象的衣服正在切换：连接已结束，请重新连接")
             return
-        if event.kind == "outfit_changed":
+        if event.kind in ("outfit_changed", "display_changed"):
             self._refresh_objects_window()
             return
         if event.kind == "character_invalidated":

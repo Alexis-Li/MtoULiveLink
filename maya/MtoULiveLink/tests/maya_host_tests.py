@@ -111,6 +111,7 @@ class MayaHostTests(unittest.TestCase):
         maya.standalone.uninitialize()
 
     def setUp(self):
+        mtou_mayaapi.drain_deferred()
         cmds.file(new=True, force=True)
         cmds.currentUnit(linear="cm")
 
@@ -164,6 +165,338 @@ class MayaHostTests(unittest.TestCase):
         with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
             mtou_scene.CharacterScene.capture(root)
         self.assertEqual("NO_VISIBLE_SKINNED_MESH", caught.exception.code)
+
+    def _skinned_outfit(self, root, name, alias=None):
+        mesh = cmds.polyCube(name=name)[0]
+        if alias:
+            target = cmds.duplicate(mesh, name=name + "Target")[0]
+            blend = cmds.blendShape(target, mesh, name=name + "BS")[0]
+            cmds.aliasAttr(alias, blend + ".weight[0]")
+            cmds.setAttr(blend + ".weight[0]", 0.25)
+        cmds.skinCluster(root, mesh, name=name + "Skin")
+        return cmds.ls(mesh, long=True)[0]
+
+    def test_root_only_capture_and_optional_display_labels(self):
+        group = cmds.createNode("transform", name="character")
+        root = cmds.createNode("joint", name="root", parent=group)
+        mesh = self._skinned_outfit(root, "outfit", "VisibleSmile")
+
+        def capture_label():
+            scene = mtou_scene.CharacterScene.capture(root)
+            try:
+                self.assertEqual((mesh,), scene.snapshot().mesh_paths)
+                self.assertEqual(("VisibleSmile",), scene.snapshot().curve_names)
+                self.assertEqual((0.25,), scene.sample().curves)
+                return scene.snapshot().outfit
+            finally:
+                scene.close()
+
+        self.assertEqual("outfit", capture_label())
+        display = cmds.createNode("transform", name="Display_ctrl", parent=group)
+        display = cmds.ls(display, long=True)[0]
+        cmds.addAttr(display, longName="style", attributeType="enum", enumName="One:Two")
+        self.assertEqual("outfit", capture_label())
+        # Detection depends on option text, not the attribute name.
+        cmds.addAttr(display, longName="wardrobe", attributeType="enum",
+                     enumName="ClothesLegacy:ClothesOther")
+        self.assertEqual("ClothesLegacy", capture_label())
+        other = cmds.createNode("transform", name="controllers", parent=group)
+        other = cmds.createNode("transform", name="Display_ctrl", parent=other)
+        cmds.addAttr(other, longName="wardrobe", attributeType="enum",
+                     enumName="ClothesA:ClothesB")
+        self.assertEqual("outfit", capture_label())
+        cmds.addAttr(display, longName="ambiguous", attributeType="enum",
+                     enumName="ClothesC:ClothesD")
+        explicit = mtou_scene.CharacterScene.capture(
+            root, display=display, display_attribute="wardrobe")
+        self.addCleanup(explicit.close)
+        self.assertEqual("ClothesLegacy", explicit.snapshot().outfit)
+
+    def test_visibility_matrix_includes_template_reference_and_excludes_hidden_curves(self):
+        cases = [("normal", None, None, True)]
+        for owner in ("shape", "transform", "ancestor"):
+            for attribute, value in (("visibility", False), ("lodVisibility", False),
+                                     ("overrideVisibility", False),
+                                     ("overrideDisplayType", 1), ("overrideDisplayType", 2)):
+                cases.append((owner, attribute, value, attribute == "overrideDisplayType"))
+        cases.append(("shape", "intermediateObject", True, False))
+        for attribute, value in (("visibility", False), ("displayType", 1), ("displayType", 2)):
+            cases.append(("layer", attribute, value, attribute == "displayType"))
+        self.assertEqual(20, len(cases))
+        for owner, attribute, value, visible in cases:
+            with self.subTest(owner=owner, attribute=attribute, value=value):
+                cmds.file(new=True, force=True)
+                root = cmds.joint(name="root")
+                # Keep one base mesh so a hidden outfit can still be captured.
+                body = self._skinned_outfit(root, "body", "BodySmile")
+                mesh = self._skinned_outfit(root, "outfit", "OutfitSmile")
+                parent = cmds.group(mesh, name="geometry")
+                mesh = cmds.ls("outfit", long=True)[0]
+                shape = cmds.listRelatives(mesh, shapes=True, noIntermediate=True,
+                                           fullPath=True)[0]
+                if owner != "normal":
+                    node = {"shape": shape, "transform": mesh, "ancestor": parent}.get(owner)
+                    if owner == "layer":
+                        node = cmds.createDisplayLayer(mesh, name="outfitLayer")
+                    if attribute.startswith("override"):
+                        cmds.setAttr(node + ".overrideEnabled", True)
+                    cmds.setAttr(node + "." + attribute, value)
+                scene = mtou_scene.CharacterScene.capture(root)
+                try:
+                    expected = tuple(sorted([body, mesh] if visible else [body]))
+                    self.assertEqual(expected, scene.snapshot().mesh_paths)
+                    names = ("BodySmile", "OutfitSmile") if visible else ("BodySmile",)
+                    self.assertEqual(names, scene.snapshot().curve_names)
+                    self.assertEqual((0.25,) * len(names), scene.sample().curves)
+                finally:
+                    scene.close()
+
+    def test_multiple_shapes_and_inherited_overrides_use_each_visible_shape(self):
+        root = cmds.joint(name="root")
+        first = self._skinned_outfit(root, "first", "HiddenSmile")
+        second = self._skinned_outfit(root, "second", "VisibleSmile")
+        second_shape = cmds.listRelatives(second, shapes=True, noIntermediate=True,
+                                          fullPath=True)[0]
+        first_shape = cmds.listRelatives(first, shapes=True, noIntermediate=True,
+                                         fullPath=True)[0]
+        cmds.parent(second_shape, first, shape=True, relative=True)
+        cmds.setAttr(first_shape + ".visibility", False)
+        self.assertEqual(first, mtou_scene.effective_mesh_transform(first))
+        self.assertEqual([first], mtou_scene.visible_skinned_meshes([root]))
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        self.assertEqual(("VisibleSmile",), scene.snapshot().curve_names)
+        self.assertEqual((0.25,), scene.sample().curves)
+        previous = scene.snapshot().mesh_identities
+        visible_shape = cmds.listRelatives(first, shapes=True, noIntermediate=True,
+                                           fullPath=True)[1]
+        cmds.setAttr(first_shape + ".visibility", True)
+        cmds.setAttr(visible_shape + ".visibility", False)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual((first,), scene.snapshot().mesh_paths)
+        self.assertEqual(("HiddenSmile",), scene.snapshot().curve_names)
+        self.assertNotEqual(previous, scene.snapshot().mesh_identities)
+        self.assertEqual(2, scene.snapshot().revision)
+        scene.close()
+        parent = cmds.group(first, name="geometry")
+        first = cmds.ls("first", long=True)[0]
+        cmds.setAttr(parent + ".overrideEnabled", True)
+        cmds.setAttr(parent + ".overrideDisplayType", 2)
+        self.assertEqual(first, mtou_scene.effective_mesh_transform(first))
+        layer = cmds.createDisplayLayer(parent, name="hiddenLayer")
+        cmds.setAttr(layer + ".visibility", False)
+        self.assertIsNone(mtou_scene.effective_mesh_transform(first))
+
+    def test_hidden_outfit_switches_coalesce_and_undo_redo_restore_identity(self):
+        root = cmds.joint(name="root")
+        first = self._skinned_outfit(root, "first", "FirstSmile")
+        second = self._skinned_outfit(root, "second", "SecondSmile")
+        cmds.setAttr(second + ".visibility", False)
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        old_identity = scene.snapshot().mesh_identities
+        cmds.undoInfo(openChunk=True)
+        try:
+            cmds.setAttr(first + ".visibility", False)
+            cmds.setAttr(second + ".visibility", True)
+        finally:
+            cmds.undoInfo(closeChunk=True)
+        with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+            scene.sample()
+        self.assertEqual("CHARACTER_SCENE_REFRESHING", caught.exception.code)
+        self.assertEqual(["character_change_started"], [event.kind for event in events])
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(["character_change_started", "outfit_changed"],
+                         [event.kind for event in events])
+        self.assertEqual(2, scene.snapshot().revision)
+        self.assertEqual((second,), scene.snapshot().mesh_paths)
+        self.assertEqual(("SecondSmile",), scene.snapshot().curve_names)
+        self.assertEqual((0.25,), scene.sample().curves)
+        cmds.undo()
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(3, scene.snapshot().revision)
+        self.assertEqual(old_identity, scene.snapshot().mesh_identities)
+        cmds.redo()
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(4, scene.snapshot().revision)
+        self.assertEqual((second,), scene.snapshot().mesh_paths)
+        self.assertEqual(3, sum(event.kind == "character_change_started" for event in events))
+
+    def test_animated_visibility_is_checked_before_sampling_without_graph_rediscovery(self):
+        root = cmds.joint(name="root")
+        first = self._skinned_outfit(root, "first", "FirstSmile")
+        second = self._skinned_outfit(root, "second", "SecondSmile")
+        for mesh, start, end in ((first, 1, 0), (second, 0, 1)):
+            cmds.setKeyframe(mesh, attribute="visibility", time=1, value=start)
+            cmds.setKeyframe(mesh, attribute="visibility", time=2, value=end)
+        cmds.currentTime(1)
+        scene = mtou_scene.CharacterScene.capture(root)
+        self.addCleanup(scene.close)
+        with mock.patch.object(mtou_scene, "skinned_mesh_candidates",
+                               side_effect=AssertionError("per-frame graph scan")):
+            scene.sample()
+            cmds.currentTime(2)
+            with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+                scene.sample()
+        self.assertEqual("CHARACTER_SCENE_REFRESHING", caught.exception.code)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual((second,), scene.snapshot().mesh_paths)
+        self.assertEqual(("SecondSmile",), scene.snapshot().curve_names)
+
+    def test_labels_template_reference_rename_and_display_removal_do_not_change_revision(self):
+        group, root, display = self._create_character_group()
+        mesh = self._skinned_outfit(root, "outfit", "Smile")
+        events = []
+        nodes = [mtou_scene.dag_path(root).node(), mtou_scene.dag_path(mesh).node()]
+        original_callbacks = [set(mtou_scene.om.MMessage.nodeCallbacks(node)) for node in nodes]
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        identity = scene.snapshot().mesh_identities
+        for display_type in (1, 2):
+            cmds.setAttr(mesh + ".overrideEnabled", True)
+            cmds.setAttr(mesh + ".overrideDisplayType", display_type)
+            mtou_mayaapi.drain_deferred()
+            self.assertEqual(1, scene.sample().revision)
+        cmds.setAttr(display + ".clothes", 1)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual("Clothes02", scene.snapshot().outfit)
+        alternate = cmds.createNode("transform", name="alternateLabel", parent=group)
+        cmds.addAttr(alternate, longName="wardrobe", attributeType="enum", enumName="ClothesNew")
+        scene.set_display_controller(alternate, "wardrobe")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual("ClothesNew", scene.snapshot().outfit)
+        scene.set_display_controller(display, "clothes")
+        mtou_mayaapi.drain_deferred()
+        cmds.deleteAttr(display + ".clothes")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual("outfit", scene.snapshot().outfit)
+        mesh = cmds.rename(mesh, "renamedOutfit")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual("renamedOutfit", scene.snapshot().outfit)
+        cmds.delete(display)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(identity, scene.snapshot().mesh_identities)
+        self.assertEqual(1, scene.sample().revision)
+        self.assertNotIn("character_change_started", [event.kind for event in events])
+        callback_ids = list(scene._callback_ids + scene._input_callback_ids)
+        self.assertTrue(callback_ids)
+        scene.close()
+        scene.close()
+        self.assertEqual([], scene._callback_ids + scene._input_callback_ids)
+        self.assertEqual(original_callbacks,
+                         [set(mtou_scene.om.MMessage.nodeCallbacks(node)) for node in nodes])
+        count = len(events)
+        cmds.setAttr(mesh + ".visibility", False)
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(count, len(events))
+
+    def test_skin_graph_add_remove_and_same_path_replacement_change_mesh_identity(self):
+        root = cmds.joint(name="root")
+        first = self._skinned_outfit(root, "outfit", "FirstSmile")
+        scene = mtou_scene.CharacterScene.capture(root)
+        self.addCleanup(scene.close)
+        identity = scene.snapshot().mesh_identities
+        second = self._skinned_outfit(root, "newOutfit", "SecondSmile")
+        cmds.delete(first)
+        cmds.rename(second, "outfit")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual((first,), scene.snapshot().mesh_paths)
+        self.assertNotEqual(identity, scene.snapshot().mesh_identities)
+        self.assertEqual(2, scene.snapshot().revision)
+        self.assertEqual(("SecondSmile",), scene.snapshot().curve_names)
+
+    def test_lod_override_and_layer_switches_refresh_the_hidden_candidates(self):
+        for attribute in ("lodVisibility", "overrideVisibility", "displayLayer"):
+            with self.subTest(attribute=attribute):
+                cmds.file(new=True, force=True)
+                root = cmds.joint(name="root")
+                first = self._skinned_outfit(root, "first", "FirstSmile")
+                second = self._skinned_outfit(root, "second", "SecondSmile")
+                if attribute == "displayLayer":
+                    first_plug = cmds.createDisplayLayer(first, name="firstLayer") + ".visibility"
+                    second_plug = (cmds.createDisplayLayer(second, name="secondLayer")
+                                   + ".visibility")
+                else:
+                    first_plug, second_plug = first + "." + attribute, second + "." + attribute
+                    if attribute == "overrideVisibility":
+                        cmds.setAttr(first + ".overrideEnabled", True)
+                        cmds.setAttr(second + ".overrideEnabled", True)
+                cmds.setAttr(second_plug, False)
+                events = []
+                scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+                try:
+                    cmds.setAttr(first_plug, False)
+                    cmds.setAttr(second_plug, True)
+                    mtou_mayaapi.drain_deferred()
+                    self.assertEqual((second,), scene.snapshot().mesh_paths)
+                    self.assertEqual(("SecondSmile",), scene.snapshot().curve_names)
+                    self.assertEqual(2, scene.sample().revision)
+                    self.assertEqual(["character_change_started", "outfit_changed"],
+                                     [event.kind for event in events])
+                finally:
+                    scene.close()
+
+    def test_mesh_and_deformer_rename_preserve_bind_pose_at_another_evaluated_pose(self):
+        root = cmds.joint(name="root")
+        middle = cmds.createNode("transform", name="middle", parent=root)
+        cmds.createNode("joint", name="tip", parent=middle)
+        mesh = self._skinned_outfit(root, "outfit", "Smile")
+        events = []
+        scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+        self.addCleanup(scene.close)
+        original = scene.snapshot()
+        cmds.setAttr(middle + ".translateX", 3.0)
+        cmds.rename(mesh, "renamedOutfit")
+        cmds.rename("outfitBS", "renamedBS")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(original.bind_local_transforms, scene.snapshot().bind_local_transforms)
+        self.assertEqual(1, scene.sample().revision)
+        self.assertEqual((0.25,), scene.sample().curves)
+        self.assertEqual("renamedOutfit", scene.snapshot().outfit)
+        self.assertEqual(["display_changed"], [event.kind for event in events])
+
+    def test_curve_manifest_and_bind_input_changes_increase_revision(self):
+        root = cmds.joint(name="root")
+        self._skinned_outfit(root, "outfit", "Smile")
+        scene = mtou_scene.CharacterScene.capture(root)
+        self.addCleanup(scene.close)
+        cmds.aliasAttr("outfitBS.Smile", remove=True)
+        cmds.aliasAttr("Grin", "outfitBS.weight[0]")
+        mtou_mayaapi.drain_deferred()
+        self.assertEqual(("Grin",), scene.snapshot().curve_names)
+        self.assertEqual(2, scene.snapshot().revision)
+        previous_bind = scene.snapshot().bind_local_transforms
+        matrix = list(cmds.getAttr(root + ".bindPose"))
+        matrix[12] = 2.0
+        cmds.setAttr(root + ".bindPose", *matrix, type="matrix")
+        mtou_mayaapi.drain_deferred()
+        self.assertNotEqual(previous_bind, scene.snapshot().bind_local_transforms)
+        self.assertEqual(3, scene.snapshot().revision)
+
+    def test_same_path_root_replacement_and_new_scene_invalidate_and_clean_observers(self):
+        for action in ("replace_root", "new_scene"):
+            with self.subTest(action=action):
+                cmds.file(new=True, force=True)
+                root = cmds.joint(name="root")
+                self._skinned_outfit(root, "outfit")
+                events = []
+                scene = mtou_scene.CharacterScene.capture(root, on_event=events.append)
+                try:
+                    if action == "replace_root":
+                        cmds.delete(root)
+                        cmds.joint(name="root")
+                    else:
+                        cmds.file(new=True, force=True)
+                    mtou_mayaapi.drain_deferred()
+                    with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+                        scene.sample()
+                    self.assertEqual("CHARACTER_ROOT_DESTROYED", caught.exception.code)
+                    self.assertEqual(["character_invalidated"], [event.kind for event in events])
+                    self.assertEqual([], scene._callback_ids + scene._input_callback_ids)
+                finally:
+                    scene.close()
 
     def test_duplicate_bone_action_selects_every_conflicting_dag_path(self):
         root = cmds.joint(name="duplicateRoot")

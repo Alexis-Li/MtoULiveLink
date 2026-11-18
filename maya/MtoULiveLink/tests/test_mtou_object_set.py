@@ -821,15 +821,37 @@ class PanelObjectTests(unittest.TestCase):
 
 
 class SceneDisplayOptionalTests(unittest.TestCase):
+    def test_mesh_labels_are_sorted_and_disambiguate_duplicate_short_names(self):
+        self.assertEqual("left|shirt, right|shirt, shoes", mtou_scene.mesh_label([
+            "|hero|right|shirt", "|hero|shoes", "|hero|left|shirt", "|hero|shoes"]))
+
+    def test_automatic_display_uses_one_legal_controller_and_enum_pair(self):
+        candidates = ["|Hero|bad|Display_ctrl", "|Hero|good|Display_ctrl"]
+        enums = {candidates[0]: [], candidates[1]: [{"attribute": "wardrobe"}]}
+        with mock.patch.object(mtou_scene, "display_candidates", return_value=candidates), \
+             mock.patch.object(mtou_scene, "enum_attributes", side_effect=enums.__getitem__):
+            self.assertEqual((candidates[1], "wardrobe"),
+                             mtou_scene.CharacterScene._resolve_display("|Hero|root", None, None))
+            enums[candidates[0]] = [{"attribute": "other"}]
+            self.assertEqual((None, None),
+                             mtou_scene.CharacterScene._resolve_display("|Hero|root", None, None))
+
+    def test_explicit_invalid_controller_remains_an_error(self):
+        with mock.patch.object(mtou_scene, "long_transform", return_value="|Other|Display_ctrl"):
+            with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
+                mtou_scene.CharacterScene._resolve_display(
+                    "|Hero|root", "|Other|Display_ctrl", None)
+        self.assertEqual("INVALID_DISPLAY", caught.exception.code)
+
     def test_a_root_without_display_resolves_without_an_outfit(self):
         with mock.patch.object(mtou_scene, "display_candidates", return_value=[]):
             self.assertEqual(
                 (None, None),
                 mtou_scene.CharacterScene._resolve_display("|Sword|root", None, None,
                                                            display_optional=True))
-            with self.assertRaises(mtou_scene.CharacterSceneError) as caught:
-                mtou_scene.CharacterScene._resolve_display("|Hero|root", None, None)
-        self.assertEqual("AMBIGUOUS_DISPLAY", caught.exception.code)
+            self.assertEqual(
+                (None, None),
+                mtou_scene.CharacterScene._resolve_display("|Hero|root", None, None))
 
 
 if __name__ == "__main__":
