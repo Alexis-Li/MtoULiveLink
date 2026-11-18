@@ -16,7 +16,7 @@
   整组姿势一致显示，两端都可返回实时或结束预览
   （[ADR 0014](adr/0014-one-time-authority-and-staged-pose-groups.md)）。
 
-宿主：Windows 64 位，Maya 2024（Maya 2022.4 支持），stock UE 5.7.4；
+宿主：Windows 64 位，Maya 2024，stock UE 5.7.4；
 仅编辑器内使用。线上协议见 [protocol/](../protocol/README.md)。
 
 ## 持续约束
@@ -32,12 +32,14 @@
 - 镜头与场景使用 UE 关卡世界坐标。连接时 Maya 世界坐标默认也对应关卡世界
   坐标，Binding 的摆放不改变角色与相机位置；以 Binding 为原点只在用户选择时
   使用（[#41](https://github.com/Alexis-Li/MtoULiveLink/issues/41)）。
-- 真实输入变化结束流（[ADR 0002](adr/0002-end-streaming-when-preview-inputs-change.md)）；
-  预览网格保持瞬态（[ADR 0001](adr/0001-keep-preview-meshes-transient.md)）。
+- 根骨骼即可捕获角色；衣服由当前可见的蒙皮网格集合确定，Display 枚举仅作可选标签。
+- 同一主体的真实输入变化结束旧流，在恢复资源后自动发起新的完整协商；主体更换、
+  手动停止或失败均需用户明确连接。Model 仍需显式刷新建立 Preview readiness
+  （[ADR 0002](adr/0002-end-streaming-when-preview-inputs-change.md)）。
+- 预览网格保持瞬态（[ADR 0001](adr/0001-keep-preview-meshes-transient.md)）。
 
 ## 已知限制
 
-- Maya 2022.4 只做过安装与语法检查，未运行交互联动验收。
 - 从含中文的路径编译 UE 插件源码会失败（MSVC 无法打开 PCH），属于工具链
   限制；已编译的插件可在此类工程中加载。
 - 宿主验收由脚本驱动真实 Maya GUI 与 UnrealEditor；交互视口逐帧观测、生产
@@ -51,7 +53,7 @@
 - 多对象缓存播放，以及由 Sequencer 时间驱动的缓存；
 - 更多对象（超过一个副对象）与更广的内容类型支持；
 - 预览刷新性能优化、固定检查姿势／书签、问题区域可视化；
-- 面板配置记忆、自动恢复／自动重连；
+- 面板配置记忆；
 - 新的动画交付流程或录制 UE 动画；
 - PIE／打包运行、跨机器连接；
 - 更多宿主版本认证（其他 Maya 版本、UE 版本或第三方引擎分支）。
