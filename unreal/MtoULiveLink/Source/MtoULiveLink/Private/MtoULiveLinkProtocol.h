@@ -72,6 +72,10 @@ struct FMtoUHelloMessage
     int32 Version = 0;
     FString Host;
     FString MayaVersion;
+    // Required opaque Maya scene/character subject; never a DAG path.
+    FString MayaSubjectId;
+    // Present only for one permitted automatic connection attempt.
+    FString RestartToken;
     // The release of the Maya component, when it names one. It only helps to
     // name both releases when a protocol version is refused; empty when the
     // greeting carries none.
@@ -82,6 +86,18 @@ struct FMtoUHelloMessage
     bool bLinkage = false;
     bool bCache = false;
     bool bModel = false;
+};
+
+/** Coordination shape only: the Source owns session/phase/token admission. */
+struct FMtoURestartMessage
+{
+    int32 SessionId = 0;
+    int32 SourceRevision = 0;
+    FString Reason;
+    FString Code;
+    FString Detail;
+    FString State;
+    FString RestartToken;
 };
 
 /** Maya's authority statement after one time-control transition. */
@@ -274,6 +290,21 @@ public:
         FMtoUHelloMessage& OutMessage,
         FString& OutError,
         FString* OutErrorCode = nullptr);
+    // Coordination fields are mandatory and exact; these parsers grant no
+    // permit. The caller matches the old session, phase and operation deadline.
+    static bool ParseRestartRequest(const TArray<uint8>& Payload,
+        FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode = nullptr);
+    static bool ParseRestartPrepared(const TArray<uint8>& Payload,
+        FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode = nullptr);
+    static bool ParseRestartCancel(const TArray<uint8>& Payload,
+        FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode = nullptr);
+    static bool ParseRestartState(const TArray<uint8>& Payload,
+        FMtoURestartMessage& OutMessage, FString& OutError, FString* OutErrorCode = nullptr);
+    static bool IsRestartStopCode(const FString& Code);
+    // Empty return for invalid state/code/token combinations. permitted alone
+    // carries a non-empty token; ending/permitted use an empty code.
+    static TArray<uint8> EncodeRestartState(int32 SessionId, const FString& State,
+        const FString& Code, const FString& Detail, const FString& RestartToken = FString());
     // Refuses with INVALID_MESSAGE, keeping the connection, a mode that is not
     // a wire mode (`cached` is not) and a mode, control and transition that do
     // not pair up: linkage is Unreal's and `ready`, realtime is Maya's.
@@ -351,7 +382,8 @@ public:
         int32 SessionId = INDEX_NONE,
         const FString& ObjectId = FString(),
         int32 SetRevision = INDEX_NONE,
-        int32 SpaceRevision = INDEX_NONE);
+        int32 SpaceRevision = INDEX_NONE,
+        const FString& TargetInstanceId = FString());
     // Answer to the greeting: the session identity, the declared capabilities,
     // the explicitly selected target (empty until the user pairs) and the
     // common space the pose groups must match.
@@ -362,7 +394,8 @@ public:
         bool bModel,
         const TArray<FMtoUHelloTarget>& Targets,
         int32 SpaceRevision,
-        const TSharedPtr<FJsonObject>& Anchor);
+        const TSharedPtr<FJsonObject>& Anchor,
+        const FString& SourceInstanceId = FString());
     /** Unreal removed the second object and confirms the new set revision. */
     static TArray<uint8> EncodeObjectRemoved(
         int32 SessionId,

@@ -25,7 +25,7 @@ OUTPUT_PATH = (
 # ``unknown_type`` is a message whose ``type`` the protocol does not define: a
 # retired type belongs here.
 OPERATIONS = {
-    "framing", "init", "frame", "ready", "error",
+    "framing", "init", "frame", "ready", "ready_set", "error",
     "cache_enter",
     "cache_begin", "cache_frame", "cache_end",
     "cache_clear",
@@ -34,6 +34,7 @@ OPERATIONS = {
     "cache_loop_changed",
     "cache_stopped", "cache_cleared",
     "hello", "hello_ack",
+    "restart_request", "restart_prepared", "restart_cancel", "restart_state",
     "mode", "mode_state", "leave_linkage",
     "camera_time",
     "group",
@@ -64,7 +65,7 @@ ERROR_CODES = {
     "MODE_CONFLICT", "CACHE_NOT_CLEARED",
     "SET_REVISION_STALE", "SPACE_REVISION_STALE", "EVAL_STALE",
     "RESOURCE_LIMIT",
-    "RECOVERY_REFUSED",
+    "RECOVERY_REFUSED", "SUBJECT_CHANGED", "RESTART_TIMEOUT", "RESTART_CANCELLED",
     "LINKAGE_NOT_ACTIVE",
     "CACHE_METADATA_INVALID", "CACHE_PAYLOAD_TOO_LARGE",
     "CACHE_FRAME_INDEX_INVALID", "CACHE_FRAME_CONTENTS_INVALID",
