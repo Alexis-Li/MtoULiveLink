@@ -366,7 +366,7 @@ void FMtoULinkageSession::ReportResidual(const FString& Residual, const TCHAR* C
     }
 }
 
-void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello)
+void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello, const FString& SourceInstanceId)
 {
     (void)Hello;
     // The greeting is answered before any object is negotiated: the session
@@ -398,7 +398,7 @@ void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello)
         true,
         Targets,
         SpaceRevision,
-        Anchor));
+        Anchor, SourceInstanceId));
     Detail = FString::Printf(TEXT("Greeted %s (Maya %s)."), *Hello.Host, *Hello.MayaVersion);
     PublishView();
 }

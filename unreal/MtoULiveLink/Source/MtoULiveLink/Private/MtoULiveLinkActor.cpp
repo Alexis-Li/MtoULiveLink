@@ -120,7 +120,7 @@ void AMtoULiveLinkActor::PostDuplicate(bool bDuplicateForPIE)
 
 void AMtoULiveLinkActor::Destroyed()
 {
-    MtoURequestStreamingSessionEnd(*this);
+    MtoURequestStreamingSessionEnd(*this, EMtoUSessionEndReason::SubjectChanged);
     ReleaseGeneratedPreview();
     Super::Destroyed();
 }
@@ -140,7 +140,7 @@ void AMtoULiveLinkActor::SetBinding(UMtoULiveLinkBinding* InBinding)
         return;
     }
 
-    MtoURequestStreamingSessionEnd(*this);
+    MtoURequestStreamingSessionEnd(*this, EMtoUSessionEndReason::SubjectChanged);
     ReleaseGeneratedPreview();
     Binding = InBinding;
     EnterUnrefreshedReadiness(TEXT("Run Refresh Preview to prepare the current Binding inputs."));
@@ -202,7 +202,7 @@ bool AMtoULiveLinkActor::BeginPreviewBuild()
     // also the synchronous publish gate: old queued frames and cached
     // commands fail closed from here, without waiting for the worker to
     // close the socket. A rejected reentrant start above never terminates.
-    MtoURequestStreamingSessionEnd(*this);
+    MtoURequestStreamingSessionEnd(*this, EMtoUSessionEndReason::Refresh);
     ReleaseGeneratedPreview();
     HideDisplay();
     PreviewState = EMtoUPreviewState::Building;

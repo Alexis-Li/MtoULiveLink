@@ -7,6 +7,8 @@
 #include "HAL/Runnable.h"
 #include "ILiveLinkSource.h"
 #include "MtoUCacheCommandQueue.h"
+#include "MtoURestartOperation.h"
+#include "MtoURestartOperation.h"
 #include "MtoUCacheSession.h"
 #include "MtoULiveLinkActor.h"
 #include "MtoULinkageSession.h"
@@ -39,7 +41,9 @@ MTOULIVELINK_API TSharedPtr<class FMtoULiveLinkSource> MtoUSetActiveSource(
  * An explicit Preview refresh ends its actor's session through the same
  * boundary before replacing the display (Issue #39). Game Thread only.
  */
-void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester);
+enum class EMtoUSessionEndReason : uint8 { InputChanged, SubjectChanged, UserStop, Refresh, Failure };
+void MtoURequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester,
+    EMtoUSessionEndReason Reason = EMtoUSessionEndReason::InputChanged);
 
 #if WITH_DEV_AUTOMATION_TESTS
 /**
@@ -271,7 +275,8 @@ public:
      * A Binding actor asks the connection to end (see
      * `MtoURequestStreamingSessionEnd`); Game Thread only.
      */
-    void RequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester);
+    void RequestStreamingSessionEnd(const AMtoULiveLinkActor& Requester,
+        EMtoUSessionEndReason Reason = EMtoUSessionEndReason::InputChanged);
     FMtoUCachePlaybackView GetActorCachePlaybackView(const AMtoULiveLinkActor& Actor) const;
     bool StartActorCachedPlayback(const AMtoULiveLinkActor& Actor);
     bool StopActorCachedPlayback(const AMtoULiveLinkActor& Actor);
@@ -346,6 +351,8 @@ private:
     friend class FMtoUSessionIsolationTestAccess;
     friend class FMtoUControlBudgetTestAccess;
     friend class FMtoUSessionEndTestAccess;
+    friend class FMtoURestartTestAccess;
+    friend class FMtoURestartTestAccess;
     // Editor integration coverage for explicit refresh during a session.
     friend class FMtoURefreshEndsSessionTestAccess;
 #endif
@@ -455,7 +462,13 @@ private:
     // The end request for one worker session: the target the worker closes and
     // every later message, init and frame of it is refused. A session the
     // worker no longer holds is left alone.
-    void RequestSessionEndOnGameThread(uint64 SessionId);
+    void RequestSessionEndOnGameThread(uint64 SessionId,
+        EMtoUSessionEndReason Reason = EMtoUSessionEndReason::Failure);
+    void TickRestartOnGameThread();
+    void StopRestart(const FString& Code, const FString& Detail);
+    bool ValidateSubjectsOnGameThread() const;
+    void CaptureSubjectsOnGameThread();
+    void ReflectRestartOnGameThread();
     // Removes one object's subject (unless the Live Link client may already be
     // gone) and hands its displays back to their own Binding state; the
     // per-object part of the end contract, also used when only the second
@@ -493,6 +506,52 @@ private:
     bool IsSessionPublishableOnGameThread(uint64 SessionId) const;
     void SetStatus(const FString& InStatus);
 
+    struct FProtectedSubject
+    {
+        FString ObjectId;
+        TWeakObjectPtr<AMtoULiveLinkActor> Actor;
+        TWeakObjectPtr<UMtoULiveLinkBinding> Binding;
+        TWeakObjectPtr<UWorld> World;
+        FString PairingGeneration;
+        FString InstanceId;
+    };
+    // Weak object references are only examined on the game thread. These
+    // records survive old-stream cleanup and never resolve by object path.
+    TArray<FProtectedSubject> ProtectedSubjects;
+    uint64 GreetedSession = 0;
+    FString MayaSubjectId;
+    const FString SourceInstanceId = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    mutable FCriticalSection RestartMutex;
+    FMtoURestartOperation Restart;
+    bool bRestartStatusDirty = false;
+    TAtomic<double> RestartTestClock{-1.0};
+    double RestartNow() const
+    {
+        const double Override = RestartTestClock.Load();
+        return Override >= 0 ? Override : FPlatformTime::Seconds();
+    }
+    struct FProtectedSubject
+    {
+        FString ObjectId;
+        TWeakObjectPtr<AMtoULiveLinkActor> Actor;
+        TWeakObjectPtr<UMtoULiveLinkBinding> Binding;
+        TWeakObjectPtr<UWorld> World;
+        FString PairingGeneration;
+        FString InstanceId;
+    };
+    TArray<FProtectedSubject> ProtectedSubjects;
+    uint64 GreetedSession = 0;
+    FString MayaSubjectId;
+    const FString SourceInstanceId = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    mutable FCriticalSection RestartMutex;
+    FMtoURestartOperation Restart;
+    bool bRestartStatusDirty = false;
+    TAtomic<double> RestartTestClock{-1.0};
+    double RestartNow() const
+    {
+        const double Override = RestartTestClock.Load();
+        return Override >= 0 ? Override : FPlatformTime::Seconds();
+    }
     const uint16 ConfiguredPort;
     TAtomic<bool> bStopRequested{false};
     TAtomic<bool> bSourceValid{true};

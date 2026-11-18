@@ -76,6 +76,10 @@ enum class EMtoUConnectionState : uint8
 {
     /** No session streams to this actor: it never connected or its session ended. */
     Disconnected,
+    /** Inputs changed; the bounded automatic negotiation is in flight. */
+    Reconnecting,
+    /** Inputs changed; the bounded automatic negotiation is in flight. */
+    Reconnecting,
     /** A connection is negotiating this actor's Binding. */
     Validating,
     /** The actor streams as the primary character. */
