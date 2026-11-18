@@ -463,6 +463,10 @@ private:
     // worker no longer holds is left alone.
     void RequestSessionEndOnGameThread(uint64 SessionId,
         EMtoUSessionEndReason Reason = EMtoUSessionEndReason::Failure);
+    // Returns true when the operation handled the request or the requester is
+    // outside its protected subjects. An admitted stream can negotiate again.
+    bool HandleProtectedRestartEndRequest(EMtoUSessionEndReason Reason, bool bPinnedParticipant);
+    void ApplySessionEndLocked(uint64 SessionId, EMtoUSessionEndReason Reason);
     void TickRestartOnGameThread();
     bool IsRestartBlocked(uint64 SessionId);
     void StopRestart(const FString& Code, const FString& Detail);
@@ -519,6 +523,7 @@ private:
     uint64 GreetedSession = 0;
     FString MayaSubjectId;
     const FString SourceInstanceId = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    // Acquire before PendingMutex when changing worker and operation identity together.
     mutable FCriticalSection RestartMutex;
     FMtoURestartOperation Restart;
     bool bRestartStatusDirty = false;
@@ -527,6 +532,8 @@ private:
     TAtomic<int32> RestartTestSendBuffer{0};
     TAtomic<bool> bRestartTestHoldHelloReply{false};
     TAtomic<int32> RestartTestHeldHelloPolls{0};
+    TAtomic<bool> bRestartTestHoldPermit{false};
+    TFunction<void(uint64)> RestartTestAfterEndTargetSample;
 #endif
     double RestartNow() const
     {

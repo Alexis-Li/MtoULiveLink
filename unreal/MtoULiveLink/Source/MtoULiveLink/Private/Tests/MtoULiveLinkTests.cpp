@@ -16848,6 +16848,19 @@ public:
     {
         return Source.RestartTestHeldHelloPolls.Load();
     }
+    static void HoldPermit(FMtoULiveLinkSource& Source, bool bHold)
+    {
+        Source.bRestartTestHoldPermit.Store(bHold);
+    }
+    static void AfterEndTargetSample(FMtoULiveLinkSource& Source, TFunction<void(uint64)> Callback)
+    {
+        Source.RestartTestAfterEndTargetSample = MoveTemp(Callback);
+    }
+    static uint64 WorkerSession(const FMtoULiveLinkSource& Source)
+    {
+        FScopeLock Lock(&Source.PendingMutex);
+        return Source.CurrentWorkerSession;
+    }
     static void Backpressure(FMtoULiveLinkSource& Source)
     {
         const uint64 Session = Source.GreetedSession;
@@ -17129,7 +17142,7 @@ struct FMtoUSessionEndMaya
         return SendGreeting(Test) && ReceiveGreeting(Test) && (!bNegotiate || Negotiate(Test));
     }
 
-    bool FinishCoordination(FAutomationTestBase& Test, int32 SourceRevision, FString& Permit)
+    bool PrepareRestart(FAutomationTestBase& Test, int32 SourceRevision)
     {
         TSharedPtr<FJsonObject> State;
         if (!Test.TestTrue(TEXT("Maya receives ending"), ReadReply(TEXT("restart_state"), State))
@@ -17142,7 +17155,13 @@ struct FMtoUSessionEndMaya
         const TArray<uint8> Prepared = Packet(FString::Printf(
             TEXT("{\"type\":\"restart_prepared\",\"session_id\":%d,\"source_revision\":%d}"),
             SessionId, SourceRevision));
-        if (!Test.TestTrue(TEXT("Maya prepares after receiving ending"), Send(Prepared))
+        return Test.TestTrue(TEXT("Maya prepares after receiving ending"), Send(Prepared));
+    }
+
+    bool FinishCoordination(FAutomationTestBase& Test, int32 SourceRevision, FString& Permit)
+    {
+        TSharedPtr<FJsonObject> State;
+        if (!PrepareRestart(Test, SourceRevision)
             || !Test.TestTrue(TEXT("Maya receives permit state"), ReadReply(TEXT("restart_state"), State))
             || !Test.TestEqual(TEXT("the recovered session issues a permit"), State->GetStringField(TEXT("state")), FString(TEXT("permitted"))))
         {
@@ -17214,6 +17233,19 @@ void StartAndFailRefresh(AMtoULiveLinkActor& Actor)
     FMtoUPreviewReadinessTestAccess::Begin(Actor);
     FMtoUPreviewReadinessTestAccess::Fail(
         Actor, EMtoUPreviewBuildStage::Preflight, TEXT("test refresh"));
+}
+
+bool WaitForUnsentPermit(FMtoUSessionEndFixture& Fixture, uint64 SessionId, FMtoURestartOperation& Operation)
+{
+    return PollUntil([&]()
+    {
+        Fixture.Pump();
+        Operation = FMtoURestartTestAccess::Operation(*Fixture.Source);
+        return Operation.Phase == FMtoURestartOperation::EPhase::Permitted
+            && Operation.OldSession == SessionId && Operation.ActiveSession == SessionId
+            && Operation.bStatePending && !Operation.bPermitDelivered && !Operation.Token.IsEmpty()
+            && FMtoURestartTestAccess::WorkerSession(*Fixture.Source) == SessionId;
+    }, 2.0);
 }
 }
 
@@ -18390,6 +18422,162 @@ bool FMtoURestartGreetingOrderTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("stopped preserves the subject change category"),
         Stopped->GetStringField(TEXT("code")), FString(TEXT("SUBJECT_CHANGED")));
     TestTrue(TEXT("the stopped Ready transport closes"), Final.PeerClosed());
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartEditDuringPermitSendTest,
+    "MtoULiveLink.Source.Restart.EditDuringPermitSend",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURestartEditDuringPermitSendTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    UMtoULiveLinkBinding& Binding = *F.Actor->GetBinding();
+    USkeletalMesh* FirstPart = DuplicateObject<USkeletalMesh>(Binding.SkeletalMesh, GetTransientPackage());
+    USkeletalMesh* LatestPart = DuplicateObject<USkeletalMesh>(Binding.SkeletalMesh, GetTransientPackage());
+    if (!TestTrue(TEXT("latest part contributes its own Morph Target"),
+        AddUniformMorph(*LatestPart, TEXT("LatestPartOnly"), FVector3f(1, 0, 0))))
+    {
+        return false;
+    }
+    AddCharacterPart(Binding, TEXT("Additional Part"), FirstPart, false);
+    FProperty* Parts = FindFProperty<FProperty>(UMtoULiveLinkBinding::StaticClass(),
+        GET_MEMBER_NAME_CHECKED(UMtoULiveLinkBinding, AdditionalParts));
+    if (!TestNotNull(TEXT("Additional Parts is an editable property"), Parts)) { return false; }
+    const auto NotifyPartsEdited = [&Binding, Parts]()
+    {
+        FPropertyChangedEvent Event(Parts, EPropertyChangeType::ValueSet);
+        Binding.PostEditChangeProperty(Event);
+    };
+    NotifyPartsEdited();
+    FMtoUSessionEndMaya Old(F);
+    if (!Old.Connect(*this, true)) { return false; }
+
+    FMtoURestartTestAccess::Clock(*F.Source, 100.0);
+    FMtoURestartTestAccess::HoldPermit(*F.Source, true);
+    Binding.AdditionalParts[0].bEnabled = true;
+    NotifyPartsEdited();
+    FMtoURestartOperation Before;
+    if (!Old.PrepareRestart(*this, 3)
+        || !TestTrue(TEXT("a prepared permit waits on the old TCP"),
+            WaitForUnsentPermit(F, Old.SessionId, Before)))
+    {
+        return false;
+    }
+    TestEqual(TEXT("initial coordination deadline"), Before.CoordinationDeadline, 105.0);
+    TestEqual(TEXT("initial whole operation deadline"), Before.OperationDeadline, 132.0);
+    TestEqual(TEXT("Maya prepared the old session once"), Before.PreparedRevision, 3);
+    FMtoURestartTestAccess::Clock(*F.Source, 101.0);
+    Binding.AdditionalParts[0].SkeletalMesh = LatestPart;
+    NotifyPartsEdited();
+    const FMtoURestartOperation After = FMtoURestartTestAccess::Operation(*F.Source);
+    TestTrue(TEXT("a part edit keeps the prepared permit on the old TCP"),
+        After.Phase == FMtoURestartOperation::EPhase::Permitted && After.Token == Before.Token
+        && After.OldSession == Before.OldSession && After.ActiveSession == Before.ActiveSession);
+    TestEqual(TEXT("a part edit keeps Maya preparation"), After.PreparedRevision, Before.PreparedRevision);
+    TestEqual(TEXT("a part edit keeps the coordination deadline"), After.CoordinationDeadline, Before.CoordinationDeadline);
+    TestEqual(TEXT("a part edit keeps the whole operation deadline"), After.OperationDeadline, Before.OperationDeadline);
+
+    FMtoURestartTestAccess::HoldPermit(*F.Source, false);
+    TSharedPtr<FJsonObject> State;
+    if (!TestTrue(TEXT("the original permit reaches Maya without a second prepared"),
+        Old.ReadReply(TEXT("restart_state"), State) && State->GetStringField(TEXT("state")) == TEXT("permitted")))
+    {
+        return false;
+    }
+    TestEqual(TEXT("the wire permit is the same"), State->GetStringField(TEXT("restart_token")), Before.Token);
+    if (!TestTrue(TEXT("the old TCP closes after permission"), Old.PeerClosed())) { return false; }
+    Old.Drop();
+
+    FMtoUSessionEndMaya Next(F);
+    TSharedPtr<FJsonObject> Ready;
+    if (!Next.SendGreeting(*this, State->GetStringField(TEXT("restart_token"))) || !Next.ReceiveGreeting(*this)
+        || !TestTrue(TEXT("the replacement TCP negotiates Ready"),
+            Next.Send(F.InitPacket()) && Next.ReadReply(TEXT("ready"), Ready)))
+    {
+        return false;
+    }
+    TestTrue(TEXT("Ready comes from a new streaming session"), Next.SessionId > Old.SessionId);
+    TestTrue(TEXT("Ready negotiates the latest part's Morph Target"),
+        Ready->GetArrayField(TEXT("missing_in_maya")).ContainsByPredicate([](const TSharedPtr<FJsonValue>& Morph)
+        {
+            return Morph->AsString() == TEXT("LatestPartOnly");
+        }));
+    TestTrue(TEXT("the latest part receives the new Live Link session"), F.Actor->IsInLiveLinkSet()
+        && F.Actor->GetCharacterPartComponents().Num() == 1
+        && F.Actor->GetCharacterPartComponents()[0]->GetSkeletalMeshAsset() == LatestPart);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURestartRefreshDuringPermitCloseTest,
+    "MtoULiveLink.Source.Restart.RefreshDuringPermitClose",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURestartRefreshDuringPermitCloseTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture F;
+    ON_SCOPE_EXIT { F.Close(); };
+    if (!F.Open(*this)) { return false; }
+    FMtoUSessionEndMaya Old(F);
+    if (!Old.Connect(*this, true)) { return false; }
+    FMtoURestartTestAccess::Clock(*F.Source, 200.0);
+    FMtoURestartTestAccess::HoldPermit(*F.Source, true);
+    MtoURequestStreamingSessionEnd(*F.Actor);
+    FMtoURestartOperation Before;
+    if (!Old.PrepareRestart(*this, 3)
+        || !TestTrue(TEXT("a prepared permit waits on the old TCP"),
+            WaitForUnsentPermit(F, Old.SessionId, Before)))
+    {
+        return false;
+    }
+
+    // The Refresh request samples the old transport. Let that worker send
+    // and close while the request is still on the editor thread.
+    FMtoURestartTestAccess::AfterEndTargetSample(*F.Source, [&](uint64 SessionId)
+    {
+        TestEqual(TEXT("Refresh started with the old TCP present"), SessionId, Before.OldSession);
+        FMtoURestartTestAccess::HoldPermit(*F.Source, false);
+        TestTrue(TEXT("the old TCP leaves the worker before Refresh resumes"), PollUntil([&]()
+        {
+            return FMtoURestartTestAccess::WorkerSession(*F.Source) == 0;
+        }, 2.0));
+    });
+    StartAndFailRefresh(*F.Actor);
+    FMtoURestartTestAccess::AfterEndTargetSample(*F.Source, {});
+    const FMtoURestartOperation Stopped = FMtoURestartTestAccess::Operation(*F.Source);
+    TestTrue(TEXT("Refresh stops the handoff after the old TCP closes"),
+        Stopped.Phase == FMtoURestartOperation::EPhase::Stopped && Stopped.Token.IsEmpty());
+    TestEqual(TEXT("Refresh records the terminal reason"), Stopped.Code, FString(TEXT("RESTART_CANCELLED")));
+    TSharedPtr<FJsonObject> State;
+    if (!TestTrue(TEXT("the old TCP had sent the permit during Refresh"),
+        Old.ReadReply(TEXT("restart_state"), State) && State->GetStringField(TEXT("state")) == TEXT("permitted")))
+    {
+        return false;
+    }
+    TestEqual(TEXT("the wire permit belongs to the stopped operation"),
+        State->GetStringField(TEXT("restart_token")), Before.Token);
+    Old.Drop();
+
+    FMtoUSessionEndMaya Automatic(F);
+    if (!Automatic.SendGreeting(*this, State->GetStringField(TEXT("restart_token")))) { return false; }
+    TArray<uint8> Error;
+    const bool bRefused = TestTrue(TEXT("the replacement hello cannot recover after Refresh"),
+        Automatic.Reader.Next(*Automatic.Socket, TEXT("error"), Error, [&F]() { F.Pump(); }, 2.0));
+    TestFalse(TEXT("a revoked handoff never acknowledges the replacement hello"),
+        Automatic.Reader.OtherTypes.Contains(TEXT("hello_ack")));
+    if (bRefused) { TestTrue(TEXT("the rejected replacement TCP closes"), Automatic.PeerClosed()); }
+    TestFalse(TEXT("Refresh leaves no Live Link subject"), F.Actor->IsInLiveLinkSet());
+    Automatic.Drop();
+    TestTrue(TEXT("the listener has no TCP before manual connection"), PollUntil([&]()
+    {
+        return FMtoURestartTestAccess::WorkerSession(*F.Source) == 0;
+    }, 2.0));
+    FMtoUSessionEndMaya Manual(F);
+    TestTrue(TEXT("an explicit connection can still negotiate Ready"), Manual.Connect(*this, true));
     return true;
 }
 
