@@ -856,7 +856,7 @@ class LinkageSession(object):
         message = make_group_message(
             self._session_id, set_revision, self._mode_revision,
             self._space_revision, target.eval_id, target.transport_serial,
-            sample_serial, objects, readback, applied_time)
+            sample_serial, objects, readback, applied_time, validated=True)
         size = group_wire_size(message)
         if size > MAX_LINKAGE_GROUP_BYTES:
             with self._lock:

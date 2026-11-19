@@ -9,6 +9,7 @@ import select
 import socket
 import threading
 import time
+from collections import deque
 from uuid import uuid4
 
 from . import config, mayaapi
@@ -32,6 +33,7 @@ from .diagnostics import (
     version_mismatch_diagnostic,
 )
 from .mayaapi import cmds, om
+from .performance import StageTimings
 from .protocol import (
     ProtocolVersionMismatch,
     encode_message,
@@ -61,7 +63,9 @@ class LatestFrame(object):
 
     def put(self, value):
         with self._lock:
+            replaced = self._value is not None
             self._value = value
+            return replaced
 
     def take(self):
         with self._lock:
@@ -252,6 +256,10 @@ class SenderWorker(threading.Thread):
         self._cancel_attempted = False
         self._peer_stopped = False
         self._latest = LatestFrame()
+        self._realtime_timings = StageTimings()
+        self._realtime_sent = 0
+        self._realtime_sent_times = deque()
+        self._realtime_replaced = 0
         # Unbounded by design: the cached upload streams hundreds of frames
         # through the same ordered path. Linkage controls keep their own bound
         # in the linkage session instead of constraining this queue.
@@ -279,13 +287,32 @@ class SenderWorker(threading.Thread):
         self._reason_at = None
 
     def submit(self, frame_message):
+        started = time.perf_counter()
         packet = encode_message(frame_message)
+        encoded = time.perf_counter() - started
         with self._lock:
-            if self._restart_phase is None:
-                if self._ordered_mode:
-                    self._ordered.put(packet)
-                else:
-                    self._latest.put(packet)
+            if self._restart_phase is not None or self._stop_event.is_set():
+                return False
+            self._realtime_timings.add("encoding", encoded)
+            if self._ordered_mode:
+                self._ordered.put((packet, True))
+            elif self._latest.put(packet):
+                self._realtime_replaced += 1
+            return True
+
+    def _prune_sent_times(self, now):
+        while self._realtime_sent_times and self._realtime_sent_times[0] <= now - 1.0:
+            self._realtime_sent_times.popleft()
+
+    def realtime_metrics(self):
+        with self._lock:
+            if self._state != "ready" or self._stop_event.is_set():
+                return None
+            self._prune_sent_times(time.monotonic())
+            return {"sent_frames": self._realtime_sent,
+                    "sent_hz": len(self._realtime_sent_times),
+                    "replaced_frames": self._realtime_replaced,
+                    "stages": self._realtime_timings.snapshot()}
 
     def begin_ordered(self):
         with self._send_lock:
@@ -302,15 +329,15 @@ class SenderWorker(threading.Thread):
             except queue.Empty:
                 break
         if latest is not None:
-            self._ordered.put(latest)
+            self._ordered.put((latest, True))
 
     def submit_ordered(self, frame_message):
         packet = encode_message(frame_message)
         with self._lock:
             if self._restart_phase is None:
-                self._ordered.put(packet)
+                self._ordered.put((packet, False))
 
-    def submit_control(self, message):
+    def submit_control(self, message, *, discard_latest=False):
         """Queue one control message in order, whichever delivery mode is on.
 
         Latest mode never drains the ordered queue, so a control statement
@@ -321,10 +348,12 @@ class SenderWorker(threading.Thread):
         with self._send_lock:
             with self._lock:
                 if self._restart_phase is None:
+                    if discard_latest:
+                        self._latest.take()
                     if self._ordered_mode:
-                        self._ordered.put(packet)
+                        self._ordered.put((packet, False))
                     else:
-                        self._carryover.put(packet)
+                        self._carryover.put((packet, False))
 
     def ordered_pending(self):
         """Approximate count of queued packets not yet sent to Unreal."""
@@ -420,6 +449,7 @@ class SenderWorker(threading.Thread):
     def forget_target(self, object_id):
         with self._lock:
             self._target_identities.pop(object_id, None)
+            self._latest.take()
 
     def _begin_coordination_locked(self):
         if self._restart_phase is None:
@@ -716,10 +746,11 @@ class SenderWorker(threading.Thread):
             for pending in (self._carryover, self._ordered if self._ordered_mode else None):
                 if pending is not None:
                     try:
-                        return pending.get_nowait(), pending
+                        packet, realtime = pending.get_nowait()
+                        return packet, pending, realtime
                     except queue.Empty:
                         pass
-            return self._latest.take(), None
+            return self._latest.take(), None, True
 
     def _run_connected(self, sock):
         while not self._stop_event.is_set():
@@ -742,11 +773,20 @@ class SenderWorker(threading.Thread):
                         if message["type"] == "restart_prepared":
                             self._prepared_revision = message["source_revision"]
             else:
-                packet, pending = self._pop_stream_packet()
+                packet, pending, realtime = self._pop_stream_packet()
                 if packet is not None:
                     try:
-                        self._send_packet(sock, packet, time.monotonic() + 0.25,
-                                          "sending streaming data", stream=True)
+                        started = time.perf_counter()
+                        sent = self._send_packet(sock, packet, time.monotonic() + 0.25,
+                                                 "sending streaming data", stream=True)
+                        if sent and realtime:
+                            elapsed = time.perf_counter() - started
+                            with self._lock:
+                                now = time.monotonic()
+                                self._realtime_timings.add("send", elapsed)
+                                self._realtime_sent += 1
+                                self._realtime_sent_times.append(now)
+                                self._prune_sent_times(now)
                     finally:
                         if pending is not None:
                             pending.task_done()
@@ -975,6 +1015,10 @@ class StreamingSession(object):
         self._timer_generation = 0
         self._revision = None
         self._last_sample_time = None
+        self._last_frames = (None, None)
+        self._sample_timings = StageTimings()
+        self._samples = 0
+        self._unchanged_samples = 0
         self._phase = "starting"
         self._outcome = None
         self._terminal_event = None
@@ -1114,6 +1158,18 @@ class StreamingSession(object):
             return self._worker.status()[0] == "ready"
         except (AttributeError, IndexError, TypeError):
             return self._phase == "ready"
+
+    def realtime_metrics(self):
+        """Realtime timings and delivery counts for the current ready session."""
+        if not self.is_ready:
+            return None
+        delivery = self._worker.realtime_metrics()
+        if delivery is None:
+            return None
+        stages = self._sample_timings.snapshot()
+        stages.update(delivery["stages"])
+        return dict(delivery, stages=stages, samples=self._samples,
+                    unchanged_samples=self._unchanged_samples)
 
     @classmethod
     def start(cls, scene, fps, on_event=None, playback_cap=DEFAULT_PLAYBACK_CAP,
@@ -1348,7 +1404,7 @@ class StreamingSession(object):
             return self._removal_pending
         revision = self._set_revision + 1
         self._worker.submit_control(make_remove_object_message(
-            session_id, SECONDARY_OBJECT_ID, revision, detail))
+            session_id, SECONDARY_OBJECT_ID, revision, detail), discard_latest=True)
         self._removal_pending = revision
         return revision
 
@@ -1534,8 +1590,24 @@ class StreamingSession(object):
                 and now - self._last_sample_time < sample_interval):
             return
         self._last_sample_time = now
+        started = time.perf_counter()
+        stages = {}
+
+        def record(stage, elapsed):
+            stages[stage] = stages.get(stage, 0.0) + elapsed
+
+        self._samples += 1
         try:
-            frame = self._scene.sample()
+            self._sample_frame_set(force, record)
+        finally:
+            for stage, elapsed in stages.items():
+                self._sample_timings.add(stage, elapsed)
+            self._sample_timings.add("sample_total", time.perf_counter() - started)
+
+    def _sample_frame_set(self, force, record):
+        previous, previous_secondary = (None, None) if force else self._last_frames
+        try:
+            frame = self._scene.sample(previous=previous, timings=record)
         except CharacterSceneError as error:
             if not self.is_ready:
                 return
@@ -1557,12 +1629,13 @@ class StreamingSession(object):
                         self._revision, frame.revision)),
                 recapture_scene=True)
             return
-        rows = None
+        secondary = None
         if self._secondary_scene is not None:
             # Both objects come from the same evaluation: the set is one
             # message, so Unreal never shows them at two Maya times.
             try:
-                secondary = self._secondary_scene.sample()
+                secondary = self._secondary_scene.sample(
+                    previous=previous_secondary, timings=record)
             except CharacterSceneError as error:
                 if not self.is_ready:
                     return
@@ -1583,11 +1656,17 @@ class StreamingSession(object):
                             self._secondary_revision, secondary.revision)),
                     recapture_scene=False)
                 return
+        if frame is previous and secondary is previous_secondary:
+            self._unchanged_samples += 1
+            return
+        rows = None
+        if secondary is not None:
             rows = [{"object_id": SECONDARY_OBJECT_ID,
                      "transforms": list(secondary.transforms),
                      "curves": list(secondary.curves)}]
-        self._worker.submit(make_frame_message(
-            list(frame.transforms), list(frame.curves), rows))
+        if self._worker.submit(make_frame_message(
+                list(frame.transforms), list(frame.curves), rows, validated=True)):
+            self._last_frames = frame, secondary
 
     def _request_failure(self, diagnostic, recapture_scene, automatic=False):
         if self._outcome is not None:
@@ -1625,6 +1704,7 @@ class StreamingSession(object):
         if timer_id is not None:
             self._remove_callback(timer_id)
         worker, self._worker = self._worker, None
+        self._last_frames = (None, None)
         if worker is not None:
             try:
                 worker.stop()

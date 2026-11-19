@@ -28,6 +28,7 @@ from .diagnostics import (
     diagnostic_dialog_text,
     error_reply_diagnostic,
     make_diagnostic,
+    realtime_diagnostic_text,
 )
 from .legal import LEGAL_TEXT, LEGAL_TITLE
 from .linkage import LinkageError, LinkageSession
@@ -1376,6 +1377,10 @@ class Controller(object):
             sections.append("错误详情：\n{0}".format(details))
         sections.append(self._objects_diagnostic_text())
         sections.append(self._linkage_diagnostic_text())
+        if self._session_ready():
+            performance = realtime_diagnostic_text(self._session.realtime_metrics())
+            if performance:
+                sections.append(performance)
         return "\n\n".join(sections)
 
     def _linkage_diagnostic_text(self):

@@ -43,7 +43,7 @@ class FakeScene(object):
         return mtou_scene.CharacterSnapshot(
             REVISION, "|root", "Clothes", [("root", -1)], ["Smile"], (), (), [BIND], 0)
 
-    def sample(self):
+    def sample(self, previous=None, timings=None):
         return mtou_scene.CharacterFrame(REVISION, [list(BIND)], [0.0])
 
     def close(self):

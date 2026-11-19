@@ -6,6 +6,36 @@
 from . import config
 from .config import WORKFLOW_MODEL
 
+REALTIME_STAGE_LABELS = (
+    ("inputs", "角色输入检查"),
+    ("matrices", "骨骼矩阵读取"),
+    ("curves", "曲线读取"),
+    ("compare", "姿势变化检查"),
+    ("transforms", "局部化、分解与坐标转换"),
+    ("validation", "有限值检查"),
+    ("encoding", "JSON 编码"),
+    ("sample_total", "采样总耗时"),
+    ("send", "发送耗时"),
+)
+
+
+def realtime_diagnostic_text(metrics):
+    if metrics is None:
+        return ""
+    lines = [
+        "实时预览性能：",
+        "实际发送频率：{0} 帧/秒（最近 1 秒）".format(metrics["sent_hz"]),
+        "成功发送：{0} 帧 · 被新帧替换：{1} 帧".format(
+            metrics["sent_frames"], metrics["replaced_frames"]),
+    ]
+    stages = metrics["stages"]
+    for stage, label in REALTIME_STAGE_LABELS:
+        if stage in stages:
+            lines.append("{0}：{1:.2f} ms（最近一次执行） / {2:.2f} ms（平均）".format(
+                label, stages[stage]["latest_ms"], stages[stage]["mean_ms"]))
+    return "\n".join(lines)
+
+
 DIAGNOSTICS = {
     "PROTOCOL_VERSION_MISMATCH": (
         "连接失败 · 插件协议版本不匹配",
