@@ -47,7 +47,8 @@ void UMtoUPreviewRemapAsset::BuildPoseFromAnimationData(
 
 void UMtoUPreviewRemapAsset::OnBoneTransformsFinalized()
 {
-    const uint64 AppliedGeneration = Exchange(Generation, 0);
+    const uint64 AppliedGeneration = Generation;
+    Generation = 0;
     USkeletalMeshComponent* Component = Display.Get();
     if (AppliedGeneration == 0 || !Component || Component->GetAnimInstance() != GetOuter())
     {
