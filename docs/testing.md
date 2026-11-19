@@ -34,7 +34,7 @@ remaining path, and the `MtoUOptIn.Actor.*` tests kept that prefix until
 | `MtoUOptIn.Actor.CharacterPartsAsset`, `.LoadedCharacterParts`, `.LoadedCharacterPartTransactions` | Split-character composition of a production Binding, and part transactions in a saved, loaded map |
 | `MtoUOptIn.Source.MayaCacheReconnect`, `.MayaInteractivePlayback`, `.MayaCharacterPartsHost`, `.MayaLinkageHost` | Cross-host acceptance of cache, playback, character parts, and linkage |
 | `MtoUOptIn.Editor.Preview.MayaRefreshPeer`, `.CharacterAcceptance` | Real Maya Preview refresh and complete-character acceptance |
-| `MtoUOptIn.Editor.Linkage.ProductionSequence` | Linkage in a production Level Sequence copy through a real Maya GUI; see [ProductionSequence](#productionsequence) |
+| `MtoUOptIn.Editor.Linkage.ProductionSequence` | [Linkage in a production Level Sequence copy](#productionsequence) or [Real-time Preview performance](#real-time-preview-performance) through a real Maya GUI |
 | `MtoUOptIn.Editor.Workflow.GuiRegression` | Real-time, cached playback, Model/Refresh/garment comparison and Animation after Model through the same Maya GUI driver; start the editor on `/Engine/Maps/Entry` |
 | `MtoUOptIn.Editor.Preview.RefreshBenchmark` | Preview refresh performance changes; `-MtoUBenchmarkCase=<case>` measures one case in a fresh process |
 
@@ -130,6 +130,68 @@ A new order of the existing clicks only needs a `paths` entry; a new control
 or state extends the step vocabulary and the availability rules in
 `MtoULinkageProductionTests.cpp`. This scenario replaces a manual D-1/D-2
 reproduction in the real GUI.
+
+### Real-time Preview performance
+
+For the Maya-only synthetic benchmark, run the benchmark driver from the
+checkout with each revision's `scripts` directory. Keep Maya 2024 and the
+environment fixed across both runs. The generated rig has 1,399 bones and 108
+curves, with 16 warmup samples and 120 measured samples each for moving and
+stationary poses. Read the JSON `sample_total` for sampling and submission time
+and `received_frames` for loopback delivery. Maya's `currentTime` cost has its
+own `maya_time_change` field. Each measured case starts a fresh session, so
+the stationary case should deliver its initial pose once.
+
+```powershell
+& '<Maya2024>/bin/mayapy.exe' 'maya/MtoULiveLink/tests/maya_realtime_benchmark.py' `
+  --scripts '<checkout-to-measure>/maya/MtoULiveLink/scripts' --bones 1399 --curves 108 --samples 120 --warmup 16
+```
+
+For the cross-host gate, use the same C04 production character, scene and
+Binding as the [calibration](history/realtime-preview-performance.md), with
+one connected character in Animation and native Maya playback from frames
+120 to 400. Use Maya 2024 and stock Unreal 5.7.4 (CL 51494982) with `-NullRHI`.
+Copy the [ProductionSequence fixture](acceptance-fixtures/production-sequence.json),
+set `maya.driver` and `maya.scripts` to the tested checkout, keep
+`oracle_frames` at `[120, 260, 400]`, and start each run in a fresh editor on a
+dedicated port. Give each run a new `evidence` directory and the same
+`maya.app_dir_template` from [Maya preferences](#maya-preferences). Match the
+calibration's `pluginPrefs.mel` SHA-256 before applying the gate.
+
+```powershell
+& '<UE>/Engine/Binaries/Win64/UnrealEditor-Cmd.exe' '<Project.uproject>' `
+  '-ExecCmds=Automation RunTests MtoUOptIn.Editor.Linkage.ProductionSequence; Quit' `
+  '-TestExit=Automation Test Queue Empty' '-MtoULinkageProductionFixture=<fixtures>/production-sequence.json' `
+  -MtoURealtimePerformance -MtoURealtimePerformanceSeconds=10 '-MtoULiveLinkPort=<dedicated-test-port>' `
+  -unattended -nopause -nosplash -NoSound -nocef -NullRHI '-ReportExportPath=<scratch>/report'
+```
+
+The flag selects ordinary Real-time Preview. The test warms up native Maya
+playback, records a motion window, stops playback and lets the last pose
+settle, then records at least two seconds of stationary preview. Use
+`<evidence>/realtime-performance.json` for the window readings and `ue-run.json`
+for the Maya preference hash and dialogs.
+
+- Across `motion_start` and `motion_end`, require **at least 2.9 successful
+  Maya sends per second** (`Δmaya.metrics.sent_frames / Δmaya.seconds`) and
+  **at least 2.9 new Unreal pose applications per second**
+  (`Δapply.count / Δue_seconds`). An application completes when every
+  participating display updates its bones for that pose.
+- Across `idle_start` and `idle_end`, require **zero** additional sends and
+  **zero** additional applications. All four snapshots must have the same
+  `session_id`.
+- Record editor FPS as `Δeditor_frames / Δue_seconds` over the motion window.
+  This is the editor tick rate in the `-NullRHI` run. Use the separate
+  send and application rates to evaluate the preview.
+- For each stage, divide the change in accumulated milliseconds by the change
+  in sample count. Maya's accumulated milliseconds are `mean_ms * count` at
+  each endpoint. Unreal records `total_ms` directly. Keep the sample count
+  with each mean because some stages run only for changed poses.
+
+Apply the numeric gate to the exported readings after Automation passes its
+native playback and stationary checks. The rates are scoped to this reference
+configuration. Playback, cache and linkage behavior are covered by their
+regular tests.
 
 ## Test editor ports
 
