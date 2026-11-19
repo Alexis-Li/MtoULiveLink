@@ -3,6 +3,7 @@
 // Licensed under the GPL with additional terms; see NOTICE.
 #if WITH_DEV_AUTOMATION_TESTS
 #include "MtoULinkage.h"
+#include "MtoURealtimeMetrics.h"
 #include "MtoULiveLinkSource.h"
 #include "MtoULinkageSession.h"
 #include "MtoUGuiAcceptance.h"
@@ -512,13 +513,13 @@ private:
                     World ? *World->GetPathName() : TEXT("none"), World ? static_cast<int32>(World->WorldType) : -1));
             });
 
-        // ---- level, sequence copies and the rebound target ----------------
-        Add(TEXT("load level and build the sequence copies"), 300.0, [this]() { return BuildScene(); });
-        if (HasSecondary())
+        bRealtimePerformance = FParse::Param(FCommandLine::Get(), TEXT("MtoURealtimePerformance"));
+        Add(TEXT("load the production level and target"), 300.0, [this]() { return BuildScene(); });
+        if (HasSecondary() || bRealtimePerformance)
         {
             // A set connects only when every object has its target, so the
             // artist pairs both actors before connecting from Maya.
-            Add(TEXT("pair both targets before Maya connects"), 30.0, [this]() { return PairTargets(); });
+            Add(TEXT("pair the targets before Maya connects"), 30.0, [this]() { return PairTargets(); });
         }
         Add(TEXT("start Maya through the public entry"), 30.0, [this]() { return StartMaya(); });
         Add(TEXT("Maya connects and the character negotiates"), 600.0, [this]()
@@ -546,6 +547,10 @@ private:
             }
             return SetConnected();
         });
+        if (bRealtimePerformance)
+        {
+            return AddRealtimePerformance();
+        }
         Add(TEXT("pair the target and open the sequence copy"), 60.0, [this]() { return PairAndOpen(); });
         Add(TEXT("Details renders while connected"), 60.0, [this]() { return RenderDetails(TEXT("connected")); });
         Add(TEXT("record the sequence-driven pose before any takeover"), 60.0, [this]()
@@ -633,6 +638,188 @@ private:
         return true;
     }
 
+    static TSharedRef<FJsonObject> TimingRecord(const FMtoURealtimeTiming& Timing)
+    {
+        TSharedRef<FJsonObject> Record = MakeShared<FJsonObject>();
+        Record->SetNumberField(TEXT("count"), Timing.Count);
+        Record->SetNumberField(TEXT("total_ms"), Timing.TotalSeconds * 1000.0);
+        Record->SetNumberField(TEXT("latest_ms"), Timing.LatestSeconds * 1000.0);
+        Record->SetNumberField(TEXT("max_ms"), Timing.MaxSeconds * 1000.0);
+        return Record;
+    }
+
+    bool AddRealtimePerformance()
+    {
+        double Seconds = 10.0;
+        const TArray<TSharedPtr<FJsonValue>>* Frames = nullptr;
+        const bool bHasFrames = Fixture->TryGetArrayField(TEXT("oracle_frames"), Frames) && Frames->Num() > 1;
+        if (FParse::Value(FCommandLine::Get(), TEXT("MtoURealtimePerformanceSeconds="), Seconds)
+            && (!FMath::IsFinite(Seconds) || Seconds < 2.0 || Seconds > 120.0))
+        {
+            Test->AddError(TEXT("-MtoURealtimePerformanceSeconds must be between 2 and 120 seconds."));
+            return false;
+        }
+        if (!bHasFrames || (*Frames)[0]->AsNumber() >= Frames->Last()->AsNumber())
+        {
+            Test->AddError(TEXT("Real-time performance requires oracle_frames with an increasing first and last Maya frame."));
+            return false;
+        }
+        const double First = (*Frames)[0]->AsNumber();
+        const double Last = Frames->Last()->AsNumber();
+        Performance = MakeShared<FJsonObject>();
+        Performance->SetArrayField(TEXT("range"), NumberArray({First, Last}));
+        Performance->SetNumberField(TEXT("requested_motion_seconds"), Seconds);
+        constexpr double IdleSeconds = 2.0;
+
+        Add(TEXT("warm up native Maya playback"), 120.0, [this, First, Last]()
+        {
+            const TOptional<FMtoURealtimeMetrics> Metrics = Actor.IsValid()
+                ? MtoUGetRealtimeMetrics(*Actor) : TOptional<FMtoURealtimeMetrics>();
+            if (!Metrics.IsSet() || Metrics->Apply.Count == 0)
+            {
+                return false;
+            }
+            if (!ProbeMayaPerformance(TEXT("start"), First, Last))
+            {
+                return false;
+            }
+            PerformanceNextSample = FPlatformTime::Seconds() + 2.0;
+            return true;
+        });
+        Add(TEXT("sample the start of continuous motion"), 30.0, [this, Seconds]()
+        {
+            if (!RecordRealtimePerformance(TEXT("motion_start"), true))
+            {
+                return false;
+            }
+            PerformanceNextSample = FPlatformTime::Seconds() + Seconds;
+            return true;
+        });
+        Add(TEXT("sample the end of continuous motion"), Seconds + 30.0, [this]()
+        {
+            return RecordRealtimePerformance(TEXT("motion_end"), true);
+        });
+        Add(TEXT("stop Maya playback and let the final pose settle"), 30.0, [this]()
+        {
+            if (!ProbeMayaPerformance(TEXT("stop")))
+            {
+                return false;
+            }
+            PerformanceNextSample = FPlatformTime::Seconds() + 2.0;
+            return true;
+        });
+        Add(TEXT("sample the start of stationary preview"), 30.0, [this, IdleSeconds]()
+        {
+            if (!RecordRealtimePerformance(TEXT("idle_start"), false))
+            {
+                return false;
+            }
+            PerformanceNextSample = FPlatformTime::Seconds() + IdleSeconds;
+            return true;
+        });
+        Add(TEXT("sample the end of stationary preview"), 30.0, [this]()
+        {
+            if (!RecordRealtimePerformance(TEXT("idle_end"), false))
+            {
+                return false;
+            }
+            if (!bAbort)
+            {
+                VerifyRealtimePerformance();
+            }
+            return true;
+        });
+        Add(TEXT("quit Maya"), 120.0, [this]()
+        {
+            if (QuitId < 0)
+            {
+                QuitId = SendMaya(TEXT("quit"));
+            }
+            return !Driver.IsRunning();
+        });
+        return true;
+    }
+
+    bool ProbeMayaPerformance(const TCHAR* Operation, double First = 0.0, double Last = 0.0)
+    {
+        if (OnceId < 0)
+        {
+            TSharedRef<FJsonObject> Fields = MakeShared<FJsonObject>();
+            Fields->SetStringField(TEXT("operation"), Operation);
+            Fields->SetArrayField(TEXT("range"), NumberArray({First, Last}));
+            PerformanceCommandSent = FPlatformTime::Seconds();
+            OnceId = Driver.Send(TEXT("realtime_performance"), Fields);
+        }
+        if (!MayaAcked(OnceId))
+        {
+            return false;
+        }
+        OnceId = -1;
+        return true;
+    }
+
+    bool RecordRealtimePerformance(const TCHAR* Name, bool bPlaying)
+    {
+        if (FPlatformTime::Seconds() < PerformanceNextSample || !ProbeMayaPerformance(TEXT("snapshot")))
+        {
+            return false;
+        }
+        const TOptional<FMtoURealtimeMetrics> Metrics = Actor.IsValid()
+            ? MtoUGetRealtimeMetrics(*Actor) : TOptional<FMtoURealtimeMetrics>();
+        const TSharedPtr<FJsonObject>* Maya = nullptr;
+        if (!Metrics.IsSet() || !SetConnected()
+            || !MayaResult->TryGetObjectField(TEXT("realtime_performance"), Maya))
+        {
+            Test->AddError(TEXT("Real-time performance lost the running, ordinary Maya-driven session."));
+            bAbort = true;
+            return true;
+        }
+        Test->TestEqual(TEXT("native Maya playback is in the requested state"),
+            (*Maya)->GetBoolField(TEXT("playing")), bPlaying);
+        TSharedRef<FJsonObject> Record = MakeShared<FJsonObject>();
+        Record->SetNumberField(TEXT("ue_seconds"), FPlatformTime::Seconds());
+        Record->SetNumberField(TEXT("ue_probe_sent_seconds"), PerformanceCommandSent);
+        Record->SetNumberField(TEXT("session_id"), MtoUGetLinkageView().Identity.SessionId);
+        Record->SetNumberField(TEXT("editor_frames"), Metrics->EditorFrames);
+        Record->SetNumberField(TEXT("editor_fps"), Metrics->EditorFPS);
+        Record->SetNumberField(TEXT("applied_hz"), Metrics->AppliedHz);
+        Record->SetObjectField(TEXT("parse"), TimingRecord(Metrics->Parse));
+        Record->SetObjectField(TEXT("retarget"), TimingRecord(Metrics->Retarget));
+        Record->SetObjectField(TEXT("apply"), TimingRecord(Metrics->Apply));
+        Record->SetObjectField(TEXT("maya"), *Maya);
+        Performance->SetObjectField(Name, Record);
+        return true;
+    }
+
+    void VerifyRealtimePerformance()
+    {
+        const TSharedPtr<FJsonObject> Start = Performance->GetObjectField(TEXT("motion_start"));
+        const TSharedPtr<FJsonObject> End = Performance->GetObjectField(TEXT("motion_end"));
+        const TSharedPtr<FJsonObject> IdleStart = Performance->GetObjectField(TEXT("idle_start"));
+        const TSharedPtr<FJsonObject> IdleEnd = Performance->GetObjectField(TEXT("idle_end"));
+        const auto Sent = [](const TSharedPtr<FJsonObject>& Sample)
+        {
+            return Sample->GetObjectField(TEXT("maya"))->GetObjectField(TEXT("metrics"))
+                ->GetNumberField(TEXT("sent_frames"));
+        };
+        Test->TestTrue(TEXT("Maya sends changing poses during native playback"), Sent(End) > Sent(Start));
+        Test->TestTrue(TEXT("the editor advances during the measurement"),
+            End->GetNumberField(TEXT("editor_frames")) > Start->GetNumberField(TEXT("editor_frames")));
+        for (const TCHAR* Stage : {TEXT("parse"), TEXT("retarget"), TEXT("apply")})
+        {
+            Test->TestTrue(FString::Printf(TEXT("continuous motion records %s samples"), Stage),
+                End->GetObjectField(Stage)->GetNumberField(TEXT("count"))
+                    > Start->GetObjectField(Stage)->GetNumberField(TEXT("count")));
+            Test->TestEqual(FString::Printf(TEXT("stationary preview records no new %s samples"), Stage),
+                IdleEnd->GetObjectField(Stage)->GetNumberField(TEXT("count")),
+                IdleStart->GetObjectField(Stage)->GetNumberField(TEXT("count")));
+        }
+        Test->TestEqual(TEXT("stationary Maya sends no poses"), Sent(IdleEnd), Sent(IdleStart));
+        Test->TestEqual(TEXT("stationary Unreal applies no new poses"), IdleEnd->GetNumberField(TEXT("applied_hz")), 0.0);
+        Test->TestEqual(TEXT("motion and quiet hold use the same live session"),
+            IdleEnd->GetNumberField(TEXT("session_id")), Start->GetNumberField(TEXT("session_id")));
+    }
+
     // ------------------------------------------------------------------ scene
 
     bool BuildScene()
@@ -645,19 +832,27 @@ private:
             return false;
         }
         WorldPtr = World;
-        MainOriginal = LoadObject<ULevelSequence>(nullptr, *Fixture->GetStringField(TEXT("main_sequence")));
-        ShotOriginal = LoadObject<ULevelSequence>(nullptr, *Fixture->GetStringField(TEXT("shot_sequence")));
-        SwitchSequence = LoadObject<ULevelSequence>(nullptr, *Fixture->GetStringField(TEXT("switch_sequence")));
         FString BindingError;
         Binding.Reset(MakeFixtureBinding(Fixture, BindingError));
         if (HasSecondary() && Binding.IsValid())
         {
             SecondaryBinding.Reset(MakeFixtureBinding(SecondarySpec(), BindingError));
         }
-        if (!MainOriginal || !ShotOriginal || !SwitchSequence || !Binding.IsValid()
-            || (HasSecondary() && !SecondaryBinding.IsValid()))
+        if (!Binding.IsValid() || (HasSecondary() && !SecondaryBinding.IsValid()))
         {
-            Test->AddError(TEXT("Fixture sequence or binding did not load ") + BindingError);
+            Test->AddError(TEXT("Fixture Binding did not load: ") + BindingError);
+            return false;
+        }
+        if (bRealtimePerformance)
+        {
+            return SpawnTarget() && (!HasSecondary() || SpawnTarget(true));
+        }
+        MainOriginal = LoadObject<ULevelSequence>(nullptr, *Fixture->GetStringField(TEXT("main_sequence")));
+        ShotOriginal = LoadObject<ULevelSequence>(nullptr, *Fixture->GetStringField(TEXT("shot_sequence")));
+        SwitchSequence = LoadObject<ULevelSequence>(nullptr, *Fixture->GetStringField(TEXT("switch_sequence")));
+        if (!MainOriginal || !ShotOriginal || !SwitchSequence)
+        {
+            Test->AddError(TEXT("Fixture sequence did not load"));
             return false;
         }
         MainCopy.Reset(TempCopy(MainOriginal, TEXT("Main")));
@@ -714,6 +909,10 @@ private:
         Spawned->SetActorLabel(bSecondary ? TEXT("MtoU Second (unsaved)") : TEXT("MtoU Linkage Acceptance (unsaved)"));
         Spawned->SetBinding(bSecondary ? SecondaryBinding.Get() : Binding.Get());
         (bSecondary ? SecondaryActor : Actor) = Spawned;
+        if (bRealtimePerformance)
+        {
+            return true;
+        }
 
         // The object's binding in the shot copy now possesses the Binding
         // Actor: its existing animation and transform writers drive it.
@@ -4578,12 +4777,20 @@ private:
                 [this](const FString& Line) { Log(Line); });
             Evidence->SetObjectField(TEXT("maya_final"), MayaResult);
         }
+        if (Performance.IsValid())
+        {
+            WriteJsonFile(FPaths::Combine(EvidenceDir, TEXT("realtime-performance.json")), Performance.ToSharedRef());
+        }
         WriteJsonFile(FPaths::Combine(EvidenceDir, TEXT("ue-run.json")), Evidence.ToSharedRef());
     }
 
     FAutomationTestBase* Test;
     FString FixturePath, EvidenceDir;
     TSharedPtr<FJsonObject> Fixture, MayaResult, Evidence;
+    TSharedPtr<FJsonObject> Performance;
+    bool bRealtimePerformance = false;
+    double PerformanceNextSample = 0.0;
+    double PerformanceCommandSent = 0.0;
     TArray<FStep> Steps;
     int32 Step = 0;
     double StepStarted = 0.0;

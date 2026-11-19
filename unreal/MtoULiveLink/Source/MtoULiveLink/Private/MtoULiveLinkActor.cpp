@@ -11,6 +11,7 @@
 #include "Engine/SkeletalMesh.h"
 #include "Engine/StaticMesh.h"
 #include "LiveLinkInstance.h"
+#include "MtoUPreviewRemapAsset.h"
 #include "UObject/UObjectThreadContext.h"
 
 AMtoULiveLinkActor::AMtoULiveLinkActor()
@@ -585,6 +586,7 @@ void AMtoULiveLinkActor::ApplyLiveLinkSubject(USkeletalMeshComponent* Component)
         // of a set never reads the primary's values. An actor outside the
         // negotiated set evaluates nothing, so it never shows another
         // actor's object.
+        Instance->SetRetargetAsset(UMtoUPreviewRemapAsset::StaticClass());
         Instance->SetSubject(FLiveLinkSubjectName(LiveLinkSubjectName));
         Instance->EnableLiveLinkEvaluation(bInLiveLinkSet);
     }

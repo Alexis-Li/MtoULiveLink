@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Containers/Queue.h"
+#include "Containers/RingBuffer.h"
 #include "HAL/Runnable.h"
 #include "ILiveLinkSource.h"
 #include "MtoUCacheCommandQueue.h"
@@ -12,6 +13,7 @@
 #include "MtoULiveLinkActor.h"
 #include "MtoULinkageSession.h"
 #include "MtoULiveLinkProtocol.h"
+#include "MtoURealtimeMetrics.h"
 
 class AMtoULiveLinkActor;
 class UWorld;
@@ -307,6 +309,8 @@ public:
      * the linkage session; Game Thread only.
      */
     FMtoUTimeControlView GetTimeControlView() const;
+    TOptional<FMtoURealtimeMetrics> GetRealtimeMetrics(const AMtoULiveLinkActor& Actor) const;
+    void NoteRealtimeDisplayApplication(USkeletalMeshComponent& Display, uint64 Generation, double StartedSeconds);
     // Editor entry processes received controls before validating the request.
     bool RequestLinkageEnter(int32 ModeRevision, FString& OutError);
     // The same entry, with the refusal's wire code (such as CACHE_NOT_CLEARED).
@@ -493,7 +497,7 @@ private:
     // Publishes one live or cached frame of the whole set: every object is
     // retargeted first and only then pushed, so a frame that cannot be
     // retargeted for one object changes no display.
-    bool PublishFrameOnGameThread(const FMtoUFrameMessage& Frame);
+    bool PublishFrameOnGameThread(const FMtoUFrameMessage& Frame, bool bMeasureRealtime = false);
     void PublishLatestFrameOnGameThread();
     void EnqueueReplyPacketOnGameThread(uint64 SessionId, TArray<uint8> Packet, bool bCloseAfter);
     void EnqueueErrorOnGameThread(
@@ -557,6 +561,7 @@ private:
     // The set's inits in arrival order; the game thread negotiates each.
     TArray<FMtoUPendingInit> PendingInits;
     TOptional<FMtoUPendingFrame> PendingFrame;
+    FMtoURealtimeTiming RealtimeParseTiming; // Worker-owned, under PendingMutex.
     TQueue<uint64, EQueueMode::Spsc> DisconnectedSessions;
     TQueue<FMtoUOutgoing, EQueueMode::Spsc> OutgoingReplies;
     // Linkage intake: the greeting, the control messages and the staged pose
@@ -597,6 +602,23 @@ private:
     ILiveLinkClient* Client = nullptr;
     FGuid SourceGuid;
     uint64 GameThreadSession = 0;
+
+    struct FDisplayApplication
+    {
+        uint64 Generation = 0;
+        double StartedSeconds = 0.0;
+    };
+    TMap<TWeakObjectPtr<USkeletalMeshComponent>, FDisplayApplication> DisplayApplications;
+    uint64 FirstRealtimeGeneration = 0;
+    uint64 LastAppliedGeneration = 0;
+    FMtoURealtimeTiming RealtimeRetargetTiming;
+    FMtoURealtimeTiming RealtimeApplyTiming;
+    TRingBuffer<double> RecentApplications;
+    TRingBuffer<double> RecentEditorFrames;
+    uint64 EditorFrames = 0;
+    uint64 LastEditorFrame = 0;
+
+    void ClearRealtimeApplications();
     // The worker session an end request closed, until the worker's disconnect
     // reaches EndStreamingSessionOnGameThread. Later messages, inits and
     // frames of it fail closed even before the worker closes the socket.
