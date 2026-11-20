@@ -5896,6 +5896,14 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         Self->TestTrue(TEXT("ready response is received"),
             FromUtf8(Payload).Contains(TEXT("\"type\":\"ready\"")));
         Self->TestTrue(TEXT("connected stream requests background updates"), HasDemand());
+        Self->TestTrue(TEXT("ready establishes the connection without a pose packet"), PollUntil([&]()
+        {
+            return Source->GetSourceStatus().ToString() == TEXT("Connected to Maya");
+        }, 1.0));
+        const TOptional<FMtoURealtimeMetrics> BeforePose = Source->GetRealtimeMetrics(*State->Actor);
+        Self->TestTrue(TEXT("negotiation supplies no preview timing samples"),
+            BeforePose.IsSet() && BeforePose->Parse.Count == 0
+                && BeforePose->Retarget.Count == 0 && BeforePose->Apply.Count == 0);
         Self->TestTrue(TEXT("editor skeletal mesh component tick is enabled"),
             DisplayComponent && DisplayComponent->IsComponentTickEnabled());
         Self->TestTrue(TEXT("editor skeletal mesh component is registered"),
@@ -5922,6 +5930,8 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         FPlatformProcess::Sleep(0.02f);
         Source->Update();
         Self->TestTrue(TEXT("cached entry retains background updates"), HasDemand());
+        Self->TestFalse(TEXT("cache ownership hides real-time performance"),
+            Source->GetRealtimeMetrics(*State->Actor).IsSet());
         const TArray<uint8> ClearBytes = Packet(TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}"));
         Self->TestTrue(TEXT("cache clear is sent"),
             SendBytes(*Client, ClearBytes.GetData(), ClearBytes.Num()));
@@ -6112,6 +6122,34 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             return true;
         }, 5.0f));
 
+    ADD_LATENT_AUTOMATION_COMMAND(FUntilCommand(
+        [Self, State]() -> bool
+        {
+            if (State->bSetupFailed || !State->Source || !State->Actor)
+            {
+                return true;
+            }
+            const TOptional<FMtoURealtimeMetrics> Metrics = State->Source->GetRealtimeMetrics(*State->Actor);
+            if (!Metrics.IsSet() || Metrics->AppliedHz != 0)
+            {
+                return false;
+            }
+            Self->TestEqual(TEXT("three permitted real-time packets are parsed"), Metrics->Parse.Count, uint64(3));
+            Self->TestEqual(TEXT("three real-time poses are retargeted"), Metrics->Retarget.Count, uint64(3));
+            Self->TestEqual(TEXT("each new displayed pose counts once despite repeat editor ticks"),
+                Metrics->Apply.Count, uint64(3));
+            Self->TestTrue(TEXT("actual application timing is sampled"), Metrics->Apply.LatestSeconds > 0.0);
+            Self->TestTrue(TEXT("editor frames are measured separately while idle"), Metrics->EditorFPS > 0);
+            Self->TestEqual(TEXT("idle preview stays connected without more packets"),
+                State->Source->GetSourceStatus().ToString(), FString(TEXT("Connected to Maya")));
+            return true;
+        },
+        [Self]() -> bool
+        {
+            Self->AddError(TEXT("Actual application rate did not decay during stationary preview."));
+            return true;
+        }, 5.0f));
+
     // Cleanup always runs: active shutdown releases connection demand,
     // the original base preference is restored, and the editor-world actor
     // is destroyed so later tests never see a second binding actor.
@@ -6135,6 +6173,11 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         }
         Self->TestTrue(TEXT("shutdown releases background update demand"),
             !State->Source.IsValid() || !State->Source->GetTimeControlView().bConnected);
+        if (State->Source && State->Actor)
+        {
+            Self->TestFalse(TEXT("disconnect clears the actor's real-time performance snapshot"),
+                State->Source->GetRealtimeMetrics(*State->Actor).IsSet());
+        }
         State->Source.Reset();
         if (GEditor)
         {

@@ -24,9 +24,12 @@ repository's issues.
 - Both archives now contain `LICENSE` and `NOTICE`, and the copyright and license
   are shown under **关于** at the bottom right of the Maya panel and in Unreal's
   plugin entry. The license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
+- **实时预览性能** shows stage timings, Maya's actual send rate, and Unreal's
+  actual pose update rate and editor FPS. **复制完整诊断** includes these readings. (#45)
 
 ### Changed
 
+- Real-time Preview skips duplicate poses while the character is still. (#45)
 - Set Character now needs only the deformation root. Visible skinned meshes
   determine the outfit; Display supplies an optional label. (#46)
 - Changes to the outfit, workflow, Transfer BS or character parts reconnect

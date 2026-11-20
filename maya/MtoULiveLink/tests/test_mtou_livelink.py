@@ -883,7 +883,8 @@ class StreamingSessionTests(unittest.TestCase):
         scene = mock.Mock()
         scene.snapshot.return_value = character_snapshot(
             7, "|root", "Clothes01", [("root", -1)], [])
-        scene.sample.return_value = mtou_scene.CharacterFrame(7, [[1, 2, 3]], [])
+        scene.sample.side_effect = [mtou_scene.CharacterFrame(7, [[value, 2, 3]], [])
+                                    for value in (1, 2)]
 
         with patch_global("om", fake_om), \
              patch_global("SenderWorker", return_value=worker), \
@@ -4336,6 +4337,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         self.assertNotIn("UnrealSmile", text)
         self.assertNotIn("arm -> arm_1", text)
         self.assertNotIn("|Group|Geometry|body", text)
+        self.assertNotIn("实时预览性能", text)
 
     def test_version_mismatch_is_shown_as_summary_versions_and_advice(self):
         # The session copies a diagnostic into its event, which turns the
@@ -4421,6 +4423,31 @@ class ControllerLifecycleTests(unittest.TestCase):
         self.assertIn(
             ("copyButton", "bottom", 8),
             layout_edit[1]["attachForm"])
+
+    def test_connection_performance_is_in_the_window_and_copied_text(self):
+        controller = mtou_controller.Controller()
+        controller._session = session = mtou_session.StreamingSession(mock.Mock(), 24.0, None)
+        session._worker = worker = mtou_session.SenderWorker(None)
+        worker._set_status("ready", "Connected")
+        worker.submit({"type": "frame"})
+        worker.submit({"type": "frame"})
+        session._sample_timings.add("validation", 0.001)
+        fake_cmds = mock.MagicMock()
+        fake_cmds.window.side_effect = [False, "diagnosticWindow"]
+        controller._copy_text = mock.Mock()
+
+        with patch_global("cmds", fake_cmds):
+            controller.show_diagnostics()
+            shown = fake_cmds.scrollField.call_args.kwargs["text"]
+            fake_cmds.scrollField.return_value = shown
+            fake_cmds.button.call_args.kwargs["command"]()
+
+        self.assertIn("实际发送频率：0 帧/秒", shown)
+        self.assertIn("被新帧替换：1 帧", shown)
+        self.assertIn("有限值检查：1.00 ms", shown)
+        self.assertIn("JSON 编码", shown)
+        self.assertNotIn("骨骼矩阵读取", shown)
+        controller._copy_text.assert_called_once_with(shown)
 
     def test_connect_presents_session_start_failure_without_retaining_session(self):
         snapshot = character_snapshot(

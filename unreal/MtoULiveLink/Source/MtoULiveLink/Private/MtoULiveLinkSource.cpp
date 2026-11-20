@@ -7,10 +7,13 @@
 #include "MtoUCharacterComposition.h"
 #include "MtoULiveLinkBinding.h"
 #include "MtoUConnectionNegotiator.h"
+#include "MtoUPreviewRemapAsset.h"
 
 #include "Animation/AnimCurveTypes.h"
 #include "Animation/AttributesRuntime.h"
 #include "Animation/MorphTarget.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "CoreGlobals.h"
 #include "Engine/SkeletalMesh.h"
 #include "Engine/World.h"
 #include "HAL/PlatformProcess.h"
@@ -32,6 +35,18 @@ namespace
 {
 // Live Link frame metadata key carrying one linkage publication's generation.
 const FName MtoULinkageGenerationKey(TEXT("MtoU.LinkageGeneration"));
+
+// Generations are game-thread-only and do not repeat across reconnects or sources.
+uint64 GNextRealtimeGeneration = 0;
+constexpr double RealtimeRateWindowSeconds = 1.0;
+
+void TrimRealtimeRateWindow(TRingBuffer<double>& Timestamps, double Now)
+{
+    while (!Timestamps.IsEmpty() && Timestamps.First() <= Now - RealtimeRateWindowSeconds)
+    {
+        Timestamps.PopFront();
+    }
+}
 
 /** Raise a queue peak the worker and the game thread both report to. */
 void NoteQueuePeak(TAtomic<int32>& Peak, int32 Value)
@@ -313,6 +328,95 @@ FMtoUTimeControlView FMtoULiveLinkSource::GetTimeControlView() const
     return View;
 }
 
+TOptional<FMtoURealtimeMetrics> MtoUGetRealtimeMetrics(const AMtoULiveLinkActor& Actor)
+{
+    const TSharedPtr<FMtoULiveLinkSource> Source = MtoUGetActiveLinkageSource().Pin();
+    return Source ? Source->GetRealtimeMetrics(Actor) : TOptional<FMtoURealtimeMetrics>();
+}
+
+TOptional<FMtoURealtimeMetrics> FMtoULiveLinkSource::GetRealtimeMetrics(const AMtoULiveLinkActor& Actor) const
+{
+    const FMtoUTimeControlView Time = GetTimeControlView();
+    if (!Actor.IsInLiveLinkSet() || !Time.bConnected || Time.bTransitioning || Time.Authority != EMtoUTimeAuthority::Maya
+        || !ParticipatingActors.ContainsByPredicate([&Actor](const TWeakObjectPtr<AMtoULiveLinkActor>& Participant)
+            { return Participant.Get() == &Actor; }))
+    {
+        return {};
+    }
+
+    FMtoURealtimeTiming Parse;
+    {
+        FScopeLock Lock(&PendingMutex);
+        if (CurrentWorkerSession != GameThreadSession)
+        {
+            return {};
+        }
+        Parse = RealtimeParseTiming;
+    }
+    return FMtoURealtimeMetrics{
+        Parse, RealtimeRetargetTiming, RealtimeApplyTiming, EditorFrames,
+        RecentApplications.Num(), RecentEditorFrames.Num()};
+}
+
+void FMtoULiveLinkSource::ClearRealtimeApplications()
+{
+    FirstRealtimeGeneration = 0;
+    DisplayApplications.Reset();
+    RecentApplications.Reset();
+}
+
+void FMtoULiveLinkSource::NoteRealtimeDisplayApplication(
+    USkeletalMeshComponent& Display, uint64 Generation, double StartedSeconds)
+{
+    check(IsInGameThread());
+    if (FirstRealtimeGeneration == 0 || Generation < FirstRealtimeGeneration
+        || Generation <= LastAppliedGeneration
+        || !ParticipatingActors.Contains(Cast<AMtoULiveLinkActor>(Display.GetOwner())))
+    {
+        return;
+    }
+
+    FDisplayApplication& Application = DisplayApplications.FindOrAdd(&Display);
+    if (Application.Generation >= Generation)
+    {
+        return;
+    }
+    Application = {Generation, StartedSeconds};
+
+    // The set counts once, when every animation display actually shows this
+    // generation. A newer evaluation can supersede any held, incomplete set.
+    double FirstStart = StartedSeconds;
+    const auto HasApplied = [&](USkeletalMeshComponent* Candidate)
+    {
+        const FDisplayApplication* Applied = Candidate ? DisplayApplications.Find(Candidate) : nullptr;
+        if (!Applied || !Candidate->IsRegistered() || Applied->Generation != Generation)
+        {
+            return false;
+        }
+        FirstStart = FMath::Min(FirstStart, Applied->StartedSeconds);
+        return true;
+    };
+    for (const FMtoUSessionObject& Object : SessionObjects)
+    {
+        const AMtoULiveLinkActor* Actor = Object.Actor.Get();
+        if (!Actor || !HasApplied(Actor->GetSkeletalMeshComponent()))
+        {
+            return;
+        }
+        for (const TObjectPtr<UMtoUCharacterPartComponent>& Part : Actor->GetCharacterPartComponents())
+        {
+            if (!HasApplied(Part.Get()))
+            {
+                return;
+            }
+        }
+    }
+    const double Now = FPlatformTime::Seconds();
+    LastAppliedGeneration = Generation;
+    RealtimeApplyTiming.Add(Now - FirstStart);
+    RecentApplications.Add(Now);
+}
+
 FMtoULiveLinkSource::~FMtoULiveLinkSource()
 {
     StopListener();
@@ -564,6 +668,19 @@ void FMtoULiveLinkSource::Update()
     // While a cache owns this session, ordinary live frames must neither
     // mutate the cache nor overwrite local playback; drop them and their
     // stale pending slots silently.
+    const double Now = FPlatformTime::Seconds();
+    if (GameThreadSession != 0 && GameThreadSession != EndedSession && LastEditorFrame != GFrameCounter)
+    {
+        LastEditorFrame = GFrameCounter;
+        ++EditorFrames;
+        RecentEditorFrames.Add(Now);
+    }
+    TrimRealtimeRateWindow(RecentEditorFrames, Now);
+    TrimRealtimeRateWindow(RecentApplications, Now);
+    if (FirstRealtimeGeneration != 0 && (!CacheSession.AcceptsLiveFrames() || bWorkerLinkageActive.Load()))
+    {
+        ClearRealtimeApplications();
+    }
     if (CacheSession.AcceptsLiveFrames())
     {
         PublishLatestFrameOnGameThread();
@@ -819,6 +936,13 @@ void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool
                 }
             }
         }
+        ClearRealtimeApplications();
+        LastAppliedGeneration = 0;
+        RealtimeRetargetTiming = {};
+        RealtimeApplyTiming = {};
+        RecentEditorFrames.Reset();
+        EditorFrames = 0;
+        LastEditorFrame = 0;
         GameThreadSession = 0;
         SessionObjects.Reset();
         ParticipatingActors.Reset();
@@ -1328,6 +1452,7 @@ uint32 FMtoULiveLinkSource::Run()
                         { Restart.ActiveSession = ActiveSession; }
                         FScopeLock PendingLock(&PendingMutex);
                         CurrentWorkerSession = ActiveSession;
+                        RealtimeParseTiming = {};
                         PendingInits.Reset();
                         PendingFrame.Reset();
                     }
@@ -1457,6 +1582,7 @@ uint32 FMtoULiveLinkSource::Run()
                         break;
                     }
 
+                    const double ParseStart = FPlatformTime::Seconds();
                     FString MessageType;
                     {
                         FString TypeError;
@@ -1877,8 +2003,10 @@ uint32 FMtoULiveLinkSource::Run()
                         continue;
                     }
 
+                    const double ParseSeconds = FPlatformTime::Seconds() - ParseStart;
                     {
                         FScopeLock Lock(&PendingMutex);
+                        RealtimeParseTiming.Add(ParseSeconds);
                         PendingFrame = FMtoUPendingFrame{ActiveSession, MoveTemp(Frame)};
                     }
                     SetStatus(TEXT("Connected to Maya"));
@@ -2647,6 +2775,7 @@ void FMtoULiveLinkSource::RemoveSecondaryObjectOnGameThread(
         }
         // 3. The object leaves the stream: its subject goes away and its
         //    displays show their own Binding state again.
+        ClearRealtimeApplications();
         FMtoUSessionObject Removed = MoveTemp(SessionObjects[Index]);
         SessionObjects.RemoveAt(Index);
         SetObjects.Remove(ObjectId);
@@ -3865,9 +3994,10 @@ void FMtoULiveLinkSource::PublishLatestFrameOnGameThread()
     {
         return;
     }
-    PublishFrameOnGameThread(Frame->Message);
+    PublishFrameOnGameThread(Frame->Message, !bWorkerLinkageActive.Load());
 }
-bool FMtoULiveLinkSource::PublishFrameOnGameThread(const FMtoUFrameMessage& Frame)
+
+bool FMtoULiveLinkSource::PublishFrameOnGameThread(const FMtoUFrameMessage& Frame, bool bMeasureRealtime)
 {
     check(IsInGameThread());
     if (!Client || !SourceGuid.IsValid())
@@ -3879,6 +4009,7 @@ bool FMtoULiveLinkSource::PublishFrameOnGameThread(const FMtoUFrameMessage& Fram
     {
         return false;
     }
+    const double RetargetStart = bMeasureRealtime ? FPlatformTime::Seconds() : 0.0;
     // Every object of the set is retargeted first and only then pushed, so a
     // frame one object cannot take changes no display: Unreal never shows the
     // two objects at two Maya times.
@@ -3919,19 +4050,33 @@ bool FMtoULiveLinkSource::PublishFrameOnGameThread(const FMtoUFrameMessage& Fram
             return false;
         }
     }
+    FString RealtimeStamp;
+    if (bMeasureRealtime)
+    {
+        RealtimeRetargetTiming.Add(FPlatformTime::Seconds() - RetargetStart);
+        const uint64 Generation = ++GNextRealtimeGeneration;
+        if (FirstRealtimeGeneration == 0)
+        {
+            FirstRealtimeGeneration = Generation;
+        }
+        RealtimeStamp = LexToString(Generation);
+    }
     for (int32 Index = 0; Index < SessionObjects.Num(); ++Index)
     {
         FMtoUSessionObject& Object = SessionObjects[Index];
         // A live frame is complete as soon as it is shown; it is what a
         // linkage group that fails returns to.
         Object.LastCompleteFrame.InitializeWith(Frames[Index]);
-        if (const FLiveLinkAnimationFrameData* Animation =
-                Frames[Index].Cast<FLiveLinkAnimationFrameData>())
+        if (FLiveLinkAnimationFrameData* Animation = Frames[Index].Cast<FLiveLinkAnimationFrameData>())
         {
             Object.LastCompleteCurves = Animation->PropertyValues;
             if (AMtoULiveLinkActor* Actor = Object.Actor.Get())
             {
                 Actor->ApplyModelMorphCurves(Object.AcceptedCurveNames, Animation->PropertyValues);
+            }
+            if (bMeasureRealtime)
+            {
+                Animation->MetaData.StringMetaData.Add(UMtoUPreviewRemapAsset::RealtimeFrameKey, RealtimeStamp);
             }
         }
         Client->PushSubjectFrameData_AnyThread(Object.SubjectKey, MoveTemp(Frames[Index]));

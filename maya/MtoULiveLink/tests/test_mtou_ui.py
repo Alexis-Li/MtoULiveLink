@@ -167,6 +167,9 @@ class FakeStreamingSession(object):
     def is_ready(self):
         return self._ready
 
+    def realtime_metrics(self):
+        return None
+
     @property
     def hello_reply(self):
         return dict(self.hello)

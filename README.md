@@ -150,6 +150,15 @@ on the Binding. All enabled parts pose and display under one connection:
    button carries its reason as a tooltip. Repeated warnings for the same
    session appear once; new errors still interrupt.
 
+In Real-time Preview, Maya sends a new pose when the evaluated pose changes
+and skips identical samples while the character is still. To investigate slow
+preview, open **诊断详情** in Maya and **高级设置与诊断** on the Unreal Binding
+Actor. Under **实时预览性能**, Maya reports stage timings and the actual send
+rate. Unreal reports parse, retarget and application times, how often a new pose
+finishes updating the displayed skeletons, and editor FPS as a separate value.
+Use **复制完整诊断** on both hosts while the connection is active to capture the
+readings.
+
 While connected, Unreal keeps updating in the background, including when Maya
 is in front. The running status shows **连接期间 UE 在后台保持更新**. Disconnecting
 restores normal background throttling and viewport realtime behavior. Your

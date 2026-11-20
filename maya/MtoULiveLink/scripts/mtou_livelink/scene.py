@@ -5,12 +5,13 @@
 
 import math
 import re
+from time import perf_counter
 
 from . import mayaapi
 from .config import BIND_MATRIX_TOLERANCE, CURVE_VALUE_TOLERANCE
 from .diagnostics import DIAGNOSTICS, make_diagnostic
 from .mayaapi import cmds, om, oma
-from .protocol import make_frame_message
+from .protocol import validate_pose_values
 from .space import centimeters_per_unit, convert_transform
 
 
@@ -496,6 +497,17 @@ def discover_curve_plugs(bone_paths, visible_meshes=None, previous_curves=()):
     return list(by_name.values())
 
 
+def cache_curve_handles(curves):
+    """Resolve each blendShape attribute once for this captured subject."""
+    for curve in curves:
+        handles = []
+        for plug in curve["plugs"]:
+            selection = om.MSelectionList()
+            selection.add(plug)
+            handles.append(selection.getPlug(0))
+        curve["handles"] = tuple(handles)
+
+
 def capture_subject(root=None, bind_fallbacks=None, previous_curves=()):
     require_maya()
     root = root or selected_root()
@@ -514,6 +526,7 @@ def capture_subject(root=None, bind_fallbacks=None, previous_curves=()):
                    [bone["path"] for bone in bones], shapes, previous_curves),
                "unit_scale": centimeters_per_unit(
                    cmds.currentUnit(query=True, linear=True))}
+    cache_curve_handles(subject["curves"])
     bind_local, conflicts, fallbacks = _capture_bind_local_transforms(
         subject, bind_fallbacks or {})
     subject["bind_local_transforms"] = bind_local
@@ -522,36 +535,53 @@ def capture_subject(root=None, bind_fallbacks=None, previous_curves=()):
     return subject
 
 
-def sample_matrix(matrix, unit_scale):
+def sample_matrix(matrix, unit_scale, *, validate=True):
     transform = om.MTransformationMatrix(matrix)
     translation = transform.translation(om.MSpace.kTransform)
     rotation = transform.rotation(asQuaternion=True)
     scale = transform.scale(om.MSpace.kTransform)
-    return convert_transform(translation, rotation, scale, unit_scale)
+    return convert_transform(translation, rotation, scale, unit_scale, validate=validate)
+
+
+def read_world_matrices(subject):
+    return tuple(bone["dag_path"].inclusiveMatrix() for bone in subject["bones"])
+
+
+def convert_pose_matrices(subject, world_matrices):
+    transforms = []
+    parent_inverses = {}
+    unit_scale = subject["unit_scale"]
+    for index, bone in enumerate(subject["bones"]):
+        matrix = world_matrices[index]
+        parent = bone["parent"]
+        if parent >= 0:
+            inverse = parent_inverses.get(parent)
+            if inverse is None:
+                inverse = parent_inverses[parent] = world_matrices[parent].inverse()
+            matrix = matrix * inverse
+        transforms.append(sample_matrix(matrix, unit_scale, validate=False))
+    return transforms
+
+
+def read_curve_values(subject):
+    curves = []
+    for curve in subject["curves"]:
+        handles = curve["handles"]
+        reference = handles[0].asDouble()
+        if len(handles) > 1:
+            aliases = [plug.asDouble() for plug in handles[1:]]
+            if any(not math.isfinite(value) or abs(value - reference) > CURVE_VALUE_TOLERANCE
+                   for value in aliases):
+                details = ", ".join("{0}={1}".format(plug, value)
+                                    for plug, value in zip(curve["plugs"], [reference] + aliases))
+                raise ValueError("conflicting values for BlendShape alias {0}: {1}".format(
+                    curve["name"], details))
+        curves.append(reference)
+    return tuple(curves)
 
 
 def sample_pose(subject):
-    world_matrices = [bone["dag_path"].inclusiveMatrix() for bone in subject["bones"]]
-    transforms = []
-    for index, bone in enumerate(subject["bones"]):
-        matrix = world_matrices[index]
-        if bone["parent"] >= 0:
-            matrix = matrix * world_matrices[bone["parent"]].inverse()
-        transforms.append(sample_matrix(matrix, subject["unit_scale"]))
-    curves = []
-    for curve in subject["curves"]:
-        values = [float(cmds.getAttr(plug)) for plug in curve["plugs"]]
-        reference = values[0]
-        if any(abs(value - reference) > CURVE_VALUE_TOLERANCE
-               for value in values[1:]):
-            details = ", ".join("{0}={1}".format(plug, value)
-                                for plug, value in zip(curve["plugs"], values))
-            raise ValueError(
-                "conflicting values for BlendShape alias {0}: {1}".format(
-                    curve["name"], details))
-        curves.append(reference)
-    make_frame_message(transforms, curves)
-    return transforms, curves
+    return convert_pose_matrices(subject, read_world_matrices(subject)), read_curve_values(subject)
 
 
 class CharacterSceneError(RuntimeError):
@@ -645,11 +675,12 @@ class CharacterSnapshot(object):
 
 
 class CharacterFrame(object):
-    def __init__(self, revision, transforms, curves):
+    def __init__(self, revision, transforms, curves, evaluated=None):
         self._revision = int(revision)
-        self._transforms = tuple(tuple(value for value in transform)
-                                 for transform in transforms)
+        self._transforms = tuple(map(tuple, transforms))
         self._curves = tuple(curves)
+        validate_pose_values(self._transforms, self._curves)
+        self._evaluated = evaluated
 
     @property
     def revision(self):
@@ -900,17 +931,44 @@ class CharacterScene(object):
         self._rebuild_input_observers()
         self._queue_refresh()
 
-    def sample(self):
+    def sample(self, previous=None, timings=None):
+        """Return a full frame or reuse a prior frame with identical inputs.
+
+        Only realtime passes a prior frame. Cached Playback and linkage always
+        evaluate and convert the complete pose they requested.
+        """
+        started = perf_counter()
         self._ensure_available()
         self._check_evaluated_inputs()
         self._ensure_available()
-        revision = self._snapshot.revision
-        subject = self._subject
+        revision, subject = self._snapshot.revision, self._subject
         try:
-            transforms, curves = sample_pose(subject)
+            if timings is None:
+                transforms, curves = sample_pose(subject)
+                return CharacterFrame(revision, transforms, curves)
+            timings("inputs", perf_counter() - started)
+            started = perf_counter()
+            matrices = read_world_matrices(subject)
+            timings("matrices", perf_counter() - started)
+            started = perf_counter()
+            curves = read_curve_values(subject)
+            timings("curves", perf_counter() - started)
+            started = perf_counter()
+            evaluated = subject["unit_scale"], matrices
+            unchanged = (previous is not None and previous.revision == revision
+                         and previous.curves == curves and previous._evaluated == evaluated)
+            timings("compare", perf_counter() - started)
+            if unchanged:
+                return previous
+            started = perf_counter()
+            transforms = convert_pose_matrices(subject, matrices)
+            timings("transforms", perf_counter() - started)
+            started = perf_counter()
+            frame = CharacterFrame(revision, transforms, curves, evaluated=evaluated)
+            timings("validation", perf_counter() - started)
+            return frame
         except (RuntimeError, ValueError) as exc:
             raise self._wrap_error("SAMPLING_FAILED", exc)
-        return CharacterFrame(revision, transforms, curves)
 
     def close(self):
         if self._closed:
@@ -1113,6 +1171,7 @@ class CharacterScene(object):
                         visible_mesh_shapes([
                             path.fullPathName() for path in self._candidate_paths]),
                         subject["curves"])
+                    cache_curve_handles(subject["curves"])
                     grouped = duplicate_bone_paths(subject["bones"])
                     duplicates = [path for name in sorted(grouped) for path in grouped[name]]
                 candidate = CharacterSnapshot(

@@ -8,6 +8,7 @@
 #include "MtoULiveLinkPreview.h"
 
 #include "MtoULinkage.h"
+#include "MtoURealtimeMetrics.h"
 #include "MtoULinkageEditor.h"
 
 #include "DetailCategoryBuilder.h"
@@ -511,6 +512,46 @@ FText LinkageErrorText(const FMtoULinkageView& View)
         ? FText::FromString(View.Error)
         : FText::Format(LOCTEXT("LinkageErrorWithCode", "{0}（{1}）"),
             FText::FromString(View.Error), FText::FromString(View.ErrorCode));
+}
+
+FText RealtimeDiagnosticsText(const AMtoULiveLinkActor& Actor)
+{
+    const TOptional<FMtoURealtimeMetrics> Metrics = MtoUGetRealtimeMetrics(Actor);
+    if (!Metrics.IsSet())
+    {
+        return FText::GetEmpty();
+    }
+    TArray<FString> Lines;
+    FNumberFormattingOptions Milliseconds;
+    Milliseconds.MinimumFractionalDigits = 2;
+    Milliseconds.MaximumFractionalDigits = 3;
+    const auto AddTiming = [&](const FText& Label, const FMtoURealtimeTiming& Timing)
+    {
+        if (Timing.Count > 0)
+        {
+            Lines.Add(FText::Format(LOCTEXT("RealtimeStageMs", "{0}（最近一帧）：{1} ms"),
+                Label, FText::AsNumber(Timing.LatestSeconds * 1000.0, &Milliseconds)).ToString());
+        }
+    };
+    AddTiming(LOCTEXT("RealtimeParse", "解析与校验"), Metrics->Parse);
+    AddTiming(LOCTEXT("RealtimeRetarget", "重定向"), Metrics->Retarget);
+    AddTiming(LOCTEXT("RealtimeApply", "实际应用（从开始求值到所有显示组件完成骨骼更新）"), Metrics->Apply);
+    if (Metrics->Apply.Count > 0)
+    {
+        Lines.Add(FText::Format(LOCTEXT("RealtimeAppliedHz", "实际应用频率（最近 1 秒）：{0} Hz"),
+            FText::AsNumber(Metrics->AppliedHz)).ToString());
+    }
+    if (Metrics->EditorFrames > 1)
+    {
+        Lines.Add(FText::Format(LOCTEXT("RealtimeEditorFPS", "编辑器帧率（最近 1 秒）：{0} FPS"),
+            FText::AsNumber(Metrics->EditorFPS)).ToString());
+    }
+    if (Lines.IsEmpty())
+    {
+        return FText::GetEmpty();
+    }
+    Lines.Insert(LOCTEXT("RealtimePerformanceHeading", "实时预览性能").ToString(), 0);
+    return FText::FromString(FString::Join(Lines, TEXT("\n")));
 }
 
 FText LinkageDiagnosticsText(const FMtoULinkageView& View)
@@ -1618,11 +1659,13 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
         ];
     // The full report: the preview and connection diagnostics plus the linkage
     // read-back the groups above leave out.
-    auto FullDiagnostics = [Status]()
+    auto FullDiagnostics = [Status, Actor]()
     {
+        const AMtoULiveLinkActor* Target = Actor.Get();
         const FText Parts[] = {
             Status->Get().RawDiagnostics,
-            LinkageDiagnosticsText(MtoUGetLinkageView())};
+            LinkageDiagnosticsText(MtoUGetLinkageView()),
+            Target ? RealtimeDiagnosticsText(*Target) : FText::GetEmpty()};
         TArray<FString> Sections;
         for (const FText& Section : Parts)
         {
@@ -1634,7 +1677,7 @@ void FMtoULiveLinkActorDetails::CustomizeDetails(IDetailLayoutBuilder& DetailBui
         return FText::FromString(FString::Join(Sections, TEXT("\n\n")));
     };
     FDetailWidgetRow& DiagnosticsRow = Advanced.AddCustomRow(
-        LOCTEXT("DiagnosticsFilter", "错误详情 原始诊断 镜头联动"));
+        LOCTEXT("DiagnosticsFilter", "错误详情 原始诊断 镜头联动 实时预览性能"));
     DiagnosticsRow.WholeRowContent()
         [
             SNew(SVerticalBox)

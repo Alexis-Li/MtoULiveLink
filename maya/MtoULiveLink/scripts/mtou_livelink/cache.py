@@ -1336,7 +1336,7 @@ class CachedPlayback(object):
                     "captured revision {0}, expected {1}".format(
                         frame.revision, self._capture_revision))
             frame_message = make_frame_message(
-                list(frame.transforms), list(frame.curves))
+                list(frame.transforms), list(frame.curves), validated=True)
             frame_size = PlaybackCache.serialized_frame_size(frame_message)
             # Exact wire size of this frame's cache_frame message (real index
             # width included, no file newline) accumulated for the upload
@@ -1344,7 +1344,7 @@ class CachedPlayback(object):
             encoded_size = cache_frame_wire_size(
                 frame_number - self._capture_start,
                 frame_message["transforms"],
-                frame_message["curves"])
+                frame_message["curves"], validated=True)
             if (encoded_size < 0
                     or encoded_size > MAX_MESSAGE_BYTES
                     or self._capture_encoded_bytes + encoded_size

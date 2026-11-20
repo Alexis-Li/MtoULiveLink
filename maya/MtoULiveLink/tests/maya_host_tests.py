@@ -511,6 +511,57 @@ class MayaHostTests(unittest.TestCase):
         self.assertEqual(before.revision, frame.revision)
         self.assertEqual([], events)
 
+    def test_realtime_skips_static_pose_but_sends_curve_edits_and_mode_recovery(self):
+        root = cmds.joint(name="root")
+        self._skinned_outfit(root, "body", "Smile")
+        scene = mtou_scene.CharacterScene.capture(root)
+        self.addCleanup(scene.close)
+        session = mtou_session.StreamingSession(scene, 24.0, None)
+        session._revision = scene.snapshot().revision
+        session._phase = "ready"
+        session._worker = worker = mtou_session.SenderWorker(None)
+        worker._set_status("ready", "Connected")
+        self.addCleanup(session.stop)
+
+        def tick():
+            session._last_sample_time = None  # Exercise the next eligible sample.
+            session._on_time_changed()
+            packet, _, _ = worker._pop_stream_packet()
+            return packet
+
+        with mock.patch.object(mtou_scene, "validate_pose_values",
+                               wraps=mtou_scene.validate_pose_values) as validate, \
+                mock.patch.object(mtou_scene, "convert_pose_matrices",
+                                  wraps=mtou_scene.convert_pose_matrices) as convert:
+            self.assertIsNotNone(tick())
+            self.assertIsNone(tick())
+            self.assertEqual((1, 1), (convert.call_count, validate.call_count))
+            cmds.setAttr("bodyBS.weight[0]", 0.75)
+            with mock.patch.object(worker, "submit", return_value=False):
+                self.assertIsNone(tick())
+            self.assertIn(b'"curves":[0.75]', tick())
+            self.assertIsNone(tick())
+            cmds.setAttr(root + ".translateY", 1.0e-12)
+            self.assertIsNotNone(tick())
+            self.assertIsNone(tick())
+            metrics = session.realtime_metrics()
+            self.assertEqual(3, metrics["stages"]["encoding"]["count"])
+            self.assertEqual(4, metrics["stages"]["validation"]["count"])
+            self.assertEqual(3, metrics["unchanged_samples"])
+
+            for mode in (mtou_config.CACHED_MODE, mtou_config.LINKAGE_MODE):
+                lease = session.time_control.acquire(mode, self)
+                self.assertIsNone(tick())
+                self.assertEqual((0.75,), scene.sample().curves)
+                self.assertEqual((0.75,), scene.sample().curves)
+                self.assertTrue(lease.release())
+                self.assertIsNotNone(worker._pop_stream_packet()[0])
+                self.assertIsNone(tick())
+
+        self.assertEqual(5, session.realtime_metrics()["stages"]["encoding"]["count"])
+        session.stop()
+        self.assertIsNone(session.realtime_metrics())
+
     def test_shared_alias_keeps_its_reference_weight_after_deformer_rename(self):
         root = cmds.joint(name="root")
         for name, value in (("aOutfit", 0.25), ("bOutfit", 0.25000075),
@@ -588,7 +639,7 @@ class MayaHostTests(unittest.TestCase):
                 session._worker.status.return_value = ("ready", "", None, None)
                 session._phase = "ready"
                 controller._session = session
-                with mock.patch.object(mtou_scene, "sample_pose",
+                with mock.patch.object(mtou_scene, "convert_pose_matrices",
                                        side_effect=RuntimeError("bad evaluated pose")):
                     session._sample_and_submit(force=True)
                 mtou_mayaapi.drain_deferred()

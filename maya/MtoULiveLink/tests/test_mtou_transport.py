@@ -53,8 +53,10 @@ class ControlDeliveryTests(unittest.TestCase):
         worker.submit_control({"type": "leave_linkage", "target": "end"})
         # Latest mode never drains the ordered queue; the carryover does.
         self.assertEqual(0, worker.ordered_pending())
-        packet = worker._carryover.get_nowait()
+        packet, pending, realtime = worker._pop_stream_packet()
         self.assertIn(b"leave_linkage", packet)
+        self.assertFalse(realtime)
+        pending.task_done()
 
     def test_control_in_ordered_mode_keeps_its_place(self):
         worker = mtou_session.SenderWorker({"type": "init", "revision": 1})
@@ -62,6 +64,36 @@ class ControlDeliveryTests(unittest.TestCase):
         worker.submit_control({"type": "mode", "transition": "ready"})
         self.assertEqual(1, worker.ordered_pending())
         self.assertTrue(worker._carryover.empty())
+
+    def test_realtime_counters_distinguish_replacement_send_and_discard(self):
+        worker = mtou_session.SenderWorker(None)
+        worker._set_status("ready", "Connected")
+        worker.submit({"type": "frame", "serial": 1})
+        worker.submit({"type": "frame", "serial": 2})
+        worker.submit_control({"type": "remove_object"}, discard_latest=True)
+        worker.submit({"type": "frame", "serial": 3})
+        worker.begin_ordered()
+        worker.submit({"type": "frame", "serial": 4})
+
+        def send(sock, packet, *args, **kwargs):
+            if b'"serial":4' in packet:
+                worker._stop_event.set()
+                return False
+            return True
+
+        with mock.patch.object(worker, "_send_packet", side_effect=send), \
+                mock.patch.object(mtou_session.select, "select", return_value=([], [], [])), \
+                mock.patch.object(mtou_session.time, "monotonic", return_value=10.0):
+            worker._run_connected(None)
+        worker._stop_event.clear()  # Inspect the final ready counters.
+        with mock.patch.object(mtou_session.time, "monotonic", return_value=10.5):
+            metrics = worker.realtime_metrics()
+        self.assertEqual(1, metrics["replaced_frames"])
+        self.assertEqual(1, metrics["sent_frames"])
+        self.assertEqual(1, metrics["sent_hz"])
+        self.assertEqual(1, metrics["stages"]["send"]["count"])
+        with mock.patch.object(mtou_session.time, "monotonic", return_value=11.1):
+            self.assertEqual(0, worker.realtime_metrics()["sent_hz"])
 
 
 if __name__ == "__main__":

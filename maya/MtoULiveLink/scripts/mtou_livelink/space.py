@@ -38,12 +38,13 @@ def format_fps(fps):
     return "{0:g} fps".format(float(fps))
 
 
-def convert_transform(translation, quaternion, scale, unit_scale):
-    qx, qy, qz, qw = (float(value) for value in quaternion)
+def convert_transform(translation, quaternion, scale, unit_scale, *, validate=True):
+    qx, qy, qz, qw = map(float, quaternion)
     length = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
-    if not length or not finite(translation) or not finite(quaternion) or not finite(scale):
+    if not length or (validate and (not finite(translation) or not finite(quaternion)
+                                    or not finite(scale))):
         raise ValueError("transform values must be finite and quaternion length must be non-zero")
-    qx, qy, qz, qw = qx / length, qy / length, qz / length, qw / length
-    tx, ty, tz = (float(value) * unit_scale for value in translation)
-    sx, sy, sz = (float(value) for value in scale)
-    return [tx, tz, ty, -qx, -qz, -qy, qw, sx, sz, sy]
+    tx, ty, tz = map(float, translation)
+    sx, sy, sz = map(float, scale)
+    return [tx * unit_scale, tz * unit_scale, ty * unit_scale,
+            -qx / length, -qz / length, -qy / length, qw / length, sx, sz, sy]

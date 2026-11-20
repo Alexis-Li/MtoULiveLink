@@ -27,7 +27,7 @@ Maya 与 Unreal 分别安装，只通过线上协议协作，不读取另一端�
 | `MtoULiveLink.py` | 用户启动入口 |
 | `mtou_livelink/controller.py` | 面板、会话与场景状态的产品控制入口；拥有用户连接意图与一次输入变更的协调操作 |
 | `mtou_livelink/scene.py` | Character scene 与角色快照相关逻辑 |
-| `mtou_livelink/session.py` | 一条实际连接的 Streaming session、采样和资源；发送线程处理协议、协商及独立截止检查 |
+| `mtou_livelink/session.py` | 一条实际连接的 Streaming session、采样和资源；会话拥有实时去重和采样统计，发送线程处理协议、协商、独立截止检查并记录实际发送 |
 | `mtou_livelink/protocol.py` | Maya 端消息构造与验证；契约正文在 protocol/ |
 | `mtou_livelink/cache.py` | Cached Playback |
 | `mtou_livelink/linkage.py`、`timecontrol.py`、`camera.py` | 联动会话、时间控制和相机相关行为 |
@@ -42,7 +42,8 @@ Maya 与 Unreal 分别安装，只通过线上协议协作，不读取另一端�
 
 | 模块 / 文件 | 职责与排查方向 |
 | --- | --- |
-| `MtoULiveLink` / `MtoULiveLinkSource.*` | Live Link Source、连接与收流；拥有终止原因、双端协调、一次性重连许可及新连接主体准入 |
+| `MtoULiveLink` / `MtoULiveLinkSource.*` | Live Link Source、连接与收流；拥有终止原因、双端协调、一次性重连许可、新连接主体准入及实时预览性能统计 |
+| `MtoULiveLink` / `MtoUPreviewRemapAsset.*` | 实时预览的骨骼求值与完成回报；Source 聚合同一姿势的显示组件完成事件 |
 | `MtoULiveLink` / `MtoUConnectionNegotiator.*` | Character snapshot 与目标的连接协商 |
 | `MtoULiveLink` / `MtoULiveLinkProtocol.*` | UE 端线上消息与验证 |
 | `MtoULiveLink` / `MtoULiveLinkBinding.cpp`、`MtoULiveLinkActor.cpp` | Binding 配置及 Actor 的预览显示与生命周期 |

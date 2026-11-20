@@ -4,6 +4,7 @@
 """Protocol framing, message builders and reply validation."""
 
 import json
+from itertools import chain
 import math
 import struct
 
@@ -28,7 +29,12 @@ from .config import (
 
 
 def finite(values):
-    return all(math.isfinite(float(value)) for value in values)
+    return all(map(math.isfinite, map(float, values)))
+
+
+def validate_pose_values(transforms, curves, label="frame"):
+    if not finite(chain(chain.from_iterable(transforms), curves)):
+        raise ValueError("{0} values must be finite".format(label))
 
 
 def validate_set_objects(set_objects):
@@ -75,22 +81,22 @@ def make_init_message(bones, curves, revision, workflow=WORKFLOW_ANIMATION,
     }
 
 
-def make_frame_message(transforms, curves, objects=None):
+def make_frame_message(transforms, curves, objects=None, *, validated=False):
     """One realtime sample of the whole set at one Maya time.
 
     The primary keeps the v9 top-level fields; ``objects`` carries every other
     object of a two-object set, so both reach Unreal in one message.
     """
-    flat = [value for transform in transforms for value in transform] + list(curves)
-    if not finite(flat):
-        raise ValueError("frame values must be finite")
+    if not validated:
+        validate_pose_values(transforms, curves)
     message = {"type": "frame", "transforms": transforms, "curves": curves}
     if objects:
-        message["objects"] = _object_rows(objects, "frame", primary_allowed=False)
+        message["objects"] = _object_rows(objects, "frame", primary_allowed=False,
+                                         validated=validated)
     return message
 
 
-def _object_rows(objects, label, primary_allowed=True):
+def _object_rows(objects, label, primary_allowed=True, *, validated=False):
     rows = []
     seen = set()
     for entry in objects:
@@ -108,10 +114,8 @@ def _object_rows(objects, label, primary_allowed=True):
             raise ValueError(
                 "{0} object rows carry only the objects beside the primary".format(label))
         seen.add(object_id)
-        flat = [value for transform in entry["transforms"] for value in transform]
-        flat.extend(entry["curves"])
-        if not finite(flat):
-            raise ValueError("{0} values must be finite".format(label))
+        if not validated:
+            validate_pose_values(entry["transforms"], entry["curves"], label)
         rows.append({
             "object_id": object_id,
             "transforms": entry["transforms"],
@@ -364,11 +368,11 @@ def make_leave_linkage_message(session_id, mode_revision, target, detail=""):
 
 def make_group_message(session_id, set_revision, mode_revision, space_revision,
                        eval_id, transport_serial, sample_serial, objects,
-                       camera, time):
+                       camera, time, *, validated=False):
     """One complete pose sample answering one linkage target."""
     if not isinstance(objects, list) or not objects:
         raise ValueError("linkage group must carry at least one object")
-    rows = _object_rows(objects, "linkage group")
+    rows = _object_rows(objects, "linkage group", validated=validated)
     return {
         "type": "group",
         "session_id": _positive_int(session_id, "session id"),
@@ -418,13 +422,12 @@ def _positive_int(value, label, allow_zero=False):
     return number
 
 
-def make_cache_frame_message(index, transforms, curves):
+def make_cache_frame_message(index, transforms, curves, *, validated=False):
     index = int(index)
     if index < 0:
         raise ValueError("cached frame index must not be negative")
-    flat = [value for transform in transforms for value in transform] + list(curves)
-    if not finite(flat):
-        raise ValueError("frame values must be finite")
+    if not validated:
+        validate_pose_values(transforms, curves)
     return {"type": "cache_frame", "index": index,
             "transforms": transforms, "curves": curves}
 
@@ -439,7 +442,7 @@ def make_cache_clear_message(clear_id):
     return {"type": "cache_clear", "clear_id": clear_id}
 
 
-def cache_frame_wire_size(index, transforms, curves):
+def cache_frame_wire_size(index, transforms, curves, *, validated=False):
     """Exact transmitted UTF-8 JSON byte length of one cache_frame message.
 
     The declared upload size must match what Unreal meters at the framing
@@ -447,7 +450,7 @@ def cache_frame_wire_size(index, transforms, curves):
     cache-file newline.
     """
     payload = json.dumps(
-        make_cache_frame_message(index, transforms, curves),
+        make_cache_frame_message(index, transforms, curves, validated=validated),
         ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     return len(payload.encode("utf-8"))
 
