@@ -147,6 +147,11 @@ the stationary case should deliver its initial pose once.
   --scripts '<checkout-to-measure>/maya/MtoULiveLink/scripts' --bones 1399 --curves 108 --samples 120 --warmup 16
 ```
 
+The measured mean sampling and submission time fell from 13.735 to 7.562 ms
+for changing poses and from 14.997 to 0.652 ms for a stationary pose. See the
+[synthetic comparison](history/realtime-preview-performance.md#maya-synthetic-comparison)
+for p95 timings and loopback packet counts.
+
 For the cross-host gate, use the same C04 production character, scene and
 Binding as the [calibration](history/realtime-preview-performance.md), with
 one connected character in Animation and native Maya playback from frames

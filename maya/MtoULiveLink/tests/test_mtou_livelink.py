@@ -364,6 +364,57 @@ class PlaybackSchedulingTests(unittest.TestCase):
             self.assertEqual(1, worker.submit.call_count)
             session.stop()
 
+    def test_stop_and_cap_change_submit_only_a_new_final_pose(self):
+        for action in ("stop", "cap"):
+            for changed in (False, True):
+                with self.subTest(action=action, changed=changed):
+                    self._check_final_pose_submission(action, changed)
+
+    def _check_final_pose_submission(self, action, changed):
+        state = {"playing": True}
+        intervals = []
+        callbacks = []
+        worker = mock.Mock()
+        worker.status.return_value = ("ready", "Connected", {}, None)
+        worker.submit.return_value = True
+        fake_om, scene, playback_state = self._runtime(
+            state, intervals, callbacks, worker)
+        transforms = ((1, 2, 3),)
+
+        def sample(previous=None, timings=None):
+            if previous is not None and previous.transforms == transforms:
+                return previous
+            return mtou_scene.CharacterFrame(7, transforms, [])
+
+        scene.sample.side_effect = sample
+
+        with patch_global("om", fake_om), \
+             patch_global("SenderWorker", return_value=worker), \
+             mock.patch.object(time, "time", return_value=100.0):
+            session = mtou_session.StreamingSession.start(
+                scene, 30.0, playback_cap="20 fps", playback_state=playback_state)
+            try:
+                callbacks[0](0.0, 0.0, None)
+                self.assertEqual(1, worker.submit.call_count)
+                if changed:
+                    transforms = ((4, 5, 6),)
+                session._on_time_changed()
+                self.assertEqual(1, scene.sample.call_count)
+
+                if action == "stop":
+                    state["playing"] = False
+                    session._on_playback_condition_changed(False)
+                else:
+                    session.change_cap("15 fps")
+
+                self.assertEqual(2, scene.sample.call_count)
+                self.assertEqual(2 if changed else 1, worker.submit.call_count)
+                self.assertEqual(list(transforms),
+                                 worker.submit.call_args.args[0]["transforms"])
+            finally:
+                session.stop()
+
+
 class CharacterSceneTests(unittest.TestCase):
     def _capture(self, on_event=None, sample_side_effect=None):
         removed = []

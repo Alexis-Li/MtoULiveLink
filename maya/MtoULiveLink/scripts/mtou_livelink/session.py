@@ -1454,7 +1454,7 @@ class StreamingSession(object):
             return
         if not self._replace_timer(self._effective_rate()):
             return
-        self._sample_and_submit(force=True)
+        self._sample_and_submit(immediate=True)
 
     def stop(self):
         if self._outcome is None:
@@ -1519,7 +1519,7 @@ class StreamingSession(object):
         if not self._replace_timer(self._effective_rate()):
             return True
         if was_playing and not next_state:
-            self._sample_and_submit(force=True)
+            self._sample_and_submit(immediate=True)
         return True
 
     def poll_connection(self):
@@ -1564,7 +1564,8 @@ class StreamingSession(object):
             return True
         return False
 
-    def _sample_and_submit(self, force=False):
+    def _sample_and_submit(self, force=False, *, immediate=False):
+        """Sample immediately when requested. Force also republishes an unchanged pose."""
         if self._outcome is not None or self._worker is None:
             return
         state, detail, warning, diagnostic = self._worker.status()
@@ -1585,7 +1586,7 @@ class StreamingSession(object):
             return
         now = time.time()
         sample_interval = 1.0 / self._effective_rate()
-        if (not force and self._last_sample_time is not None
+        if (not (force or immediate) and self._last_sample_time is not None
                 and now >= self._last_sample_time
                 and now - self._last_sample_time < sample_interval):
             return
@@ -1604,8 +1605,8 @@ class StreamingSession(object):
                 self._sample_timings.add(stage, elapsed)
             self._sample_timings.add("sample_total", time.perf_counter() - started)
 
-    def _sample_frame_set(self, force, record):
-        previous, previous_secondary = (None, None) if force else self._last_frames
+    def _sample_frame_set(self, republish, record):
+        previous, previous_secondary = (None, None) if republish else self._last_frames
         try:
             frame = self._scene.sample(previous=previous, timings=record)
         except CharacterSceneError as error:
