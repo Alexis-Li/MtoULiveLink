@@ -515,12 +515,9 @@ private:
 
         bRealtimePerformance = FParse::Param(FCommandLine::Get(), TEXT("MtoURealtimePerformance"));
         Add(TEXT("load the production level and target"), 300.0, [this]() { return BuildScene(); });
-        if (HasSecondary() || bRealtimePerformance)
-        {
-            // A set connects only when every object has its target, so the
-            // artist pairs both actors before connecting from Maya.
-            Add(TEXT("pair the targets before Maya connects"), 30.0, [this]() { return PairTargets(); });
-        }
+        // The greeting pins the pairing generation. Pair every target before
+        // connecting so the later PairAndOpen step keeps that identity.
+        Add(TEXT("pair the targets before Maya connects"), 30.0, [this]() { return PairTargets(); });
         Add(TEXT("start Maya through the public entry"), 30.0, [this]() { return StartMaya(); });
         Add(TEXT("Maya connects and the character negotiates"), 600.0, [this]()
         {
