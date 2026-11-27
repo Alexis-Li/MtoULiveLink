@@ -478,23 +478,6 @@ private:
             && MayaSetHasSecondary());
     }
 
-    /** Pairs every placed actor whose pairing a session change cleared. */
-    void PairAgain()
-    {
-        FString Error;
-        if (Actor.IsValid() && MtoUGetLinkagePairedObject(*Actor) != Fixture->GetStringField(TEXT("object_id")))
-        {
-            Test->TestTrue(TEXT("the main Binding Actor pairs again"),
-                MtoUPairLinkageTarget(*Actor, Fixture->GetStringField(TEXT("object_id")), Error));
-        }
-        if (HasSecondary() && SecondaryActor.IsValid()
-            && MtoUGetLinkagePairedObject(*SecondaryActor) != SecondaryObjectId)
-        {
-            Test->TestTrue(TEXT("the second Binding Actor pairs again"),
-                MtoUPairLinkageTarget(*SecondaryActor, SecondaryObjectId, Error));
-        }
-    }
-
     bool Prepare()
     {
         Fixture = ReadJsonFile(FixturePath);
@@ -516,7 +499,7 @@ private:
         bRealtimePerformance = FParse::Param(FCommandLine::Get(), TEXT("MtoURealtimePerformance"));
         Add(TEXT("load the production level and target"), 300.0, [this]() { return BuildScene(); });
         // The greeting pins the pairing generation. Pair every target before
-        // connecting so the later PairAndOpen step keeps that identity.
+        // Maya opens the connection.
         Add(TEXT("pair the targets before Maya connects"), 30.0, [this]() { return PairTargets(); });
         Add(TEXT("start Maya through the public entry"), 30.0, [this]() { return StartMaya(); });
         Add(TEXT("Maya connects and the character negotiates"), 600.0, [this]()
@@ -548,7 +531,7 @@ private:
         {
             return AddRealtimePerformance();
         }
-        Add(TEXT("pair the target and open the sequence copy"), 60.0, [this]() { return PairAndOpen(); });
+        Add(TEXT("open the sequence copy"), 60.0, [this]() { return OpenSequenceCopy(); });
         Add(TEXT("Details renders while connected"), 60.0, [this]() { return RenderDetails(TEXT("connected")); });
         Add(TEXT("record the sequence-driven pose before any takeover"), 60.0, [this]()
         {
@@ -1039,12 +1022,8 @@ private:
         return true;
     }
 
-    bool PairAndOpen()
+    bool OpenSequenceCopy()
     {
-        if (!PairTargets())
-        {
-            return false;
-        }
         FMtoULinkageEditor::SetObservedLinkageActor(Actor.Get());
         for (const TSharedPtr<FJsonValue>& Frame : Fixture->GetArrayField(TEXT("oracle_frames")))
         {
@@ -3814,7 +3793,7 @@ private:
         });
     }
 
-    /** Maya connects the set again; both objects negotiate. */
+    /** Pair any replacement targets before Maya reconnects the set. */
     bool ReconnectSet(const FString& What)
     {
         if (ReconnectWaitStarted <= 0.0)
@@ -3849,9 +3828,17 @@ private:
             // The previous session must be gone before 连接 is clicked; once
             // the click is sent, a session that opens before its ack is read
             // is the new one, so only the ack is waited for.
-            if (OnceId < 0 && MayaSessionOpen())
+            if (OnceId < 0)
             {
-                return false;
+                if (MayaSessionOpen())
+                {
+                    return false;
+                }
+                if (!PairTargets())
+                {
+                    bAbort = true;
+                    return false;
+                }
             }
             if (SendOnce(TEXT("connect")))
             {
@@ -3873,7 +3860,6 @@ private:
         }
         bReconnectWaitLogged = false;
         ReconnectWaitStarted = 0.0;
-        PairAgain();
         Log(FString::Printf(TEXT("%s: the set connected again with %d objects (UE '%s' / '%s')"), *What,
             NegotiatedObjects(), *UEnum::GetValueAsString(Actor->GetConnectionState()),
             SecondaryActor.IsValid()
@@ -4532,7 +4518,6 @@ private:
             {
                 return false;
             }
-            PairAgain();
             RefusalPhase = 0;
             Log(Tag + TEXT("the second object joined again after reconnecting"));
             Test->TestEqual(*(Tag + TEXT("the set has both objects again")), NegotiatedObjects(), 2);
@@ -4668,11 +4653,6 @@ private:
                 if (!SpawnTarget(bSecondary))
                 {
                     return true;
-                }
-                if (HasSecondary())
-                {
-                    // A set reconnects only once every object has its target again.
-                    PairTargets();
                 }
                 Reconnected = false;
                 return false;
