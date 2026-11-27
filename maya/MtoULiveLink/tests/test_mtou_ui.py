@@ -887,6 +887,35 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(1, len(self.host.restored))
         self.assertFalse(self.controller._linkage.takeover_held())
 
+    def _reenter_before_exit_confirmation(self):
+        self.enter_linkage()
+        self._route(self._mode_state(1))
+        with self.bindings:
+            self.controller.leave_linkage("end")
+        self.enter_linkage()
+        self._route(self._mode_state(2, mode="realtime", detail="Preview ended"))
+        linkage = self.controller._linkage
+        self.assertTrue(linkage.is_active)
+        self.assertEqual(3, linkage.mode_revision())
+        self.assertEqual(1, len(self.host.restored))
+        return linkage
+
+    def test_late_exit_confirmation_keeps_a_new_entry_pending(self):
+        linkage = self._reenter_before_exit_confirmation()
+
+        self._route(self._mode_state(3, detail="Maya follows"))
+        self.assertTrue(linkage.is_active)
+        self.assertEqual("Maya follows", linkage.status().detail)
+        self.assertEqual(1, len(self.host.restored))
+
+    def test_entry_refusal_can_follow_an_exit_confirmation_at_the_same_revision(self):
+        linkage = self._reenter_before_exit_confirmation()
+        self._route(self._mode_state(2, mode="realtime", detail="PAIRING_REQUIRED"))
+        self.assertFalse(linkage.is_active)
+        self.assertEqual(2, linkage.mode_revision())
+        self.assertEqual(2, len(self.host.restored))
+        self.assertIn("PAIRING_REQUIRED", linkage.status().detail)
+
     def test_unconfirmed_entry_rolls_back_on_the_pump(self):
         self.enter_linkage()
         linkage = self.controller._linkage

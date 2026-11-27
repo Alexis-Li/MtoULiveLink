@@ -456,6 +456,7 @@ class LinkageSession(object):
                 self._entered = False
                 self._session.submit_linkage(make_leave_linkage_message(
                     self._session_id, revision, target, ""))
+                self._session.time_control.note_linkage_exit(revision)
                 self._emit(LinkageEvent(
                     "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
                     mode_revision=revision,
@@ -483,6 +484,7 @@ class LinkageSession(object):
                 else "已结束预览并恢复原状态")
         self._session.submit_linkage(make_leave_linkage_message(
             self._session_id, revision, target, "; ".join(residual)))
+        self._session.time_control.note_linkage_exit(revision)
         self._release_lease()
         self._emit(LinkageEvent(
             "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
@@ -621,6 +623,7 @@ class LinkageSession(object):
                         message.get("session_id"), self._session_id))
             active = self._mode == LINKAGE_MODE
             current = self._mode_revision
+            is_exit_echo = self._session.time_control.consume_linkage_exit(revision, mode)
             if mode == LINKAGE_MODE:
                 if active and revision == current:
                     self._awaiting_confirmation = False
@@ -635,13 +638,13 @@ class LinkageSession(object):
                 if revision > current:
                     # Unreal's own 返回实时, 结束预览 or lost takeover.
                     outcome = "left"
-                elif self._awaiting_confirmation:
+                elif self._awaiting_confirmation and not is_exit_echo:
                     # Unreal refused (older revision) or failed (same revision)
-                    # the transition this session has not seen confirmed.
+                    # this entry. An echo of a previous exit may use the same
+                    # older revision as a refusal but arrives first.
                     outcome = "left"
                 else:
-                    # A statement older than the confirmed linkage: it can no
-                    # longer describe the current mode.
+                    # A previous exit echo or a stale statement after confirmation.
                     outcome = "noted"
             else:
                 if revision > current:
