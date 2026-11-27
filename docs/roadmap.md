@@ -4,7 +4,8 @@
 （2026-10-30）。该版本的用法和协议见
 [发布版手册](https://github.com/Alexis-Li/MtoULiveLink/blob/v1.0.0/README_CN.md)及
 [协议 v11](https://github.com/Alexis-Li/MtoULiveLink/blob/v1.0.0/protocol/README.md)。
-开发分支的用法、未发布变更和验收证据分别见
+1.1 已验收并合入 `main`，跳过单独发布。1.2 从该里程碑继续，开发分支为
+`dev/maya-led-preview`。当前用法、未发布变更和验收证据分别见
 [手册](../README_CN.md)、[CHANGELOG](../CHANGELOG.md#unreleased)和[项目历史](history/README.md)。
 
 ## 开发分支现状
@@ -39,10 +40,12 @@
 - [预览工作流联合验收](history/preview-workflow-integration-acceptance.md)未覆盖
   交互视口逐帧观察和生产规模下生成预览后的失败内存测量。
 
-## 已计划方向
+## 1.2 开发计划
 
-1.1 尚未发布。后续产品方向与交付顺序以
-[#43](https://github.com/Alexis-Li/MtoULiveLink/issues/43) 为准，各项需求与验收见对应工单。
+首批工作是 Maya 面板重做（#47）与 UE 独立面板和首次设置检查（#48），两项可并行。
+之后依次进行镜头导入（#40）、世界坐标对齐（#41）、姿势传输重做（#49）、
+由 Maya 控制时间的镜头联动（#50）和交付收尾（#52）。直接驱动关卡角色的调研（#51）
+排在 1.2 之后。各项需求、依赖和验收入口见[产品方向总工单 #43](https://github.com/Alexis-Li/MtoULiveLink/issues/43)。
 
 - Maya 面板重做包含面板配置记忆（[#47](https://github.com/Alexis-Li/MtoULiveLink/issues/47)）。
 - UE 的 Level Sequence 镜头通过镜头包单向导入 Maya，独立于角色和连接。
