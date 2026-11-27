@@ -272,6 +272,7 @@ void FMtoULinkageSession::BeginSession(int32 InSessionId)
     Mode = TEXT("realtime");
     Control = TEXT("maya");
     ModeRevision = 0;
+    RejectedMayaEntryRevision = 0;
     bTransitioning = false;
     bWritersBorrowed = false;
     SessionEndRequestedFor = 0;
@@ -326,6 +327,7 @@ void FMtoULinkageSession::EndSession()
     Mode = TEXT("realtime");
     Control = TEXT("maya");
     ModeRevision = 0;
+    RejectedMayaEntryRevision = 0;
     bTransitioning = false;
     bWritersBorrowed = false;
     Issued.Reset();
@@ -574,13 +576,19 @@ void FMtoULinkageSession::NoteMode(const FMtoUModeMessage& Message, double NowSe
 
     if (Message.Transition == TEXT("failed"))
     {
+        if (Message.ModeRevision == RejectedMayaEntryRevision)
+        {
+            // Maya can expire an entry whose refusal shared a revision with
+            // older exit replies. This attempt never took over any writers.
+            return;
+        }
         // A transition that fails on either host keeps the previous mode and
         // restores what the transition borrowed, per resource and idempotent.
         // The rollback keys on the revision the message names rather than on
         // the transient flag: a Maya-initiated takeover deliberately clears
         // the flag while the session still holds linkage, and that is exactly
         // the case the previous code left half-entered.
-        if (Message.ModeRevision == ModeRevision || bTransitioning)
+        if (Message.ModeRevision == ModeRevision)
         {
             FailTransition(TEXT("MODE_CONFLICT"), Message.Detail);
         }
@@ -635,6 +643,7 @@ void FMtoULinkageSession::NoteMode(const FMtoUModeMessage& Message, double NowSe
         FString TakeCode;
         if (!BeginTakeover(Message.ModeRevision, TakeError, TakeCode, false))
         {
+            RejectedMayaEntryRevision = Message.ModeRevision;
             SendControl(FMtoUProtocol::EncodeModeState(
                 SessionId, ModeRevision, Mode, Control, TakeError));
             Error = TakeError;
@@ -1320,6 +1329,10 @@ bool FMtoULinkageSession::BeginTakeover(
     Mode = TEXT("linkage");
     Control = TEXT("unreal");
     ModeRevision = InModeRevision;
+    if (RejectedMayaEntryRevision == ModeRevision)
+    {
+        RejectedMayaEntryRevision = 0;
+    }
     Issued.Reset();
     Desired.Reset();
     bConverged = false;

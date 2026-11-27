@@ -15077,6 +15077,72 @@ bool FMtoULinkageModeTransitionTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoULinkageReentryAfterBothExitsTest,
+    "MtoULiveLink.Linkage.ReentryAfterBothExits",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoULinkageReentryAfterBothExitsTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUCorpusGroupHarness Harness;
+    if (!Harness.Begin(*this, TEXT("reentry"), 1, 1, {TEXT("character")}, TEXT("first")))
+    {
+        return false;
+    }
+    FMtoULinkageSession& Session = Harness.Session;
+    FString Error;
+    FString Code;
+    TestTrue(TEXT("Unreal ends linkage"), Session.RequestLeave(TEXT("end"), 2, Error, Code));
+    Session.NoteLeaveLinkage({1, 2, TEXT("end"), FString()}, 0.0);
+    TestEqual(TEXT("Unreal's exit and Maya's exit both produce a reply"), Harness.Replies.Num(), 2);
+    for (const TSharedPtr<FJsonObject>& Reply : Harness.Replies)
+    {
+        TestEqual(TEXT("both replies report realtime"), Reply->GetStringField(TEXT("mode")),
+            FString(TEXT("realtime")));
+        TestEqual(TEXT("both exits use the same revision"),
+            static_cast<int32>(Reply->GetNumberField(TEXT("mode_revision"))), 2);
+    }
+
+    bool bAllowEntry = false;
+    Session.EntryGuard = [&bAllowEntry](FString& OutCode, FString& OutError)
+    {
+        OutCode = TEXT("PAIRING_REQUIRED");
+        OutError = TEXT("Pair the target before entering linkage.");
+        return bAllowEntry;
+    };
+    const FMtoUModeMessage Enter{1, 3, TEXT("linkage"), TEXT("unreal"), TEXT("ready"), FString()};
+    const FMtoUModeMessage Cancel{1, 3, TEXT("realtime"), TEXT("maya"), TEXT("failed"), TEXT("expired")};
+    Session.NoteMode(Enter, 0.0);
+    TestEqual(TEXT("a refused entry also uses the earlier revision"),
+        Session.GetView().Identity.ModeRevision, 2);
+    const int32 RepliesBeforeCancel = Harness.Replies.Num();
+    Session.NoteMode(Cancel, 0.0);
+    TestEqual(TEXT("expiring a refused entry sends no spurious conflict"),
+        Harness.Replies.Num(), RepliesBeforeCancel);
+    TestEqual(TEXT("the actual refusal remains visible"), Session.GetView().ErrorCode,
+        FString(TEXT("PAIRING_REQUIRED")));
+    TestEqual(TEXT("the earlier exit already restored the original writers"), Harness.Hooks.RestoreCalls, 1);
+
+    bAllowEntry = true;
+    Session.NoteMode(Enter, 0.0);
+    TestTrue(TEXT("the rejected revision can be legitimately used later"), Session.GetView().bTakeoverHeld);
+    Session.NoteMode(Cancel, 0.0);
+    TestFalse(TEXT("a timeout now restores the accepted entry"), Session.GetView().bTakeoverHeld);
+    TestEqual(TEXT("the late entry's writers were restored"), Harness.Hooks.RestoreCalls, 2);
+
+    bAllowEntry = false;
+    Session.NoteMode({1, 4, TEXT("linkage"), TEXT("unreal"), TEXT("ready"), FString()}, 0.0);
+    Session.BeginSession(2);
+    bAllowEntry = true;
+    TestTrue(TEXT("a different revision may be awaiting Maya in the new session"),
+        Session.RequestEnter(5, Error, Code));
+    Session.NoteMode({2, 4, TEXT("realtime"), TEXT("maya"), TEXT("failed"), TEXT("expired")}, 0.0);
+    TestTrue(TEXT("an unknown timeout leaves the new transition waiting"), Session.GetView().bTransitioning);
+    TestEqual(TEXT("the unknown revision is still reported"), Session.GetView().ErrorCode,
+        FString(TEXT("MODE_CONFLICT")));
+    return true;
+}
+
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoULinkageCacheEntryGuardTest,
     "MtoULiveLink.Linkage.CacheEntryGuard",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

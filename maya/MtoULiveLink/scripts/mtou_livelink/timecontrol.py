@@ -100,7 +100,7 @@ class TimeControl(object):
         self._pending_clear = None
         self._cleared_through = 0
         self._revision = 0
-        self._pending_linkage_exits = set()
+        self._last_linkage_exit = 0
         self._terminated = False
 
     @property
@@ -122,19 +122,20 @@ class TimeControl(object):
             return self._revision
 
     def note_linkage_exit(self, revision):
-        """Remember a sent exit even if Maya enters a new linkage first."""
+        """Remember a sent exit across linkage instances on this connection."""
         with self._lock:
-            self._pending_linkage_exits.add(revision)
+            self._last_linkage_exit = max(self._last_linkage_exit, revision)
 
-    def consume_linkage_exit(self, revision, mode):
-        """Identify the exit echo before a later response can reuse its revision."""
+    def linkage_exit_unsettled(self):
+        """An older realtime statement may still answer Maya's last exit."""
         with self._lock:
-            is_exit_echo = mode == REALTIME_MODE and revision in self._pending_linkage_exits
-            # Unreal sends mode statements in order. A newer revision also
-            # supersedes any pending exit it did not confirm.
-            self._pending_linkage_exits = {
-                pending for pending in self._pending_linkage_exits if pending > revision}
-            return is_exit_echo
+            return self._last_linkage_exit > 0
+
+    def confirm_linkage_entry(self, revision):
+        """A confirmed later entry follows the exit and its replies in order."""
+        with self._lock:
+            if revision > self._last_linkage_exit:
+                self._last_linkage_exit = 0
 
     def cache_holds_connection(self):
         """True during Cached Playback and until Unreal confirmed its clear."""
@@ -238,7 +239,7 @@ class TimeControl(object):
             self._terminated = True
             self._lease = None
             self._pending_clear = None
-            self._pending_linkage_exits.clear()
+            self._last_linkage_exit = 0
 
     def _notify(self):
         listener = self._on_change

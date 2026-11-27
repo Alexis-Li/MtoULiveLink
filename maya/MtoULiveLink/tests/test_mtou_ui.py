@@ -893,28 +893,69 @@ class LinkagePanelTests(unittest.TestCase):
         with self.bindings:
             self.controller.leave_linkage("end")
         self.enter_linkage()
-        self._route(self._mode_state(2, mode="realtime", detail="Preview ended"))
         linkage = self.controller._linkage
         self.assertTrue(linkage.is_active)
         self.assertEqual(3, linkage.mode_revision())
         self.assertEqual(1, len(self.host.restored))
         return linkage
 
-    def test_late_exit_confirmation_keeps_a_new_entry_pending(self):
+    def test_both_hosts_exiting_keeps_the_new_entry_pending_for_its_confirmation(self):
         linkage = self._reenter_before_exit_confirmation()
+        self._route(self._mode_state(2, mode="realtime", detail="Unreal exited"))
+        self._route(self._mode_state(2, mode="realtime", detail="Maya's exit confirmed"))
+        linkage._clock = lambda: (linkage._entered_at
+                                  + mtou_config.LINKAGE_MODE_CONFIRMATION_SECONDS - 0.01)
+        self.pump()
+        self.assertTrue(linkage.is_active)
+        self.assertEqual(1, len(self.host.restored))
 
         self._route(self._mode_state(3, detail="Maya follows"))
+        linkage._clock = lambda: 1e9
+        self.pump()
         self.assertTrue(linkage.is_active)
         self.assertEqual("Maya follows", linkage.status().detail)
         self.assertEqual(1, len(self.host.restored))
 
-    def test_entry_refusal_can_follow_an_exit_confirmation_at_the_same_revision(self):
+    def test_older_entry_refusal_after_both_exits_restores_at_confirmation_deadline(self):
         linkage = self._reenter_before_exit_confirmation()
+        self._route(self._mode_state(2, mode="realtime", detail="Unreal exited"))
+        self._route(self._mode_state(2, mode="realtime", detail="Maya's exit confirmed"))
         self._route(self._mode_state(2, mode="realtime", detail="PAIRING_REQUIRED"))
+        self.assertTrue(linkage.is_active)
+        linkage._clock = lambda: 1e9
+        self.pump()
         self.assertFalse(linkage.is_active)
         self.assertEqual(2, linkage.mode_revision())
         self.assertEqual(2, len(self.host.restored))
         self.assertIn("PAIRING_REQUIRED", linkage.status().detail)
+        canceled = self.session.messages[-1]
+        self.assertEqual(("mode", 3, "failed"),
+                         (canceled["type"], canceled["mode_revision"], canceled["transition"]))
+
+    def test_late_confirmation_after_ambiguous_exit_deadline_does_not_reenter(self):
+        linkage = self._reenter_before_exit_confirmation()
+        self._route(self._mode_state(2, mode="realtime", detail="Preview ended"))
+        linkage._clock = lambda: 1e9
+        self.pump()
+
+        self._route(self._mode_state(3, detail="Maya follows"))
+        self._route(self._mode_state(3, mode="realtime", detail="Maya canceled"))
+        self.assertIs(linkage, self.controller._linkage)
+        self.assertFalse(linkage.is_active)
+        self.assertEqual(2, self.host.captured)
+        self.assertEqual(2, len(self.host.restored))
+        self.assertEqual(mtou_config.REALTIME_MODE, self.controller._mode)
+        self.show_error.assert_not_called()
+
+    def test_newer_exit_is_immediate_while_reentry_is_unconfirmed(self):
+        linkage = self._reenter_before_exit_confirmation()
+        self._route(self._mode_state(2, mode="realtime", detail="Preview ended"))
+
+        self._route(self._mode_state(4, mode="realtime", detail="Target disappeared"))
+        self.assertFalse(linkage.is_active)
+        self.assertEqual(4, linkage.mode_revision())
+        self.assertEqual(2, len(self.host.restored))
+        self.assertIn("Target disappeared", linkage.status().detail)
 
     def test_unconfirmed_entry_rolls_back_on_the_pump(self):
         self.enter_linkage()
