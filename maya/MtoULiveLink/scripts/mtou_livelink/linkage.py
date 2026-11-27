@@ -474,6 +474,7 @@ class LinkageSession(object):
             self._pending = None
             self._issued = None
             self._awaiting_confirmation = False
+            self._unconfirmed_realtime = None
         residual = self._restore(state)
         with self._lock:
             self._state = None
@@ -605,6 +606,8 @@ class LinkageSession(object):
         - ``"confirmed"``: Unreal confirmed the linkage this session holds;
         - ``"enter"``: Unreal started linkage; the caller prepares the session
           and calls :meth:`enter` with ``remote=True``;
+        - ``"superseded"``: Unreal started a newer linkage after an older
+          realtime reply; Maya restored its pending entry before following it;
         - ``"left"``: Unreal left linkage, refused or failed the transition and
           Maya restored itself (any residual is in the recovery records);
         - ``"noted"``: nothing to do (an echo, or a stale statement).
@@ -625,6 +628,7 @@ class LinkageSession(object):
                         message.get("session_id"), self._session_id))
             active = self._mode == LINKAGE_MODE
             current = self._mode_revision
+            previous_realtime = self._unconfirmed_realtime
             if mode == LINKAGE_MODE:
                 if active and revision == current:
                     self._awaiting_confirmation = False
@@ -632,6 +636,11 @@ class LinkageSession(object):
                     self._session.time_control.confirm_linkage_entry(revision)
                     self._detail = detail or self._detail
                     outcome = "confirmed"
+                elif (active and self._awaiting_confirmation and revision > current
+                      and previous_realtime is not None):
+                    # A newer editor entry in this ordered stream follows the
+                    # older realtime reply and supersedes our pending entry.
+                    outcome = "superseded"
                 elif (not active and revision > max(current, self._canceled_entry_revision)
                       and not self._closed):
                     outcome = "enter"
@@ -660,6 +669,10 @@ class LinkageSession(object):
                 outcome = "noted"
         if outcome == "left":
             return self._follow_remote_exit(revision, current, detail)
+        if outcome == "superseded":
+            previous_revision, previous_detail = previous_realtime
+            self._follow_remote_exit(previous_revision, current, previous_detail)
+            return outcome
         if outcome != "enter":
             self._emit(LinkageEvent(
                 "mode", mode=self.mode(), control=self._control,
@@ -680,6 +693,7 @@ class LinkageSession(object):
             self._pending = None
             self._issued = None
             self._awaiting_confirmation = False
+            self._unconfirmed_realtime = None
             self._mode = REALTIME_MODE
             self._control = CONTROL_MAYA
             self._mode_revision = revision

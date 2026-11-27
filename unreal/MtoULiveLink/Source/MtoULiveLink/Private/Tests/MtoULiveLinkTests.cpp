@@ -15132,10 +15132,21 @@ bool FMtoULinkageReentryAfterBothExitsTest::RunTest(const FString& Parameters)
 
     bAllowEntry = false;
     Session.NoteMode({1, 4, TEXT("linkage"), TEXT("unreal"), TEXT("ready"), FString()}, 0.0);
-    Session.BeginSession(2);
+    const FMtoUModeMessage CancelAnother{1, 4, TEXT("realtime"), TEXT("maya"), TEXT("failed"), TEXT("expired")};
+    Session.NoteMode(CancelAnother, 0.0);
     bAllowEntry = true;
-    TestTrue(TEXT("a different revision may be awaiting Maya in the new session"),
-        Session.RequestEnter(5, Error, Code));
+    TestTrue(TEXT("the editor can retry after Maya's refused entry"),
+        Session.RequestEnter(Session.GetView().Identity.ModeRevision + 1, Error, Code));
+    TestEqual(TEXT("the editor starts beyond the rejected revision"), Session.GetView().Identity.ModeRevision, 5);
+    Session.NoteMode(CancelAnother, 0.0);
+    TestTrue(TEXT("a delayed cancellation cannot undo the editor retry"), Session.GetView().bTransitioning);
+    Session.NoteMode({1, 5, TEXT("linkage"), TEXT("unreal"), TEXT("ready"), FString()}, 0.0);
+    TestFalse(TEXT("Maya can confirm the new editor entry"), Session.GetView().bTransitioning);
+    TestTrue(TEXT("the confirmed editor retry keeps its takeover"), Session.GetView().bTakeoverHeld);
+
+    Session.BeginSession(2);
+    TestTrue(TEXT("another editor entry can start in the new session"), Session.RequestEnter(3, Error, Code));
+    TestEqual(TEXT("the new session has no earlier rejected revision"), Session.GetView().Identity.ModeRevision, 3);
     Session.NoteMode({2, 4, TEXT("realtime"), TEXT("maya"), TEXT("failed"), TEXT("expired")}, 0.0);
     TestTrue(TEXT("an unknown timeout leaves the new transition waiting"), Session.GetView().bTransitioning);
     TestEqual(TEXT("the unknown revision is still reported"), Session.GetView().ErrorCode,

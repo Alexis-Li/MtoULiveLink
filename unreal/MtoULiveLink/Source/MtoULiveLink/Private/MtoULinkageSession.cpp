@@ -1031,7 +1031,15 @@ bool FMtoULinkageSession::RequestEnter(int32 InModeRevision, FString& OutError, 
         return Refuse(TEXT("MODE_CONFLICT"), FString::Printf(
             TEXT("Mode revision %d is not newer than the current %d."), InModeRevision, ModeRevision));
     }
-    return BeginTakeover(InModeRevision, OutError, OutErrorCode, true);
+    // An editor entry must be distinct from the Maya entry we refused. Maya
+    // may still be waiting for it or may have canceled it at its deadline.
+    const int64 EntryRevision = FMath::Max<int64>(InModeRevision,
+        static_cast<int64>(RejectedMayaEntryRevision) + 1);
+    if (EntryRevision > MAX_int32)
+    {
+        return Refuse(TEXT("MODE_CONFLICT"), TEXT("Mode revisions are exhausted; reconnect before entering linkage."));
+    }
+    return BeginTakeover(static_cast<int32>(EntryRevision), OutError, OutErrorCode, true);
 }
 
 bool FMtoULinkageSession::RequestLeave(

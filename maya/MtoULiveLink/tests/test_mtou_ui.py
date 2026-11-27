@@ -932,6 +932,34 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(("mode", 3, "failed"),
                          (canceled["type"], canceled["mode_revision"], canceled["transition"]))
 
+        self._route(self._mode_state(4, detail="Unreal starts a new linkage"))
+        self._route(self._mode_state(4, detail="Maya follows"))
+        retry = self.controller._linkage
+        self.assertTrue(retry.is_active)
+        self.assertEqual(4, retry.mode_revision())
+        self.assertEqual("Maya follows", retry.status().detail)
+
+    def test_unreal_can_retry_a_refused_reentry_before_the_deadline(self):
+        refused = self._reenter_before_exit_confirmation()
+        self._route(self._mode_state(2, mode="realtime", detail="Preview ended"))
+        self._route(self._mode_state(2, mode="realtime", detail="PAIRING_REQUIRED"))
+
+        self._route(self._mode_state(4, detail="Unreal starts a new linkage"))
+        retry = self.controller._linkage
+        self.assertIsNot(refused, retry)
+        self.assertFalse(refused.is_active)
+        self.assertEqual(2, len(self.host.restored))
+        self.assertTrue(retry.is_active)
+        self.assertEqual(4, retry.mode_revision())
+        ready = self.session.messages[-1]
+        self.assertEqual(("mode", 4, "ready"),
+                         (ready["type"], ready["mode_revision"], ready["transition"]))
+        self._route(self._mode_state(4, detail="Maya follows"))
+        retry._clock = lambda: 1e9
+        self.pump()
+        self.assertTrue(retry.is_active)
+        self.assertEqual(2, len(self.host.restored))
+
     def test_late_confirmation_after_ambiguous_exit_deadline_does_not_reenter(self):
         linkage = self._reenter_before_exit_confirmation()
         self._route(self._mode_state(2, mode="realtime", detail="Preview ended"))

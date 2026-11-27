@@ -1777,7 +1777,9 @@ class Controller(object):
         except LinkageError as error:
             self._report_linkage_refusal(error)
             return
-        if outcome == "enter":
+        if outcome == "superseded":
+            self._finish_linkage_exit(linkage, "Unreal 发起了新的镜头联动")
+        if outcome in ("enter", "superseded"):
             self._start_linkage(remote_revision=revision)
             return
         self._note_linkage_revision(linkage.mode_revision())
