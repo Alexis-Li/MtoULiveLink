@@ -1762,6 +1762,8 @@ class Controller(object):
             return
         if exact_int(reply.get("session_id")) != self._session_id_of(session):
             return
+        if not self._session_ready():
+            return
         revision = exact_int(reply.get("mode_revision"))
         if revision is None:
             return
@@ -1775,7 +1777,16 @@ class Controller(object):
         try:
             outcome = linkage.note_mode_state(reply)
         except LinkageError as error:
-            self._report_linkage_refusal(error)
+            if error.code != "RECOVERY_REFUSED":
+                self._report_linkage_refusal(error)
+                return
+            diagnostic = make_diagnostic(error.code, details=error.details)
+            refusal = make_mode_message(
+                reply["session_id"], revision, REALTIME_MODE, CONTROL_MAYA, "failed",
+                "{0}: {1}".format(error.code, error.details))
+            self._stop_linkage_pump()
+            session.fail_after_mode_refusal(diagnostic, refusal)
+            self._update_linkage_status()
             return
         if outcome == "superseded":
             self._finish_linkage_exit(linkage, "Unreal 发起了新的镜头联动")

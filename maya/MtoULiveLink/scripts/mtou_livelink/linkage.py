@@ -607,7 +607,8 @@ class LinkageSession(object):
         - ``"enter"``: Unreal started linkage; the caller prepares the session
           and calls :meth:`enter` with ``remote=True``;
         - ``"superseded"``: Unreal started a newer linkage after an older
-          realtime reply; Maya restored its pending entry before following it;
+          realtime reply; Maya restored its pending entry before following
+          it. A failed restore raises ``RECOVERY_REFUSED`` for the new entry;
         - ``"left"``: Unreal left linkage, refused or failed the transition and
           Maya restored itself (any residual is in the recovery records);
         - ``"noted"``: nothing to do (an echo, or a stale statement).
@@ -668,10 +669,14 @@ class LinkageSession(object):
                 self._detail = detail or self._detail
                 outcome = "noted"
         if outcome == "left":
-            return self._follow_remote_exit(revision, current, detail)
+            self._follow_remote_exit(revision, current, detail)
+            return outcome
         if outcome == "superseded":
             previous_revision, previous_detail = previous_realtime
-            self._follow_remote_exit(previous_revision, current, previous_detail)
+            residual = self._follow_remote_exit(
+                previous_revision, current, previous_detail, hold_on_failure=True)
+            if residual:
+                raise LinkageError("RECOVERY_REFUSED", details="; ".join(residual))
             return outcome
         if outcome != "enter":
             self._emit(LinkageEvent(
@@ -679,7 +684,7 @@ class LinkageSession(object):
                 mode_revision=self.mode_revision(), detail=self._detail))
         return outcome
 
-    def _follow_remote_exit(self, revision, current, detail):
+    def _follow_remote_exit(self, revision, current, detail, hold_on_failure=False):
         """Unreal no longer holds linkage: restore Maya and stay paused.
 
         A newer revision is Unreal's own 返回实时 or 结束预览; the same revision
@@ -700,9 +705,14 @@ class LinkageSession(object):
             if revision <= current:
                 self._entered = False
         residual = self._restore(state)
-        self._release_lease()
+        # A replacement entry cannot reuse an unrestored Maya view. Keep
+        # sampling paused until the controller refuses it and closes.
+        if not residual or not hold_on_failure:
+            self._release_lease()
         with self._lock:
-            if revision > current:
+            if residual:
+                summary = "Maya 无法完整恢复联动前的状态"
+            elif revision > current:
                 summary = "Unreal 已结束镜头联动，Maya 已恢复并保持暂停"
             else:
                 summary = "Unreal 未接管镜头联动，Maya 已恢复原状态"
@@ -714,7 +724,7 @@ class LinkageSession(object):
             mode_revision=revision, detail=self._detail,
             diagnostic=(self._diagnostic("RECOVERY_REFUSED", "; ".join(residual))
                         if residual else None)))
-        return "left"
+        return residual
 
     def confirmation_overdue(self):
         """True when Unreal never confirmed the linkage Maya started."""

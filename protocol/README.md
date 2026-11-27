@@ -378,7 +378,9 @@ refuses an illegal `mode_state` with `INVALID_MESSAGE` and ends the connection.
   can also be a reply to the exit or Unreal's own exit. Maya holds that state
   until Unreal confirms the pending entry, starts a newer one or the existing
   5 s deadline expires. A newer entry supersedes the pending request, and
-  Maya restores the previous state before following the new entry.
+  Maya restores the previous state before following the new entry. If that
+  restore fails, Maya reports the residual, refuses the newer revision as
+  above and ends the session.
   If the deadline expires, Maya restores itself and sends `mode` realtime N
   `failed`, so a late takeover at N is restored as well. Unreal can disregard
   that failure when it already refused entry N.

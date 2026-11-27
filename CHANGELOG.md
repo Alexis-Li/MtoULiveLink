@@ -40,7 +40,8 @@ repository's issues.
 
 ### Fixed
 
-- Entering **镜头联动** again right after **结束预览** keeps Maya and Unreal in sync. (#45)
+- Entering **镜头联动** again right after **结束预览** keeps Maya and Unreal in sync.
+  If Maya cannot restore the previous state, it disconnects and lists the remaining items in 诊断详情. (#45)
 - Visible Template and Reference meshes now contribute BlendShapes; hidden
   meshes are excluded, including LOD and visibility overrides. (#46)
 - Unreal keeps updating while connected with Maya in front, and restores normal

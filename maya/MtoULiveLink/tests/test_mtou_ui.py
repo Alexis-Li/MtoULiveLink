@@ -1,15 +1,16 @@
 """Panel, controller and window tests for the linkage workflow.
 
-Everything runs against fake ``cmds``/``om`` bindings and a fake streaming
-session, so no timer, socket or Unreal peer is involved: the pump is driven by
-invoking the recorded timer callback and deferred panel work is flushed by
-hand. The controller's linkage state comes from the real ``LinkageSession``
-state machine over a fake host, which is what the panel wires in production.
+The pump is driven by invoking the recorded Maya timer callback and deferred
+panel work is flushed by hand. The controller uses the real ``LinkageSession``
+state machine over a fake Maya host. Most tests fake the streaming session;
+the recovery refusal also checks the real sender over a local socket.
 """
 
+import concurrent.futures
 import contextlib
 import itertools
 import pathlib
+import socket
 import sys
 import types
 import unittest
@@ -959,6 +960,114 @@ class LinkagePanelTests(unittest.TestCase):
         self.pump()
         self.assertTrue(retry.is_active)
         self.assertEqual(2, len(self.host.restored))
+
+    def test_unreal_retry_is_refused_and_disconnected_when_maya_cannot_restore(self):
+        sender, peer = socket.socketpair()
+        self.addCleanup(sender.close)
+        self.addCleanup(peer.close)
+        sender.setblocking(False)
+        peer.settimeout(2.0)
+        scene = self.controller._scene
+        scene.sample = mock.Mock(return_value=types.SimpleNamespace(
+            revision=None, transforms=((0.0,) * 10,), curves=(0.0,)))
+        session = mtou_session.StreamingSession(
+            scene, 24.0, lambda event: self.controller._on_streaming_session_event(
+                session, event),
+            on_statement=lambda reply: self.controller._on_session_statement(
+                {"session": session}, reply))
+        worker = mtou_session.SenderWorker(None, on_reply=session._route_reply)
+        worker._socket = sender
+        worker._hello_reply = {"session_id": 7}
+        worker._set_status("ready", "Connected")
+        session._worker = worker
+        session._worker_started = True
+        session._phase = "ready"
+        self.controller._session = session
+
+        received_replies = []
+        receive = worker._receive
+
+        def record_reply(sock, deadline, awaiting):
+            reply = receive(sock, deadline, awaiting)
+            received_replies.append((reply["mode"], reply["mode_revision"]))
+            return reply
+
+        def cleanup():
+            worker.stop()
+            worker.join(1.0)
+
+        self.addCleanup(cleanup)
+        with mock.patch.object(worker, "_connect", return_value=sender), \
+                mock.patch.object(worker, "_send_initial", return_value=True), \
+                mock.patch.object(worker, "_negotiate_set", return_value=True), \
+                mock.patch.object(worker, "_receive", side_effect=record_reply):
+            worker.start()
+            self.enter_linkage()
+            self.assertEqual(1, mtou_protocol.recv_message(peer)["mode_revision"])
+            with self.bindings:
+                session._route_reply(self._mode_state(1))
+                self.flush()
+                self.controller.leave_linkage("end")
+            self.assertEqual(2, mtou_protocol.recv_message(peer)["mode_revision"])
+            self.enter_linkage()
+            while True:
+                packet = mtou_protocol.recv_message(peer)
+                if packet["type"] == "mode":
+                    self.assertEqual(3, packet["mode_revision"])
+                    break
+            old = self.controller._linkage
+            old._clock = lambda: old._entered_at + 0.01
+            self.host.restore_residual = ["camera: persp is locked",
+                                          "view: modelPanel4 gate could not be restored"]
+
+            def receive_refusal():
+                while True:
+                    message = mtou_protocol.recv_message(peer)
+                    if message["type"] == "mode":
+                        break
+                if message.get("transition") == "failed":
+                    peer.sendall(mtou_protocol.encode_message(
+                        self._mode_state(2, mode="realtime", detail="Old exit echo")))
+                    peer.sendall(mtou_protocol.encode_message(
+                        self._mode_state(4, mode="realtime", detail="Writers restored")))
+                    self.assertEqual(b"", peer.recv(1))
+                return message
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                refusal = executor.submit(receive_refusal)
+                with self.bindings:
+                    session._route_reply(self._mode_state(
+                        2, mode="realtime", detail="PAIRING_REQUIRED"))
+                    session._route_reply(self._mode_state(
+                        4, detail="Unreal starts a new linkage"))
+                    session._route_reply(self._mode_state(
+                        5, detail="Another statement from the closing connection"))
+                    self.flush()
+                message = refusal.result(timeout=3.0)
+
+            self.assertEqual(("mode", 7, 4, "realtime", "maya", "failed"),
+                             (message["type"], message["session_id"], message["mode_revision"],
+                              message["mode"], message["control"], message["transition"]))
+            self.assertEqual([("realtime", 2), ("realtime", 4)], received_replies)
+
+        self.assertIsNone(self.controller._session)
+        self.assertIsNone(self.controller._linkage)
+        self.assertIsNone(self.controller._linkage_pump)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(2, self.host.captured)
+        self.assertEqual(2, len(self.host.restored))
+        self.assertEqual(mtou_config.REALTIME_MODE, session.time_control.state)
+        self.assertEqual(1, scene.sample.call_count)
+        self.assertEqual(old.recovery_records(),
+                         self.controller.linkage_status()["recovery_records"])
+        diagnostic = self.controller._last_diagnostic
+        self.assertEqual("RECOVERY_REFUSED", diagnostic["code"])
+        self.assertIn("诊断详情", diagnostic["solution"])
+        for residual in self.host.restore_residual:
+            self.assertIn(residual, diagnostic["details"])
+            self.assertIn(residual, self.controller._linkage_diagnostic_text())
+            self.assertIn(residual, message["detail"])
+        self.show_error.assert_called_once_with(diagnostic)
 
     def test_late_confirmation_after_ambiguous_exit_deadline_does_not_reenter(self):
         linkage = self._reenter_before_exit_confirmation()

@@ -269,6 +269,7 @@ class SenderWorker(threading.Thread):
         self._carryover = queue.Queue()
         self._ordered_mode = False
         self._stop_event = threading.Event()
+        self._final_mode_refusal = None
         self._lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._socket = None
@@ -435,6 +436,16 @@ class SenderWorker(threading.Thread):
             self._send_cancel_locked(diagnostic)
         self.stop()
 
+    def stop_after_mode_refusal(self, message):
+        """Let the sender deliver the refusal and read its echo before closing."""
+        deadline = time.monotonic() + 1.0
+        with self._lock:
+            self._final_mode_refusal = message, deadline
+        try:
+            self.join(max(0.0, deadline - time.monotonic()))
+        finally:
+            self.stop()
+
     def restart_status(self):
         with self._lock:
             if self._restart_phase == "permitted" and self._socket is not None:
@@ -559,6 +570,8 @@ class SenderWorker(threading.Thread):
                 if self._stop_event.is_set():
                     raise _RestartInterrupted()
                 if not started and ((stream or initial) and self._restart_phase):
+                    return False
+                if not started and stream and self._final_mode_refusal is not None:
                     return False
                 if initial is not None and not started and (
                         not self._init_available or initial is not self._init_messages):
@@ -756,8 +769,12 @@ class SenderWorker(threading.Thread):
         while not self._stop_event.is_set():
             remaining = self._expire_restart("waiting for Maya to use the restart permit")
             with self._lock:
+                final_refusal = self._final_mode_refusal
                 phase = self._restart_phase
                 message = self._restart_packets.pop(0) if self._restart_packets else None
+            if final_refusal is not None:
+                self._send_final_mode_refusal(sock, *final_refusal)
+                return
             if phase == "permitted":
                 # Release the old TCP now, and keep the window enforced while
                 # Maya's main thread may be blocked before starting the new TCP.
@@ -808,6 +825,18 @@ class SenderWorker(threading.Thread):
                 continue
             if self._on_reply is None or not self._on_reply(reply):
                 raise ValueError("unexpected runtime reply: " + reply["type"])
+
+    def _send_final_mode_refusal(self, sock, message, deadline):
+        self._send_packet(sock, encode_message(message), deadline,
+                          "sending the final mode refusal")
+        # Unreal processes mode statements on its game thread. Closing on TCP
+        # write alone can discard the parsed refusal before it reaches that thread.
+        while True:
+            reply = self._receive(sock, deadline, "waiting for Unreal to confirm the mode refusal")
+            if (reply["type"] == "mode_state" and reply["mode"] == REALTIME_MODE
+                    and reply["session_id"] == message["session_id"]
+                    and reply["mode_revision"] == message["mode_revision"]):
+                return
 
     def _fail(self, diagnostic):
         with self._lock:
@@ -1022,6 +1051,7 @@ class StreamingSession(object):
         self._phase = "starting"
         self._outcome = None
         self._terminal_event = None
+        self._final_mode_refusal = None
         self._cleanup_pending = False
         self._cleaned = False
         self._cleanup_error = None
@@ -1129,6 +1159,10 @@ class StreamingSession(object):
             self._worker.end_ordered(discard_pending=True)
 
     def fence_for_disconnect(self, diagnostic):
+        if self._final_mode_refusal is not None:
+            # The session is already fenced. Its terminal cleanup owns the
+            # socket until the refusal is confirmed or the delivery window ends.
+            return
         if self._worker is not None:
             self._worker.stop_with_reason(diagnostic)
         self.release_restart_leases()
@@ -1382,6 +1416,10 @@ class StreamingSession(object):
                 "镜头联动需要已连接的 Unreal 会话。")
         self._worker.submit_control(message)
         return True
+
+    def fail_after_mode_refusal(self, diagnostic, message):
+        """Fence this session and retain the recovery diagnostic through closing."""
+        self._request_failure(diagnostic, recapture_scene=False, final_mode_refusal=message)
 
     def ordered_pending(self):
         if self._worker is None:
@@ -1669,11 +1707,13 @@ class StreamingSession(object):
                 list(frame.transforms), list(frame.curves), rows, validated=True)):
             self._last_frames = frame, secondary
 
-    def _request_failure(self, diagnostic, recapture_scene, automatic=False):
+    def _request_failure(self, diagnostic, recapture_scene, automatic=False,
+                         final_mode_refusal=None):
         if self._outcome is not None:
             return
         self._outcome = "failed"
         self._phase = "terminal"
+        self._final_mode_refusal = final_mode_refusal
         self._terminal_event = StreamingSessionEvent(
             "failed", diagnostic=diagnostic, recapture_scene=recapture_scene,
             automatic=automatic)
@@ -1708,7 +1748,10 @@ class StreamingSession(object):
         self._last_frames = (None, None)
         if worker is not None:
             try:
-                worker.stop()
+                if self._worker_started and self._final_mode_refusal is not None:
+                    worker.stop_after_mode_refusal(self._final_mode_refusal)
+                else:
+                    worker.stop()
             except Exception as exc:
                 self._record_cleanup_error(exc)
             if self._worker_started:
