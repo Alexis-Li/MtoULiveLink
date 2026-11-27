@@ -5896,6 +5896,14 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         Self->TestTrue(TEXT("ready response is received"),
             FromUtf8(Payload).Contains(TEXT("\"type\":\"ready\"")));
         Self->TestTrue(TEXT("connected stream requests background updates"), HasDemand());
+        Self->TestTrue(TEXT("ready establishes the connection without a pose packet"), PollUntil([&]()
+        {
+            return Source->GetSourceStatus().ToString() == TEXT("Connected to Maya");
+        }, 1.0));
+        const TOptional<FMtoURealtimeMetrics> BeforePose = Source->GetRealtimeMetrics(*State->Actor);
+        Self->TestTrue(TEXT("negotiation supplies no preview timing samples"),
+            BeforePose.IsSet() && BeforePose->Parse.Count == 0
+                && BeforePose->Retarget.Count == 0 && BeforePose->Apply.Count == 0);
         Self->TestTrue(TEXT("editor skeletal mesh component tick is enabled"),
             DisplayComponent && DisplayComponent->IsComponentTickEnabled());
         Self->TestTrue(TEXT("editor skeletal mesh component is registered"),
@@ -5922,6 +5930,8 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         FPlatformProcess::Sleep(0.02f);
         Source->Update();
         Self->TestTrue(TEXT("cached entry retains background updates"), HasDemand());
+        Self->TestFalse(TEXT("cache ownership hides real-time performance"),
+            Source->GetRealtimeMetrics(*State->Actor).IsSet());
         const TArray<uint8> ClearBytes = Packet(TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}"));
         Self->TestTrue(TEXT("cache clear is sent"),
             SendBytes(*Client, ClearBytes.GetData(), ClearBytes.Num()));
@@ -6112,6 +6122,34 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             return true;
         }, 5.0f));
 
+    ADD_LATENT_AUTOMATION_COMMAND(FUntilCommand(
+        [Self, State]() -> bool
+        {
+            if (State->bSetupFailed || !State->Source || !State->Actor)
+            {
+                return true;
+            }
+            const TOptional<FMtoURealtimeMetrics> Metrics = State->Source->GetRealtimeMetrics(*State->Actor);
+            if (!Metrics.IsSet() || Metrics->AppliedHz != 0)
+            {
+                return false;
+            }
+            Self->TestEqual(TEXT("three permitted real-time packets are parsed"), Metrics->Parse.Count, uint64(3));
+            Self->TestEqual(TEXT("three real-time poses are retargeted"), Metrics->Retarget.Count, uint64(3));
+            Self->TestEqual(TEXT("each new displayed pose counts once despite repeat editor ticks"),
+                Metrics->Apply.Count, uint64(3));
+            Self->TestTrue(TEXT("actual application timing is sampled"), Metrics->Apply.LatestSeconds > 0.0);
+            Self->TestTrue(TEXT("editor frames are measured separately while idle"), Metrics->EditorFPS > 0);
+            Self->TestEqual(TEXT("idle preview stays connected without more packets"),
+                State->Source->GetSourceStatus().ToString(), FString(TEXT("Connected to Maya")));
+            return true;
+        },
+        [Self]() -> bool
+        {
+            Self->AddError(TEXT("Actual application rate did not decay during stationary preview."));
+            return true;
+        }, 5.0f));
+
     // Cleanup always runs: active shutdown releases connection demand,
     // the original base preference is restored, and the editor-world actor
     // is destroyed so later tests never see a second binding actor.
@@ -6135,6 +6173,11 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         }
         Self->TestTrue(TEXT("shutdown releases background update demand"),
             !State->Source.IsValid() || !State->Source->GetTimeControlView().bConnected);
+        if (State->Source && State->Actor)
+        {
+            Self->TestFalse(TEXT("disconnect clears the actor's real-time performance snapshot"),
+                State->Source->GetRealtimeMetrics(*State->Actor).IsSet());
+        }
         State->Source.Reset();
         if (GEditor)
         {
@@ -15031,6 +15074,83 @@ bool FMtoULinkageModeTransitionTest::RunTest(const FString& Parameters)
 
     // ---- every gate a staged group is refused at -------------------------
     CheckGroupRefusalGates(*this);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoULinkageReentryAfterBothExitsTest,
+    "MtoULiveLink.Linkage.ReentryAfterBothExits",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoULinkageReentryAfterBothExitsTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUCorpusGroupHarness Harness;
+    if (!Harness.Begin(*this, TEXT("reentry"), 1, 1, {TEXT("character")}, TEXT("first")))
+    {
+        return false;
+    }
+    FMtoULinkageSession& Session = Harness.Session;
+    FString Error;
+    FString Code;
+    TestTrue(TEXT("Unreal ends linkage"), Session.RequestLeave(TEXT("end"), 2, Error, Code));
+    Session.NoteLeaveLinkage({1, 2, TEXT("end"), FString()}, 0.0);
+    TestEqual(TEXT("Unreal's exit and Maya's exit both produce a reply"), Harness.Replies.Num(), 2);
+    for (const TSharedPtr<FJsonObject>& Reply : Harness.Replies)
+    {
+        TestEqual(TEXT("both replies report realtime"), Reply->GetStringField(TEXT("mode")),
+            FString(TEXT("realtime")));
+        TestEqual(TEXT("both exits use the same revision"),
+            static_cast<int32>(Reply->GetNumberField(TEXT("mode_revision"))), 2);
+    }
+
+    bool bAllowEntry = false;
+    Session.EntryGuard = [&bAllowEntry](FString& OutCode, FString& OutError)
+    {
+        OutCode = TEXT("PAIRING_REQUIRED");
+        OutError = TEXT("Pair the target before entering linkage.");
+        return bAllowEntry;
+    };
+    const FMtoUModeMessage Enter{1, 3, TEXT("linkage"), TEXT("unreal"), TEXT("ready"), FString()};
+    const FMtoUModeMessage Cancel{1, 3, TEXT("realtime"), TEXT("maya"), TEXT("failed"), TEXT("expired")};
+    Session.NoteMode(Enter, 0.0);
+    TestEqual(TEXT("a refused entry also uses the earlier revision"),
+        Session.GetView().Identity.ModeRevision, 2);
+    const int32 RepliesBeforeCancel = Harness.Replies.Num();
+    Session.NoteMode(Cancel, 0.0);
+    TestEqual(TEXT("expiring a refused entry sends no spurious conflict"),
+        Harness.Replies.Num(), RepliesBeforeCancel);
+    TestEqual(TEXT("the actual refusal remains visible"), Session.GetView().ErrorCode,
+        FString(TEXT("PAIRING_REQUIRED")));
+    TestEqual(TEXT("the earlier exit already restored the original writers"), Harness.Hooks.RestoreCalls, 1);
+
+    bAllowEntry = true;
+    Session.NoteMode(Enter, 0.0);
+    TestTrue(TEXT("the rejected revision can be legitimately used later"), Session.GetView().bTakeoverHeld);
+    Session.NoteMode(Cancel, 0.0);
+    TestFalse(TEXT("a timeout now restores the accepted entry"), Session.GetView().bTakeoverHeld);
+    TestEqual(TEXT("the late entry's writers were restored"), Harness.Hooks.RestoreCalls, 2);
+
+    bAllowEntry = false;
+    Session.NoteMode({1, 4, TEXT("linkage"), TEXT("unreal"), TEXT("ready"), FString()}, 0.0);
+    const FMtoUModeMessage CancelAnother{1, 4, TEXT("realtime"), TEXT("maya"), TEXT("failed"), TEXT("expired")};
+    Session.NoteMode(CancelAnother, 0.0);
+    bAllowEntry = true;
+    TestTrue(TEXT("the editor can retry after Maya's refused entry"),
+        Session.RequestEnter(Session.GetView().Identity.ModeRevision + 1, Error, Code));
+    TestEqual(TEXT("the editor starts beyond the rejected revision"), Session.GetView().Identity.ModeRevision, 5);
+    Session.NoteMode(CancelAnother, 0.0);
+    TestTrue(TEXT("a delayed cancellation cannot undo the editor retry"), Session.GetView().bTransitioning);
+    Session.NoteMode({1, 5, TEXT("linkage"), TEXT("unreal"), TEXT("ready"), FString()}, 0.0);
+    TestFalse(TEXT("Maya can confirm the new editor entry"), Session.GetView().bTransitioning);
+    TestTrue(TEXT("the confirmed editor retry keeps its takeover"), Session.GetView().bTakeoverHeld);
+
+    Session.BeginSession(2);
+    TestTrue(TEXT("another editor entry can start in the new session"), Session.RequestEnter(3, Error, Code));
+    TestEqual(TEXT("the new session has no earlier rejected revision"), Session.GetView().Identity.ModeRevision, 3);
+    Session.NoteMode({2, 4, TEXT("realtime"), TEXT("maya"), TEXT("failed"), TEXT("expired")}, 0.0);
+    TestTrue(TEXT("an unknown timeout leaves the new transition waiting"), Session.GetView().bTransitioning);
+    TestEqual(TEXT("the unknown revision is still reported"), Session.GetView().ErrorCode,
+        FString(TEXT("MODE_CONFLICT")));
     return true;
 }
 

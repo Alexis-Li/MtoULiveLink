@@ -648,6 +648,43 @@ def connect_role(connect=True):
         CONTROLLER.connect()
 
 
+REALTIME_PLAYBACK_OPTIONS = {}
+
+
+def probe_realtime_performance(command):
+    operation = command["operation"]
+    session = CONTROLLER._session
+    metrics = session.realtime_metrics() if session is not None else None
+    if metrics is None:
+        raise RuntimeError("Real-time performance requires a working Maya streaming session")
+    if operation == "start":
+        first, last = command["range"]
+        if not math.isfinite(first) or not math.isfinite(last) or first >= last:
+            raise ValueError("Real-time performance requires an increasing Maya playback range")
+        if cmds.play(query=True, state=True):
+            raise RuntimeError("Stop Maya playback before starting the real-time performance run")
+        options = {"minTime": first, "maxTime": last, "loop": "continuous", "by": 1.0,
+                   "playbackSpeed": 1.0}
+        REALTIME_PLAYBACK_OPTIONS.update(
+            (name, cmds.playbackOptions(query=True, **{name: True})) for name in options)
+        cmds.playbackOptions(**options)
+        cmds.currentTime(first, update=True)
+        cmds.play(forward=True)
+    elif operation == "stop":
+        cmds.play(state=False)
+        cmds.playbackOptions(**REALTIME_PLAYBACK_OPTIONS)
+        REALTIME_PLAYBACK_OPTIONS.clear()
+    elif operation != "snapshot":
+        raise ValueError("Unknown real-time performance operation: " + operation)
+    RESULT["realtime_performance"] = {
+        "seconds": time.perf_counter(),
+        "playing": bool(cmds.play(query=True, state=True)),
+        "time": cmds.currentTime(query=True),
+        "maya_playback_fps": cmds.playbackOptions(query=True, framesPerSecond=True),
+        "metrics": metrics,
+    }
+
+
 def run_command(command):
     action = command.get("action")
     if action == "enter":
@@ -660,6 +697,8 @@ def run_command(command):
         # Names the scenario the following dialogs belong to.
         RESULT["stage"] = command.get("name") or "startup"
         record_plugins()
+    elif action == "realtime_performance":
+        probe_realtime_performance(command)
     elif action == "snapshot":
         RESULT["snapshot"] = snapshot()
         record_plugins()

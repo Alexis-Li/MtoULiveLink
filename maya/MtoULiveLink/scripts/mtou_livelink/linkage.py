@@ -238,6 +238,8 @@ class LinkageSession(object):
         # took over.
         self._awaiting_confirmation = False
         self._entered_at = None
+        self._unconfirmed_realtime = None
+        self._canceled_entry_revision = 0
         # The connection's time-control lease while linkage drives time.
         self._lease = None
 
@@ -421,10 +423,10 @@ class LinkageSession(object):
             self._applied_at = None
             self._apply_failure = None
             # Either way Unreal answers with mode_state linkage at this
-            # revision; until then a same or older realtime statement is the
-            # refusal or failure of this transition.
+            # revision. Realtime can refuse the transition before that echo.
             self._awaiting_confirmation = True
             self._entered_at = self._clock()
+            self._unconfirmed_realtime = None
             self._detail = "镜头联动已开始"
         self._session.submit_linkage(make_mode_message(
             self._session_id, revision, LINKAGE_MODE, CONTROL_UNREAL, "ready",
@@ -456,6 +458,7 @@ class LinkageSession(object):
                 self._entered = False
                 self._session.submit_linkage(make_leave_linkage_message(
                     self._session_id, revision, target, ""))
+                self._session.time_control.note_linkage_exit(revision)
                 self._emit(LinkageEvent(
                     "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
                     mode_revision=revision,
@@ -471,6 +474,7 @@ class LinkageSession(object):
             self._pending = None
             self._issued = None
             self._awaiting_confirmation = False
+            self._unconfirmed_realtime = None
         residual = self._restore(state)
         with self._lock:
             self._state = None
@@ -483,6 +487,7 @@ class LinkageSession(object):
                 else "已结束预览并恢复原状态")
         self._session.submit_linkage(make_leave_linkage_message(
             self._session_id, revision, target, "; ".join(residual)))
+        self._session.time_control.note_linkage_exit(revision)
         self._release_lease()
         self._emit(LinkageEvent(
             "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
@@ -601,6 +606,9 @@ class LinkageSession(object):
         - ``"confirmed"``: Unreal confirmed the linkage this session holds;
         - ``"enter"``: Unreal started linkage; the caller prepares the session
           and calls :meth:`enter` with ``remote=True``;
+        - ``"superseded"``: Unreal started a newer linkage after an older
+          realtime reply; Maya restored its pending entry before following
+          it. A failed restore raises ``RECOVERY_REFUSED`` for the new entry;
         - ``"left"``: Unreal left linkage, refused or failed the transition and
           Maya restored itself (any residual is in the recovery records);
         - ``"noted"``: nothing to do (an echo, or a stale statement).
@@ -621,27 +629,39 @@ class LinkageSession(object):
                         message.get("session_id"), self._session_id))
             active = self._mode == LINKAGE_MODE
             current = self._mode_revision
+            previous_realtime = self._unconfirmed_realtime
             if mode == LINKAGE_MODE:
                 if active and revision == current:
                     self._awaiting_confirmation = False
+                    self._unconfirmed_realtime = None
+                    self._session.time_control.confirm_linkage_entry(revision)
                     self._detail = detail or self._detail
                     outcome = "confirmed"
-                elif not active and revision > current and not self._closed:
+                elif (active and self._awaiting_confirmation and revision > current
+                      and previous_realtime is not None):
+                    # A newer editor entry in this ordered stream follows the
+                    # older realtime reply and supersedes our pending entry.
+                    outcome = "superseded"
+                elif (not active and revision > max(current, self._canceled_entry_revision)
+                      and not self._closed):
                     outcome = "enter"
                 else:
                     # An echo of a linkage this session already left.
                     outcome = "noted"
             elif active:
-                if revision > current:
-                    # Unreal's own 返回实时, 结束预览 or lost takeover.
+                if revision > current or (revision == current and self._awaiting_confirmation):
                     outcome = "left"
                 elif self._awaiting_confirmation:
-                    # Unreal refused (older revision) or failed (same revision)
-                    # the transition this session has not seen confirmed.
-                    outcome = "left"
+                    if self._session.time_control.linkage_exit_unsettled():
+                        # Both hosts can send exits. Any number of earlier
+                        # realtime statements may precede this entry's result,
+                        # and its refusal can use exactly the same revision.
+                        self._unconfirmed_realtime = (revision, detail)
+                        outcome = "noted"
+                    else:
+                        outcome = "left"
                 else:
-                    # A statement older than the confirmed linkage: it can no
-                    # longer describe the current mode.
+                    # A stale statement after confirmation.
                     outcome = "noted"
             else:
                 if revision > current:
@@ -649,14 +669,22 @@ class LinkageSession(object):
                 self._detail = detail or self._detail
                 outcome = "noted"
         if outcome == "left":
-            return self._follow_remote_exit(revision, current, detail)
+            self._follow_remote_exit(revision, current, detail)
+            return outcome
+        if outcome == "superseded":
+            previous_revision, previous_detail = previous_realtime
+            residual = self._follow_remote_exit(
+                previous_revision, current, previous_detail, hold_on_failure=True)
+            if residual:
+                raise LinkageError("RECOVERY_REFUSED", details="; ".join(residual))
+            return outcome
         if outcome != "enter":
             self._emit(LinkageEvent(
                 "mode", mode=self.mode(), control=self._control,
                 mode_revision=self.mode_revision(), detail=self._detail))
         return outcome
 
-    def _follow_remote_exit(self, revision, current, detail):
+    def _follow_remote_exit(self, revision, current, detail, hold_on_failure=False):
         """Unreal no longer holds linkage: restore Maya and stay paused.
 
         A newer revision is Unreal's own 返回实时 or 结束预览; the same revision
@@ -670,15 +698,21 @@ class LinkageSession(object):
             self._pending = None
             self._issued = None
             self._awaiting_confirmation = False
+            self._unconfirmed_realtime = None
             self._mode = REALTIME_MODE
             self._control = CONTROL_MAYA
             self._mode_revision = revision
             if revision <= current:
                 self._entered = False
         residual = self._restore(state)
-        self._release_lease()
+        # A replacement entry cannot reuse an unrestored Maya view. Keep
+        # sampling paused until the controller refuses it and closes.
+        if not residual or not hold_on_failure:
+            self._release_lease()
         with self._lock:
-            if revision > current:
+            if residual:
+                summary = "Maya 无法完整恢复联动前的状态"
+            elif revision > current:
                 summary = "Unreal 已结束镜头联动，Maya 已恢复并保持暂停"
             else:
                 summary = "Unreal 未接管镜头联动，Maya 已恢复原状态"
@@ -690,7 +724,7 @@ class LinkageSession(object):
             mode_revision=revision, detail=self._detail,
             diagnostic=(self._diagnostic("RECOVERY_REFUSED", "; ".join(residual))
                         if residual else None)))
-        return "left"
+        return residual
 
     def confirmation_overdue(self):
         """True when Unreal never confirmed the linkage Maya started."""
@@ -706,22 +740,18 @@ class LinkageSession(object):
         that took over late hands its writers back instead of driving a target
         nobody answers. Returns the residual, or None when nothing waited.
         """
+        reason = "Unreal 未在 {0:g} 秒内确认镜头联动".format(
+            LINKAGE_MODE_CONFIRMATION_SECONDS)
         with self._lock:
             if self._mode != LINKAGE_MODE or not self._awaiting_confirmation:
                 return None
             revision = self._mode_revision
-        reason = "Unreal 未在 {0:g} 秒内确认镜头联动".format(
-            LINKAGE_MODE_CONFIRMATION_SECONDS)
-        return self._fail_entered(revision, reason, "MODE_CONFLICT")
-
-    def _fail_entered(self, revision, reason, code):
-        """Roll back an entered linkage Maya cannot keep and tell Unreal.
-
-        Maya restores itself and announces the failed transition, so Unreal
-        hands its writers back instead of driving a target nobody answers.
-        Returns the residual.
-        """
-        with self._lock:
+            self._canceled_entry_revision = revision
+            if self._unconfirmed_realtime is not None:
+                self._mode_revision, detail = self._unconfirmed_realtime
+                self._unconfirmed_realtime = None
+            else:
+                detail = ""
             state = self._state
             self._state = None
             self._pending = None
@@ -735,12 +765,14 @@ class LinkageSession(object):
         self._release_lease()
         with self._lock:
             self._detail = reason + "，Maya 已恢复原状态"
+            if detail:
+                self._detail += "（Unreal 最近回复：{0}）".format(detail)
             if residual:
                 self._detail += "（恢复残留：{0}）".format("；".join(residual))
         self._emit(LinkageEvent(
             "failed", mode=REALTIME_MODE, control=CONTROL_MAYA,
             mode_revision=revision, detail=self._detail,
-            diagnostic=self._diagnostic(code, reason)))
+            diagnostic=self._diagnostic("MODE_CONFLICT", reason)))
         return tuple(residual)
 
     def _announce_failed(self, revision, error):
@@ -856,7 +888,7 @@ class LinkageSession(object):
         message = make_group_message(
             self._session_id, set_revision, self._mode_revision,
             self._space_revision, target.eval_id, target.transport_serial,
-            sample_serial, objects, readback, applied_time)
+            sample_serial, objects, readback, applied_time, validated=True)
         size = group_wire_size(message)
         if size > MAX_LINKAGE_GROUP_BYTES:
             with self._lock:

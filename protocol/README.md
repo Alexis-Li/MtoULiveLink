@@ -369,18 +369,27 @@ refuses an illegal `mode_state` with `INVALID_MESSAGE` and ends the connection.
   its writers at once; without an answer Unreal fails the transition after
   5 s, and Maya rolls back when the echo does not arrive within 5 s. A target
   that cannot be taken over hands back every target taken before it; no
-  object is left half-entered.
+  object is left half-entered. Unreal uses a revision above the Maya entry it
+  last refused, so Maya can distinguish the new request from a late reply.
 - Maya starts: its `mode` linkage revision must be newer than every revision of
   the connection. Unreal confirms with `mode_state` linkage N; a refusal is a
   `mode_state` realtime at Unreal's current revision, and Maya restores itself
-  and adopts that revision. Without a confirmation within 5 s Maya restores
-  itself and sends `mode` realtime N `failed`.
+  and adopts that revision. After Maya sends an exit, an older realtime state
+  can also be a reply to the exit or Unreal's own exit. Maya holds that state
+  until Unreal confirms the pending entry, starts a newer one or the existing
+  5 s deadline expires. A newer entry supersedes the pending request, and
+  Maya restores the previous state before following the new entry. If that
+  restore fails, Maya reports the residual, refuses the newer revision as
+  above and ends the session.
+  If the deadline expires, Maya restores itself and sends `mode` realtime N
+  `failed`, so a late takeover at N is restored as well. Unreal can disregard
+  that failure when it already refused entry N.
 - Unreal leaves: `mode_state` realtime at a newer revision. Maya restores its
   time, view and gate, stays paused and does not answer with `leave_linkage`.
 - A `mode_state` is followed only for the connection that received it and only
   when it names that connection's `session_id`. Once linkage is confirmed, a
   realtime statement at the same or an older revision is stale and ignored; it
-  rolls Maya back only while Maya's entry is still unconfirmed.
+  can roll Maya back only while its entry is still unconfirmed.
 
 ### Targets, groups and application
 

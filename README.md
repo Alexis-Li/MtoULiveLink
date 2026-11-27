@@ -150,6 +150,15 @@ on the Binding. All enabled parts pose and display under one connection:
    button carries its reason as a tooltip. Repeated warnings for the same
    session appear once; new errors still interrupt.
 
+In Real-time Preview, Maya sends a new pose when the evaluated pose changes
+and skips identical samples while the character is still. To investigate slow
+preview, open **诊断详情** in Maya and **高级设置与诊断** on the Unreal Binding
+Actor. Under **实时预览性能**, Maya reports stage timings and the actual send
+rate. Unreal reports parse, retarget and application times, how often a new pose
+finishes updating the displayed skeletons, and editor FPS as a separate value.
+Use **复制完整诊断** on both hosts while the connection is active to capture the
+readings.
+
 While connected, Unreal keeps updating in the background, including when Maya
 is in front. The running status shows **连接期间 UE 在后台保持更新**. Disconnecting
 restores normal background throttling and viewport realtime behavior. Your
@@ -263,6 +272,8 @@ restore appears on both hosts only when it happens (恢复失败 in Maya, 恢复
 open Maya's 诊断详情 or Unreal's **高级设置与诊断** for the resources that were
 not restored, restore them by hand (for example unlock the camera or reset the
 time range in Maya, or check the track in the Sequencer), or reopen the level.
+If Maya cannot restore its previous state when Unreal starts linkage again,
+the connection ends. Resolve the items in 诊断详情 before reconnecting.
 Closing or switching the Level Sequence, closing its level or deleting the
 paired actor ends linkage: Unreal returns the writers and Maya restores itself.
 Opening or creating another Maya scene ends the connection after linkage

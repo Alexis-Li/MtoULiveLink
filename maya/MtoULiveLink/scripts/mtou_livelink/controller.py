@@ -28,6 +28,7 @@ from .diagnostics import (
     diagnostic_dialog_text,
     error_reply_diagnostic,
     make_diagnostic,
+    realtime_diagnostic_text,
 )
 from .legal import LEGAL_TEXT, LEGAL_TITLE
 from .linkage import LinkageError, LinkageSession
@@ -1376,6 +1377,10 @@ class Controller(object):
             sections.append("错误详情：\n{0}".format(details))
         sections.append(self._objects_diagnostic_text())
         sections.append(self._linkage_diagnostic_text())
+        if self._session_ready():
+            performance = realtime_diagnostic_text(self._session.realtime_metrics())
+            if performance:
+                sections.append(performance)
         return "\n\n".join(sections)
 
     def _linkage_diagnostic_text(self):
@@ -1757,6 +1762,8 @@ class Controller(object):
             return
         if exact_int(reply.get("session_id")) != self._session_id_of(session):
             return
+        if not self._session_ready():
+            return
         revision = exact_int(reply.get("mode_revision"))
         if revision is None:
             return
@@ -1770,9 +1777,20 @@ class Controller(object):
         try:
             outcome = linkage.note_mode_state(reply)
         except LinkageError as error:
-            self._report_linkage_refusal(error)
+            if error.code != "RECOVERY_REFUSED":
+                self._report_linkage_refusal(error)
+                return
+            diagnostic = make_diagnostic(error.code, details=error.details)
+            refusal = make_mode_message(
+                reply["session_id"], revision, REALTIME_MODE, CONTROL_MAYA, "failed",
+                "{0}: {1}".format(error.code, error.details))
+            self._stop_linkage_pump()
+            session.fail_after_mode_refusal(diagnostic, refusal)
+            self._update_linkage_status()
             return
-        if outcome == "enter":
+        if outcome == "superseded":
+            self._finish_linkage_exit(linkage, "Unreal 发起了新的镜头联动")
+        if outcome in ("enter", "superseded"):
             self._start_linkage(remote_revision=revision)
             return
         self._note_linkage_revision(linkage.mode_revision())

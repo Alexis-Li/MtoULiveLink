@@ -53,12 +53,15 @@ class FakeScene(object):
     def snapshot(self):
         return self._snapshot
 
-    def sample(self):
+    def sample(self, previous=None, timings=None):
         self.samples += 1
         transforms = tuple(
             (self.value, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0)
             for unused in self._snapshot.bones)
         curves = tuple(self.value for unused in self._snapshot.curve_names)
+        if (previous is not None and previous.revision == self.revision
+                and previous.transforms == transforms and previous.curves == curves):
+            return previous
         return mtou_scene.CharacterFrame(self.revision, transforms, curves)
 
     def close(self):
@@ -292,8 +295,9 @@ class FakeWorker(object):
 
     def submit(self, message):
         self.frames.append(message)
+        return True
 
-    def submit_control(self, message):
+    def submit_control(self, message, *, discard_latest=False):
         self.controls.append(message)
 
     def hello_reply(self):
@@ -373,6 +377,22 @@ class StreamingSetTests(unittest.TestCase):
         session._sample_and_submit(force=True)
         self.assertEqual("failed", events[-1].kind)
         self.assertIn("副对象", events[-1].diagnostic["message"])
+
+    def test_a_secondary_only_change_sends_one_complete_set(self):
+        session, worker, unused = self.start()
+
+        def tick():
+            session._last_sample_time = None
+            session._sample_and_submit()
+
+        tick()
+        tick()
+        self.assertEqual(1, len(worker.frames))
+        self.secondary.value = 3.0
+        tick()
+        self.assertEqual(2, len(worker.frames))
+        self.assertEqual(worker.frames[0]["transforms"], worker.frames[1]["transforms"])
+        self.assertEqual([3.0], worker.frames[1]["objects"][0]["curves"])
 
     def test_removal_closes_the_old_set_until_unreal_confirms(self):
         session, worker, unused = self.start()

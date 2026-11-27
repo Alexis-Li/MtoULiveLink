@@ -59,6 +59,7 @@ Current scope, constraints and next-stage candidates are in the
 | Topic | Record |
 | --- | --- |
 | Connection-scoped background updates (#44, 2026-11-13) | [Ordinary Editor acceptance](background-updates-acceptance.md) |
+| Real-time Preview performance (#45, 2026-11-19) | [Maya benchmark and C04 calibration](realtime-preview-performance.md) |
 | Cache session identity and reconnect (#37) | [Reconnect acceptance](cached-playback-reconnect-acceptance.md) |
 | Cached exit and explicit refresh (#38–39) | [Exit/refresh acceptance](cache-exit-and-refresh-review-acceptance.md) |
 | Unreal Details and diagnostics (#48) | [Details acceptance](issue-48-ue-details-acceptance.md) |

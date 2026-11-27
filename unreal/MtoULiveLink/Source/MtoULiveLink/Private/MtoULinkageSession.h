@@ -262,6 +262,7 @@ private:
     FString Mode = TEXT("realtime");
     FString Control = TEXT("maya");
     int32 ModeRevision = 0;
+    int32 RejectedMayaEntryRevision = 0;
     bool bTransitioning = false;
     double TransitionStartedSeconds = 0.0;
     bool bWritersBorrowed = false;

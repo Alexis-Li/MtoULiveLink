@@ -100,6 +100,7 @@ class TimeControl(object):
         self._pending_clear = None
         self._cleared_through = 0
         self._revision = 0
+        self._last_linkage_exit = 0
         self._terminated = False
 
     @property
@@ -119,6 +120,22 @@ class TimeControl(object):
             if isinstance(revision, int) and not isinstance(revision, bool):
                 self._revision = max(self._revision, revision)
             return self._revision
+
+    def note_linkage_exit(self, revision):
+        """Remember a sent exit across linkage instances on this connection."""
+        with self._lock:
+            self._last_linkage_exit = max(self._last_linkage_exit, revision)
+
+    def linkage_exit_unsettled(self):
+        """An older realtime statement may still answer Maya's last exit."""
+        with self._lock:
+            return self._last_linkage_exit > 0
+
+    def confirm_linkage_entry(self, revision):
+        """A confirmed later entry follows the exit and its replies in order."""
+        with self._lock:
+            if revision > self._last_linkage_exit:
+                self._last_linkage_exit = 0
 
     def cache_holds_connection(self):
         """True during Cached Playback and until Unreal confirmed its clear."""
@@ -222,6 +239,7 @@ class TimeControl(object):
             self._terminated = True
             self._lease = None
             self._pending_clear = None
+            self._last_linkage_exit = 0
 
     def _notify(self):
         listener = self._on_change
