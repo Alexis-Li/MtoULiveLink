@@ -3527,8 +3527,10 @@ private:
         {
             Add(TEXT("[arms] build the synthetic arms target"), 300.0, [this]() { return BuildArmsTarget(); });
         }
-        Add(What + TEXT(" ends the set"), 120.0, [this, bArms, What]()
+        Add(What + TEXT(": retire the old set and automatically negotiate the replacement"), 120.0,
+            [this, bArms, What]()
         {
+            const FMtoULinkageView View = MtoUGetLinkageView();
             if (RefusalPhase == 0)
             {
                 if (!ArmsMesh.IsValid())
@@ -3537,14 +3539,70 @@ private:
                     bAbort = true;
                     return true;
                 }
+                if (!SetConnected() || View.Identity.SessionId == 0 || NegotiatedObjects() != 2)
+                {
+                    return false;
+                }
+                SwapSession = View.Identity.SessionId;
+                SwapAttempts = MayaAttempts();
                 SecondaryBinding->SkeletalMesh = bArms ? ArmsMesh.Get() : FullBodyMesh.Get();
                 SecondaryActor->NotifyBindingInputsChanged();
                 RefusalPhase = 1;
                 return false;
             }
-            return SetEnded(What);
+            if (!SetConnected() || View.Identity.SessionId == 0 || View.Identity.SessionId == SwapSession
+                || View.Mode != TEXT("realtime") || View.bTakeoverHeld || View.bTransitioning)
+            {
+                return false;
+            }
+
+            const TArray<TSharedPtr<FJsonValue>>* Connections = nullptr;
+            if (!MayaResult->TryGetArrayField(TEXT("connections"), Connections) || Connections->IsEmpty())
+            {
+                return false;
+            }
+            const TSharedPtr<FJsonObject>& Current = Connections->Last()->AsObject();
+            int32 CurrentSession = 0;
+            bool bReady = false;
+            if (!Current->TryGetNumberField(TEXT("session_id"), CurrentSession)
+                || CurrentSession != View.Identity.SessionId
+                || !Current->TryGetBoolField(TEXT("ready"), bReady) || !bReady)
+            {
+                return false;
+            }
+
+            bool bSawOldSession = false;
+            bool bSawOldStop = false;
+            for (const TSharedPtr<FJsonValue>& Entry : *Connections)
+            {
+                const TSharedPtr<FJsonObject>& Observation = Entry->AsObject();
+                int32 SessionId = 0;
+                if (Observation->TryGetNumberField(TEXT("session_id"), SessionId) && SessionId == SwapSession)
+                {
+                    bSawOldSession = true;
+                }
+                bool bOpen = true;
+                if (bSawOldSession && Observation->TryGetBoolField(TEXT("open"), bOpen) && !bOpen)
+                {
+                    bSawOldStop = true;
+                    break;
+                }
+            }
+            Test->TestTrue(*(What + TEXT(": Maya closed the old connection before the replacement was ready")),
+                bSawOldStop);
+            Test->TestEqual(*(What + TEXT(": exactly one automatic Maya connection attempt")),
+                MayaAttempts(), SwapAttempts + 1);
+            Test->TestEqual(*(What + TEXT(": both objects negotiated on the same new connection")),
+                NegotiatedObjects(), 2);
+            Test->TestTrue(*(What + TEXT(": the existing bindings and object pairings are preserved")),
+                Actor->GetBinding() == Binding.Get() && SecondaryActor->GetBinding() == SecondaryBinding.Get()
+                && MtoUGetLinkagePairedObject(*Actor) == Fixture->GetStringField(TEXT("object_id"))
+                && MtoUGetLinkagePairedObject(*SecondaryActor) == SecondaryObjectId && MayaPairingKept());
+            Log(FString::Printf(TEXT("%s: session %d -> %d, automatic attempts %d -> %d"),
+                *What, SwapSession, View.Identity.SessionId, SwapAttempts, MayaAttempts()));
+            RefusalPhase = 0;
+            return true;
         });
-        Add(What + TEXT(": connects again"), 600.0, [this, What]() { return ReconnectSet(What); });
         Add(What + TEXT(": required bones"), 30.0, [this, bArms, What]()
         {
             const TArray<FName> Required = RequiredBones(SecondaryBinding.Get());
