@@ -739,7 +739,7 @@ class CharacterScene(object):
 
     @classmethod
     def capture(cls, root, display=None, display_attribute=None, on_event=None,
-                display_optional=True, saved_display_uuid=None):
+                display_optional=True, saved_display_uuid=None, discover_display=True):
         """Capture one object scene.
 
         Display is an optional label source for both primary and secondary
@@ -749,12 +749,12 @@ class CharacterScene(object):
         scene = None
         try:
             root = cls._resolve_root(root)
-            if saved_display_uuid is None:
-                display, display_attribute = cls._resolve_display(
-                    root, display, display_attribute, display_optional)
-            else:
+            if saved_display_uuid is not None:
                 display, display_attribute = cls._resolve_saved_display(
                     root, saved_display_uuid, display_attribute)
+            elif display is not None or discover_display:
+                display, display_attribute = cls._resolve_display(
+                    root, display, display_attribute, display_optional)
             scene = cls(root, display, display_attribute, on_event)
             scene._commit_capture(revision=1)
             scene._register_callbacks()

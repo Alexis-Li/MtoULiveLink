@@ -12,6 +12,7 @@ import time
 from collections import deque
 from uuid import uuid4
 
+from .strings import text
 from . import config, mayaapi
 from .config import (
     CACHED_MODE,
@@ -53,7 +54,7 @@ from .protocol import (
 from .scene import CharacterSceneError
 from .space import validate_frame_rate
 from .timecontrol import TimeControl
-from .timeline import maya_is_playing, normalize_playback_cap, playback_cap_fps
+from .timeline import maya_is_playing, normalize_playback_cap
 
 
 class LatestFrame(object):
@@ -133,7 +134,7 @@ def route_reply(reply, time_control, on_statement=None, note_reason=None):
 
 # A second object's negotiation differences are listed with this prefix, so
 # the warning dialog tells them apart from the primary character's.
-SECONDARY_WARNING_PREFIX = "副对象 · "
+SECONDARY_WARNING_PREFIX = text("secondary_warning_prefix")
 
 
 def merge_object_warnings(warnings):
@@ -1007,7 +1008,7 @@ class StreamingSession(object):
         if secondary_scene is not None and workflow != WORKFLOW_ANIMATION:
             raise StreamingSessionError(
                 "OBJECT_SET_UNSUPPORTED",
-                "模型工作流只支持单个角色。",
+                text("model_single_character"),
                 "a second object streams only in the Animation workflow")
         self._scene = scene
         # The independent object beside the primary character; None for the
@@ -1137,7 +1138,7 @@ class StreamingSession(object):
     def prepare_restart_init(self, snapshots, workflow, blendshapes_enabled):
         if len(snapshots) > 1 and workflow != WORKFLOW_ANIMATION:
             raise StreamingSessionError(
-                "OBJECT_SET_UNSUPPORTED", "模型工作流只支持单个角色。")
+                "OBJECT_SET_UNSUPPORTED", text("model_single_character"))
         self._workflow = workflow
         self._blendshapes_enabled = blendshapes_enabled
         self._revision = snapshots[0].revision
@@ -1227,7 +1228,7 @@ class StreamingSession(object):
                 secondary_snapshot = secondary_scene.snapshot()
             except CharacterSceneError as error:
                 raise StreamingSessionError(
-                    error.code, "副对象：" + error.message, error.details)
+                    error.code, text("secondary_reason_prefix") + error.message, error.details)
         session = cls(scene, fps, on_event, playback_cap, playback_state,
                       workflow, blendshapes_enabled, object_id, set_revision,
                       space_revision, scene_units, maya_version, secondary_scene,
@@ -1360,7 +1361,9 @@ class StreamingSession(object):
     def _note_reason(self, diagnostic):
         worker = self._worker
         if worker is not None:
-            worker.note_reason(diagnostic)
+            # The socket can close before Maya delivers the deferred error
+            # observer. Keep its origin with the reason for that terminal event.
+            worker.note_reason(dict(diagnostic, runtime_mode=self._time_control.state))
 
     def _deliver_statement(self, reply):
         handler = self._on_statement
@@ -1413,7 +1416,7 @@ class StreamingSession(object):
         if not self.is_ready or self._worker is None:
             raise StreamingSessionError(
                 "STREAM_INTERRUPTED",
-                "镜头联动需要已连接的 Unreal 会话。")
+                text("linkage_requires_connection"))
         self._worker.submit_control(message)
         return True
 
@@ -1434,10 +1437,10 @@ class StreamingSession(object):
         """
         if not self.is_ready or self._worker is None:
             raise StreamingSessionError(
-                "STREAM_INTERRUPTED", "移除副对象需要已连接的 Unreal 会话。")
+                "STREAM_INTERRUPTED", text("secondary_remove_requires_connection"))
         if self._secondary_scene is None:
             raise StreamingSessionError(
-                "INVALID_MESSAGE", "当前对象集合中没有副对象。")
+                "INVALID_MESSAGE", text("secondary_not_in_session"))
         if self._removal_pending is not None:
             return self._removal_pending
         revision = self._set_revision + 1
@@ -1540,10 +1543,9 @@ class StreamingSession(object):
             return False
 
     def _effective_rate(self):
-        cap = playback_cap_fps(self._playback_cap)
-        if not self._is_playing or cap is None:
+        if not self._is_playing:
             return self._scene_fps
-        return min(self._scene_fps, cap)
+        return min(self._scene_fps, self._playback_cap)
 
     def _update_playback_state(self, playing=None):
         if self._outcome is not None:
@@ -1681,7 +1683,7 @@ class StreamingSession(object):
                 self._request_failure(
                     make_diagnostic(
                         error.code if error.code in DIAGNOSTICS else "SAMPLING_FAILED",
-                        "副对象：" + error.message, details=error.details),
+                        text("secondary_reason_prefix") + error.message, details=error.details),
                     recapture_scene=False)
                 return
             if not self.is_ready:
@@ -1690,7 +1692,7 @@ class StreamingSession(object):
                 self._request_failure(
                     make_diagnostic(
                         "SAMPLING_FAILED",
-                        "副对象的描述在本次连接中发生了变化。",
+                        text("secondary_description_changed"),
                         details="secondary scene revision changed from {0} to {1}".format(
                             self._secondary_revision, secondary.revision)),
                     recapture_scene=False)
@@ -1788,5 +1790,5 @@ class StreamingSession(object):
 def bind_conflict_status(snapshot):
     if not snapshot.bind_conflict_count:
         return ""
-    return "（已按绑定姿势解析 {0} 处蒙皮绑定矩阵冲突）".format(
+    return text("resolved_bind_conflicts").format(
         snapshot.bind_conflict_count)

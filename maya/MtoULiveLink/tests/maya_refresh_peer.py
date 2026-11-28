@@ -104,7 +104,7 @@ def main():
 
         class HeadlessController(mtou_controller.Controller):
             # Presentation only: retain the real lifecycle and error transition.
-            def _show_error(self, diagnostic):
+            def _notify_diagnostic(self, diagnostic, warning=False):
                 result.setdefault("diagnostics", []).append(diagnostic)
 
         controller = HeadlessController()

@@ -27,7 +27,6 @@ from mtou_livelink import protocol as mtou_protocol
 from mtou_livelink import scene as mtou_scene
 from mtou_livelink import session as mtou_session
 from mtou_livelink import timecontrol as mtou_timecontrol
-from mtou_livelink.ui import objects_window as mtou_objects_window
 
 CHARACTER = mtou_config.CHARACTER_OBJECT_ID
 SECONDARY = mtou_config.SECONDARY_OBJECT_ID
@@ -637,34 +636,20 @@ class PanelObjectTests(unittest.TestCase):
 
     def setUp(self):
         self.cmds = mock.MagicMock()
-        self.cmds.control.return_value = True
         self.cmds.currentUnit.return_value = "film"
-        windows = set()
-
-        def window(*args, **kwargs):
-            name = args[0] if args else None
-            if kwargs.get("exists"):
-                return name in windows
-            windows.add(name)
-            return name
-
-        self.cmds.window.side_effect = window
-        self.cmds.deleteUI.side_effect = lambda name, *a, **k: windows.discard(name)
         stack = contextlib.ExitStack()
         for module in (mtou_controller, mtou_mayaapi, mtou_scene):
             if hasattr(module, "cmds"):
                 stack.enter_context(mock.patch.object(module, "cmds", self.cmds))
         stack.enter_context(mock.patch.object(mtou_controller, "require_maya", lambda: None))
-        stack.enter_context(mock.patch.object(
-            mtou_objects_window, "apply_panel_theme", lambda *a, **k: ([], {})))
         self.deferred = []
         stack.enter_context(mock.patch.object(
             mtou_controller.Controller, "_defer_ui",
             lambda controller, action: self.deferred.append(action)))
         self.errors = []
         stack.enter_context(mock.patch.object(
-            mtou_controller.Controller, "_show_error",
-            lambda controller, diagnostic, session=False: self.errors.append(diagnostic)))
+            mtou_controller.Controller, "_notify_diagnostic",
+            lambda controller, diagnostic, warning=False: self.errors.append(diagnostic)))
         stack.enter_context(mock.patch.object(
             mtou_controller.Controller, "_on_cached_playback_view", lambda *a: None))
         self.addCleanup(stack.close)
@@ -702,7 +687,7 @@ class PanelObjectTests(unittest.TestCase):
 
     def test_connecting_the_model_workflow_with_a_second_object_is_refused(self):
         self.controller._secondary_scene = secondary_scene()
-        self.controller._workflow = mtou_config.WORKFLOW_MODEL
+        self.controller.set_workflow(mtou_config.WORKFLOW_MODEL)
         with mock.patch.object(mtou_controller.StreamingSession, "start") as start:
             self.controller.connect()
         start.assert_not_called()
@@ -710,7 +695,7 @@ class PanelObjectTests(unittest.TestCase):
 
     def test_cached_playback_is_unavailable_for_a_two_object_set(self):
         self.controller._session = PanelSession(secondary_scene())
-        self.controller._on_mode_changed(mtou_config.CACHED_MODE)
+        self.controller.set_mode(mtou_config.CACHED_MODE)
         self.assertEqual(mtou_config.REALTIME_MODE, self.controller._mode)
         self.assertEqual("OBJECT_SET_UNSUPPORTED", self.errors[-1]["code"])
 
@@ -726,11 +711,11 @@ class PanelObjectTests(unittest.TestCase):
         linkage.takeover_held.return_value = False
         self.controller._linkage = linkage
         self.controller.remove_secondary_object()
-        self.assertEqual([(4242, "removed in the Maya pairing window")], session.requests)
+        self.assertEqual([(4242, "removed in the Maya connection page")], session.requests)
         linkage.begin_set_removal.assert_called_once_with()
         self.assertEqual("正在移除副对象，等待 Unreal 确认",
                          self.controller.objects_state()["state"])
-        self.assertFalse(self.controller.objects_window_controls()["remove"][0])
+        self.assertFalse(self.controller.object_actions()["remove"][0])
 
         reply = {"type": "object_removed", "session_id": 4242, "object_id": SECONDARY,
                  "set_revision": 2, "restored": True, "detail": "restored"}
@@ -818,24 +803,23 @@ class PanelObjectTests(unittest.TestCase):
         self.assertIn("未能完整恢复", self.controller._object_set_detail)
         self.assertIn("transform:Sword", self.controller._object_set_detail)
 
-    def test_the_pairing_window_is_reused_and_closing_it_keeps_the_set(self):
-        first = self.controller.open_objects_window()
-        second = self.controller.open_objects_window()
-        self.assertIs(first, second)
+    def test_snapshot_subscriptions_survive_page_changes_and_keep_the_set(self):
+        received = []
+        unsubscribe = self.controller.subscribe(received.append)
         self.controller._secondary_scene = secondary_scene()
-        self.controller.close_objects_window()
-        self.assertIsNone(self.controller._objects_window)
-        self.assertIsNotNone(self.controller._secondary_scene)
-        third = self.controller.open_objects_window()
-        self.assertIsNot(first, third)
-        # Maya closing the window itself only forgets it.
-        third._on_closed()
-        self.assertIsNone(self.controller._objects_window)
+        self.controller._publish()
+        self.assertEqual("|Sword|root", received[-1]["secondary"])
+        self.assertTrue(received[-1]["actions"]["remove_secondary"][0])
+        unsubscribe()
+        self.controller._publish()
+        self.assertEqual(1, len(received))
+        self.assertEqual("|Sword|root", self.controller.snapshot()["secondary"])
 
     def test_diagnostics_name_the_set_without_scene_paths(self):
         self.controller._secondary_scene = secondary_scene()
         self.controller._session = PanelSession(self.controller._secondary_scene)
-        text = self.controller._objects_diagnostic_text()
+        from mtou_livelink.diagnostics import object_set_diagnostic_text
+        text = object_set_diagnostic_text(self.controller.objects_state())
         self.assertIn("character、secondary", text)
         self.assertIn("set：1", text)
         self.assertNotIn("|Sword|root", text)
@@ -847,7 +831,7 @@ class PanelObjectTests(unittest.TestCase):
         self.assertEqual("|Sword|root", state["secondary"])
         self.assertIn("无 Display 控制器", state["secondary_detail"])
         self.assertIn("连接后", state["state"])
-        self.controller._workflow = mtou_config.WORKFLOW_MODEL
+        self.controller.set_workflow(mtou_config.WORKFLOW_MODEL)
         self.assertIn("模型工作流只支持单个角色",
                       self.controller.objects_state()["state"])
 

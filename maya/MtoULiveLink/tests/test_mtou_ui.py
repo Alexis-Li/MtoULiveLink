@@ -8,7 +8,7 @@ the recovery refusal also checks the real sender over a local socket.
 
 import concurrent.futures
 import contextlib
-import itertools
+import tempfile
 import pathlib
 import socket
 import sys
@@ -22,7 +22,8 @@ if str(SCRIPTS) not in sys.path:
 
 from mtou_livelink import cache as mtou_cache  # noqa: E402
 from mtou_livelink import config as mtou_config  # noqa: E402
-from mtou_livelink import controller as mtou_controller  # noqa: E402
+from mtou_livelink import controller as mtou_controller
+from mtou_livelink import diagnostics as mtou_diagnostics  # noqa: E402
 from mtou_livelink import diagnostics as mtou_diagnostics  # noqa: E402
 from mtou_livelink import linkage as mtou_linkage  # noqa: E402
 from mtou_livelink import mayaapi as mtou_mayaapi  # noqa: E402
@@ -214,6 +215,11 @@ class FakeCharacterScene(object):
         self.closed = True
 
 
+    def snapshot(self):
+        return types.SimpleNamespace(root="|root", outfit="Clothes01", bones=(),
+                                     curve_names=(), duplicate_paths=())
+
+
 class MainThreadDeferralTests(unittest.TestCase):
     """Unreal statements arrive on the sender thread and must reach the panel.
 
@@ -278,8 +284,8 @@ class MainThreadDeferralTests(unittest.TestCase):
         fake_cmds.evalDeferred.assert_not_called()
 
 
-class LinkagePanelTests(unittest.TestCase):
-    """Shared harness: one controller, fake bindings and no Unreal peer."""
+class LinkageOperationTests(unittest.TestCase):
+    """Linkage operations with a Maya host adapter and protocol replies."""
 
     def setUp(self):
         self.timers = []
@@ -302,44 +308,21 @@ class LinkagePanelTests(unittest.TestCase):
         host_patch.start()
         self.addCleanup(host_patch.stop)
         error_patch = mock.patch.object(
-            mtou_controller.Controller, "_show_error")
+            mtou_controller.Controller, "_notify_diagnostic")
         error_patch.start()
         self.addCleanup(error_patch.stop)
-        self.show_error = mtou_controller.Controller._show_error
+        self.show_error = mtou_controller.Controller._notify_diagnostic
 
     # ----------------------------------------------------------- fake Maya
     def _fake_cmds(self):
-        fake = mock.MagicMock()
-        fake.control.return_value = True
+        preferences = tempfile.TemporaryDirectory()
+        self.addCleanup(preferences.cleanup)
+        fake = mock.Mock()
         fake.currentUnit.return_value = "film"
-        fake.confirmDialog.return_value = "确定"
-        windows = set()
-
-        def window(*args, **kwargs):
-            name = args[0] if args else kwargs.get("name")
-            if kwargs.get("exists"):
-                return name in windows
-            if kwargs.get("query"):
-                return None
-            windows.add(name)
-            return name
-
-        def delete_ui(name, *args, **kwargs):
-            windows.discard(name)
-
-        def eval_deferred(action, *args, **kwargs):
-            self.deferred.append(action)
-
-        fake.window.side_effect = window
-        fake.deleteUI.side_effect = delete_ui
-        fake.evalDeferred.side_effect = eval_deferred
-        counter = itertools.count()
-        for name in ("text", "button", "checkBox", "optionMenu", "menuItem",
-                     "intField", "frameLayout", "rowLayout", "columnLayout",
-                     "formLayout", "scriptJob", "separator"):
-            getattr(fake, name).side_effect = (
-                lambda *args, __name=name, **kwargs:
-                    "{0}-{1}".format(__name, next(counter)))
+        fake.file.return_value = ""
+        fake.internalVar.return_value = preferences.name
+        fake.evalDeferred.side_effect = self.deferred.append
+        fake.scriptJob.return_value = 99
         return fake
 
     def _fake_om(self):
@@ -383,106 +366,46 @@ class LinkagePanelTests(unittest.TestCase):
         while self.deferred:
             self.deferred.pop(0)()
 
-    def labels(self):
-        return [call[1].get("label") for call in self.fake_cmds.text.call_args_list
-                if call[1].get("label")]
 
-    def build_ui(self):
+    def start_controller(self):
         with self.bindings:
-            self.controller.build_ui()
+            self.controller.start()
 
     # --------------------------------------------------------------- tests
-    def test_about_button_shows_the_legal_notice(self):
-        self.build_ui()
-
-        button = next(call for call in self.fake_cmds.button.call_args_list
-                      if call[1].get("label") == "关于")
-        with self.bindings:
-            button[1]["command"]()
-
-        message = self.fake_cmds.confirmDialog.call_args[1]["message"]
+    def test_legal_notice_contains_the_gpl_terms(self):
+        from mtou_livelink.strings import legal_text
         for expected in ("版权所有 (C) 2026 Alexis-Li", "不提供任何担保", "再分发和修改",
                          "LICENSE", "https://github.com/Alexis-Li/MtoULiveLink"):
-            self.assertIn(expected, message)
+            self.assertIn(expected, legal_text(mtou_config.__version__))
 
-    def test_panel_offers_the_linkage_card_with_its_actions(self):
-        self.build_ui()
-
-        buttons = [call[1].get("label")
-                   for call in self.fake_cmds.button.call_args_list
-                   if call[1].get("label")]
-        for label in ("进入联动", "返回实时", "结束预览", "打开对象配对窗口"):
-            self.assertIn(label, buttons)
-        # The read-back window is gone: its values live in 诊断详情.
-        self.assertNotIn("打开镜头联动窗口", buttons)
-        cards = [call[1].get("label")
-                 for call in self.fake_cmds.frameLayout.call_args_list
-                 if call[1].get("label")]
-        self.assertIn("镜头联动", cards)
+    def test_linkage_actions_offer_a_reason_when_they_are_unavailable(self):
+        self.session._ready = False
+        actions = self.controller.actions()
+        self.assertFalse(actions["enter_linkage"][0])
+        self.assertIn("连接 Unreal", actions["enter_linkage"][1])
+        self.assertFalse(actions["leave_linkage"][0])
+        self.assertFalse(actions["end_linkage"][0])
         self.assertEqual("未进入联动", self.controller.linkage_status()["line"])
-        self.assertIn("未进入联动", self.labels())
-        for internal in ("控制方：", "模式：", "目标时间：", "最新完整应用：",
-                         "滞后：", "恢复结果："):
-            self.assertFalse(any(label.startswith(internal) for label in self.labels()),
-                             internal)
-        created = [call[1] for call in self.fake_cmds.text.call_args_list
-                   if call[1].get("label") == "未进入联动" and not call[1].get("edit")]
-        self.assertEqual(mtou_controller.LINK_STATUS_WIDTH, created[0].get("width"))
-        # The disabled actions keep a reason exactly like the cache actions.
-        tooltips = [call[1].get("annotation")
-                    for call in self.fake_cmds.control.call_args_list
-                    if call[1].get("annotation")]
-        self.assertTrue(any("连接 Unreal" in tooltip for tooltip in tooltips))
 
-    def test_scene_labels_keep_their_column_width_with_the_full_text_as_tooltip(self):
-        # R-020: a long root path or outfit name is shortened inside its column
-        # instead of widening the panel; the tooltip keeps the whole value.
-        self.build_ui()
-        for prefix in ("角色根骨骼：", "当前衣服：", "场景帧率："):
-            created = [call[1] for call in self.fake_cmds.text.call_args_list
-                       if str(call[1].get("label", "")).startswith(prefix)
-                       and not call[1].get("edit")]
-            self.assertEqual(1, len(created), prefix)
-            self.assertEqual(mtou_controller.SCENE_TEXT_WIDTH, created[0].get("width"))
-        for label in ("骨骼数：0", "BlendShape 数：0"):
-            created = [call[1] for call in self.fake_cmds.text.call_args_list
-                       if call[1].get("label") == label and not call[1].get("edit")]
-            self.assertEqual(mtou_controller.CACHE_TEXT_WIDTH, created[0].get("width"))
-        self.assertLessEqual(mtou_controller.SCENE_TEXT_WIDTH, mtou_controller.CARD_HALF)
-
-        root = "|C01_111_MetaHuman_Body_Rig_Group|DHIbody_root_with_a_very_long_name|root"
+    def test_operation_snapshot_preserves_full_character_names_and_counts(self):
+        root = "|C01_MetaHuman_Body_Rig_Group|DHIbody_root_with_a_very_long_name|root"
         outfit = "Clothes13_LongGarmentVariantName_WithExtraSuffix_v027_服装变体名称"
-        snapshot = types.SimpleNamespace(root=root, outfit=outfit, bones=[1] * 214,
+        character = types.SimpleNamespace(root=root, outfit=outfit, bones=[1] * 214,
                                          curve_names=["c"] * 312, duplicate_paths=())
-        self.controller._scene = types.SimpleNamespace(snapshot=lambda: snapshot)
-        self.fake_cmds.text.reset_mock()
-        with self.bindings:
-            self.controller._render_snapshot(snapshot)
-        edits = {call[1]["label"]: call[1]["annotation"]
-                 for call in self.fake_cmds.text.call_args_list if call[1].get("edit")}
-        for prefix, value in (("角色根骨骼：", root), ("当前衣服：", outfit)):
-            label = [item for item in edits if item.startswith(prefix)][0]
-            self.assertLessEqual(mtou_controller._text_units(label),
-                                 mtou_controller.SCENE_LABEL_UNITS, label)
-            self.assertIn("…", label)
-            self.assertEqual(prefix + value, edits[label])
-        root_label = [item for item in edits if item.startswith("角色根骨骼：")][0]
-        self.assertTrue(root_label.endswith("|root"), root_label)
-        self.assertIn("骨骼数：214", edits)
-        self.assertIn("BlendShape 数：312", edits)
-        # A short value is shown unchanged.
-        self.assertEqual(("当前衣服：Clothes13", "当前衣服：Clothes13"),
-                         mtou_controller.scene_label_text("当前衣服：", "Clothes13"))
+        self.controller._scene = types.SimpleNamespace(snapshot=lambda: character)
+        state = self.controller.snapshot()
+        self.assertEqual(root, state["root"])
+        self.assertEqual(outfit, state["outfit"])
+        self.assertEqual(214, state["bone_count"])
+        self.assertEqual(312, state["curve_count"])
 
     def test_linkage_status_line_shows_only_state_and_problems(self):
         def line(mode, lag=None, applied="seq@1", overdue=False, wait=0.0,
                  held=False, recovery=(), failure=None):
             status = types.SimpleNamespace(lag_seconds=lag, applied_eval_id=applied,
                                            apply_failure=failure)
-            text, tooltip = mtou_controller.linkage_status_line(
+            text, tooltip = mtou_diagnostics.linkage_status_line(
                 mode, status, recovery, overdue, wait, held)
-            self.assertLessEqual(mtou_controller._text_units(text),
-                                 mtou_controller.LINK_STATUS_UNITS, text)
             return text, tooltip
 
         linkage = mtou_config.LINKAGE_MODE
@@ -527,7 +450,7 @@ class LinkagePanelTests(unittest.TestCase):
             self.session.route(
                 applied_message(eval_id="seq@10+0/cam#c1", sample_serial=1))
 
-        text = self.controller._diagnostic_text()
+        text = mtou_diagnostics.linkage_diagnostic_text(self.controller.linkage_status())
         for expected in ("镜头联动：", "状态：镜头联动中", "控制方：Unreal",
                          "模式：镜头联动", "mode_revision：1 · session：7",
                          "目标时间：", "已应用求值：seq@10+0/cam#c1", "样本序号：1",
@@ -535,41 +458,18 @@ class LinkagePanelTests(unittest.TestCase):
                          "在途目标：", "逐资源恢复：无"):
             self.assertIn(expected, text)
 
-    def test_cache_summary_stays_inside_its_column_with_the_full_text_as_tooltip(self):
-        self.build_ui()
-        created = [call[1] for call in self.fake_cmds.text.call_args_list
-                   if call[1].get("label") == "缓存：无" and not call[1].get("edit")]
-        self.assertEqual(1, len(created))
-        self.assertEqual(mtou_controller.CACHE_TEXT_WIDTH, created[0].get("width"))
-        self.assertLessEqual(mtou_controller.CACHE_TEXT_WIDTH
-                             + mtou_controller.CACHE_TEXT_INDENT,
-                             mtou_controller.CARD_HALF)
-
-        def summary(start, end, fps):
-            return types.SimpleNamespace(capture_range=(start, end),
-                                         frame_count=end - start + 1,
-                                         scene_fps=fps, capture_time=0.0)
-
-        def render(value):
-            self.fake_cmds.text.reset_mock()
-            with self.bindings:
-                self.controller._update_cache_text(value)
-            edit = self.fake_cmds.text.call_args_list[-1][1]
-            self.assertTrue(edit.get("edit"))
-            return edit["label"], edit["annotation"]
-
-        label, tooltip = render(summary(100, 160, 30.0))
-        self.assertEqual("缓存：100-160（61 帧）", label)
-        self.assertRegex(tooltip, r"^缓存：100-160，61 帧，30 fps，捕获于 \d{4}-\d\d-\d\d ")
-        for start, end in ((-9999, 10000), (-123456789, -123436790),
+    def test_cache_summary_preserves_capture_bounds_and_rate(self):
+        from mtou_livelink.diagnostics import cache_summary_text
+        for start, end in ((100, 160), (-9999, 10000), (-123456789, -123436790),
                            (12345678901234, 12345678921233)):
-            label, tooltip = render(summary(start, end, 23.976))
-            self.assertLessEqual(mtou_controller._text_units(label),
-                                 mtou_controller.CACHE_LABEL_UNITS, label)
-            self.assertTrue(label.startswith("缓存："), label)
-            self.assertIn("{0}-{1}，{2} 帧，23.976 fps".format(
-                start, end, end - start + 1), tooltip)
-        self.assertEqual(("缓存：无", "缓存：无"), render(None))
+            cache = types.SimpleNamespace(capture_range=(start, end),
+                                         frame_count=end - start + 1,
+                                         scene_fps=23.976, capture_time=0.0)
+            summary = cache_summary_text(cache)
+            self.assertIn("{0}–{1}".format(start, end), summary)
+            self.assertIn("{0:,} 帧".format(end - start + 1), summary)
+            self.assertIn("23.976 fps", summary)
+        self.assertEqual("", cache_summary_text(None))
 
     def test_enter_linkage_refuses_without_a_ready_session(self):
         self.session._ready = False
@@ -1062,12 +962,15 @@ class LinkagePanelTests(unittest.TestCase):
                          self.controller.linkage_status()["recovery_records"])
         diagnostic = self.controller._last_diagnostic
         self.assertEqual("RECOVERY_REFUSED", diagnostic["code"])
-        self.assertIn("诊断详情", diagnostic["solution"])
+        self.assertIn("完整诊断", diagnostic["solution"])
         for residual in self.host.restore_residual:
             self.assertIn(residual, diagnostic["details"])
-            self.assertIn(residual, self.controller._linkage_diagnostic_text())
+            self.assertIn(residual, mtou_diagnostics.linkage_diagnostic_text(self.controller.linkage_status()))
             self.assertIn(residual, message["detail"])
-        self.show_error.assert_called_once_with(diagnostic)
+        self.show_error.assert_called_once()
+        shown = self.show_error.call_args.args[0]
+        self.assertEqual(diagnostic["code"], shown["code"])
+        self.assertEqual(diagnostic["details"], shown["details"])
 
     def test_late_confirmation_after_ambiguous_exit_deadline_does_not_reenter(self):
         linkage = self._reenter_before_exit_confirmation()
@@ -1111,28 +1014,15 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
         with self.bindings:
             self.controller.leave_linkage("realtime")
-        enabled = {}
-        self.controller._end_linkage_button = "end"
-        self.controller._leave_linkage_button = "leave"
-        with mock.patch.object(
-                self.controller, "_set_enabled",
-                side_effect=lambda control, value: enabled.__setitem__(control, value)):
-            with self.bindings:
-                self.controller._update_linkage_controls()
-        self.assertTrue(enabled["end"])
-        self.assertFalse(enabled["leave"])
+        actions = self.controller.actions()
+        self.assertTrue(actions["end_linkage"][0])
+        self.assertFalse(actions["leave_linkage"][0])
 
         with self.bindings:
             self.controller.leave_linkage("end")
-        exits = [m["target"] for m in self.session.messages
-                 if m["type"] == "leave_linkage"]
+        exits = [m["target"] for m in self.session.messages if m["type"] == "leave_linkage"]
         self.assertEqual(["realtime", "end"], exits)
-        with mock.patch.object(
-                self.controller, "_set_enabled",
-                side_effect=lambda control, value: enabled.__setitem__(control, value)):
-            with self.bindings:
-                self.controller._update_linkage_controls()
-        self.assertFalse(enabled["end"])
+        self.assertFalse(self.controller.actions()["end_linkage"][0])
 
     def test_a_statement_for_another_session_starts_nothing(self):
         stale = self._mode_state(4)
@@ -1175,7 +1065,7 @@ class LinkagePanelTests(unittest.TestCase):
         self.enter_linkage()
         self.show_error.reset_mock()
         self.assertTrue(self._route(dict(error)))
-        self.assertEqual("INVALID_MESSAGE", self.show_error.call_args[0][0]["code"])
+        self.show_error.assert_not_called()
         self.assertEqual(2, len(self.session.reasons))
 
     def test_runtime_reply_reports_an_error_reply_without_dropping_the_session(self):
@@ -1268,7 +1158,7 @@ class LinkagePanelTests(unittest.TestCase):
                       self.controller.linkage_status()["labels"]["recovery"])
         snapshot = self.controller.linkage_status()
         self.assertIn("恢复失败 1 项", snapshot["line"])
-        self.assertIn("诊断详情", snapshot["line_tooltip"])
+        self.assertIn("完整诊断", snapshot["line_tooltip"])
         self.assertTrue(any("camera: persp is locked" in record for record
                             in self.controller.linkage_status()["recovery_records"]))
 
@@ -1306,6 +1196,7 @@ class LinkagePanelTests(unittest.TestCase):
 
         class _SceneMessage(object):
             kMayaExiting, kBeforeNew, kBeforeOpen = "exiting", "before_new", "before_open"
+            kAfterNew, kAfterOpen = "after_new", "after_open"
 
             @staticmethod
             def addCallback(message, callback):
@@ -1313,7 +1204,7 @@ class LinkagePanelTests(unittest.TestCase):
                 return len(registered) + 100
 
         self.fake_om.MSceneMessage = _SceneMessage
-        self.build_ui()
+        self.start_controller()
         return registered
 
     def after_open_notices(self):
@@ -1352,7 +1243,7 @@ class LinkagePanelTests(unittest.TestCase):
         self.assertEqual(1, len(self.removed_callbacks))
 
     def test_without_scene_messages_the_after_open_notice_releases_the_role(self):
-        self.build_ui()  # the fake OpenMaya has no MSceneMessage
+        self.start_controller()  # the fake OpenMaya has no MSceneMessage
         self.enter_linkage()
         notices = self.after_open_notices()
 
@@ -1401,82 +1292,13 @@ class LinkagePanelTests(unittest.TestCase):
         self.controller._cached_playback = cached
 
         with self.bindings:
-            self.controller._on_mode_changed(mtou_config.CACHED_MODE)
+            self.controller.set_mode(mtou_config.CACHED_MODE)
 
         self.assertEqual("MODE_CONFLICT", self.show_error.call_args[0][0]["code"])
         self.assertEqual(mtou_config.LINKAGE_MODE, self.controller._mode)
         self.assertTrue(self.controller._linkage.is_active)
 
 
-class PanelThemeTests(unittest.TestCase):
-    """Closing the panel and exiting Maya release the panel theme."""
-
-    def setUp(self):
-        self.timers = []
-        self.removed_callbacks = []
-        self.deferred = []
-        self.host = FakeLinkageHost()
-        self.session = FakeStreamingSession()
-        self.controller = mtou_controller.Controller()
-        self.controller._session = self.session
-        self.session.statement_handler = (
-            lambda reply: self.controller._on_session_statement(
-                {"session": self.session}, reply))
-        self.controller._scene = FakeCharacterScene()
-        self.fake_cmds = self._fake_cmds()
-        self.fake_om = self._fake_om()
-        self.bindings = _Bindings(self.fake_cmds, self.fake_om)
-
-    def _fake_cmds(self):
-        fake = mock.MagicMock()
-        fake.control.return_value = True
-        fake.currentUnit.return_value = "film"
-        fake.confirmDialog.return_value = "确定"
-        windows = self.windows = set()
-
-        def window(*args, **kwargs):
-            name = args[0] if args else kwargs.get("name")
-            if kwargs.get("exists") or kwargs.get("query"):
-                return name in windows if kwargs.get("exists") else None
-            windows.add(name)
-            return name
-
-        def delete_ui(name, *args, **kwargs):
-            windows.discard(name)
-
-        fake.window.side_effect = window
-        fake.deleteUI.side_effect = delete_ui
-        fake.evalDeferred.side_effect = lambda action, *a, **k: self.deferred.append(action)
-        return fake
-
-    def _fake_om(self):
-        class _Message(object):
-            @staticmethod
-            def removeCallback(callback_id):
-                self.removed_callbacks.append(callback_id)
-
-        return type("FakeOpenMaya", (), {"MMessage": _Message})
-
-    def test_panel_close_and_maya_exit_release_the_panel_theme(self):
-        released = []
-        with mock.patch.object(mtou_controller, "release_panel_theme",
-                               side_effect=released.append):
-            self.controller._card_decorations = ["card"]
-            self.controller._styled_controls = {"button": "widget"}
-            with self.bindings:
-                self.controller.close()
-            # Qt deletes the decorations with the panel it is closing.
-            self.assertEqual([], released)
-            self.assertEqual(([], {}), (self.controller._card_decorations,
-                                        self.controller._styled_controls))
-
-            self.controller._card_decorations = ["card"]
-            with self.bindings:
-                self.controller._on_maya_exiting()
-                self.controller._on_maya_exiting()
-
-        self.assertEqual([["card"], []], released)
-        self.assertEqual([], self.controller._card_decorations)
 
 
 if __name__ == "__main__":

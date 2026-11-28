@@ -24,17 +24,19 @@ Maya 与 Unreal 分别安装，只通过线上协议协作，不读取另一端�
 
 | 入口 | 职责与排查方向 |
 | --- | --- |
-| `MtoULiveLink.py` | 用户启动入口 |
-| `mtou_livelink/controller.py` | 面板、会话与场景状态的产品控制入口；拥有用户连接意图与一次输入变更的协调操作 |
+| `MtoULiveLink.py` | 用户及工具架启动入口，唤起唯一主窗 |
+| `mtou_livelink/controller.py` | 无窗口的 Maya 操作入口。协调场景、连接、缓存、联动和资源释放，并提供供面板读取的状态快照 |
 | `mtou_livelink/scene.py` | Character scene 与角色快照相关逻辑 |
 | `mtou_livelink/session.py` | 一条实际连接的 Streaming session、采样和资源；会话拥有实时去重和采样统计，发送线程处理协议、协商、独立截止检查并记录实际发送 |
 | `mtou_livelink/protocol.py` | Maya 端消息构造与验证；契约正文在 protocol/ |
 | `mtou_livelink/cache.py` | Cached Playback |
 | `mtou_livelink/linkage.py`、`timecontrol.py`、`camera.py` | 联动会话、时间控制和相机相关行为 |
-| `mtou_livelink/ui/` | 面板与附属窗口 |
+| `mtou_livelink/preferences.py` | Maya 用户偏好中的场景设置，按规范化的场景路径分开保存 |
+| `mtou_livelink/diagnostics.py`、`strings.py` | 最近操作结果和中文界面、诊断与恢复文案 |
+| `mtou_livelink/ui/`、`qt_compat.py` | 原生 Qt 四页主窗和完整诊断窗口，Qt 绑定和 Maya 主窗包装集中在兼容层 |
 
-排查时从用户操作追到控制器、对应会话及场景资源的所有者。重复启动和关闭须
-遵守 AGENTS 的窗口、回调、scriptJob 与临时节点清理规则。
+排查时从面板动作追到控制器、对应会话及场景资源的所有者。控制器在换场景前释放旧资源，在换完后恢复设置。
+重复启动和关闭遵守 AGENTS 的窗口、回调、scriptJob 与临时节点清理规则。
 
 ## Unreal 入口与状态
 

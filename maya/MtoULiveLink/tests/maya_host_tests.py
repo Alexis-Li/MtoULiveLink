@@ -607,9 +607,8 @@ class MayaHostTests(unittest.TestCase):
                 cmds.addAttr(chosen, longName="wardrobe", attributeType="enum",
                              enumName="ClothesChosen")
                 controller = mtou_controller.Controller()
-                controller._render_snapshot = mock.Mock()
                 controller._set_connected = mock.Mock()
-                controller._show_error = mock.Mock()
+                controller._notify_diagnostic = mock.Mock()
                 controller._selected_display = mock.Mock(return_value=chosen)
                 self.addCleanup(controller._clear_scene)
                 controller._capture_scene(root)
@@ -645,21 +644,21 @@ class MayaHostTests(unittest.TestCase):
                 mtou_mayaapi.drain_deferred()
                 self.assertIsNone(controller._scene)
                 self.assertIsNone(controller._session)
-                self.assertEqual("SAMPLING_FAILED", controller._show_error.call_args[0][0]["code"])
-                controller._show_error.reset_mock()
+                self.assertEqual("SAMPLING_FAILED", controller._notify_diagnostic.call_args[0][0]["code"])
+                controller._notify_diagnostic.reset_mock()
 
                 with mock.patch.object(mtou_session.StreamingSession, "start") as start:
                     controller.connect()
                 controller._session = None
                 start.assert_called_once()
-                controller._show_error.assert_not_called()
+                controller._notify_diagnostic.assert_not_called()
                 self.assertEqual(outfit, controller._scene.snapshot().outfit)
 
                 outside = cmds.createNode("transform", name="outside")
                 controller._selected_display.return_value = outside
                 controller.set_display_controller()
                 self.assertIn("inside the character",
-                              controller._show_error.call_args[0][0]["message"])
+                              controller._notify_diagnostic.call_args[0][0]["message"])
                 self.assertEqual(outfit, controller._scene.snapshot().outfit)
                 controller._clear_scene()
 
@@ -1171,7 +1170,7 @@ class MayaHostTests(unittest.TestCase):
         controller = mtou_controller.Controller()
         character = controller._capture_scene(root)
         controller._set_connected = mock.Mock()
-        controller._show_error = mock.Mock()
+        controller._notify_diagnostic = mock.Mock()
         controller._show_warning = mock.Mock()
         self.addCleanup(controller.close)
         listener = self._restart_listener()
@@ -1184,7 +1183,7 @@ class MayaHostTests(unittest.TestCase):
                 old_session._sample_and_submit(force=True)
                 self.assertEqual("frame", mtou_protocol.recv_message(old_peer)["type"])
 
-                controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
+                controller.set_workflow(mtou_config.WORKFLOW_MODEL)
                 cmds.setAttr(body + ".visibility", False)
                 cmds.setAttr(garment + ".visibility", True)
                 mtou_mayaapi.drain_deferred()
@@ -1221,7 +1220,7 @@ class MayaHostTests(unittest.TestCase):
                 self.assertIsNone(controller._restart)
                 self.assertEqual("BLENDSHAPE_MISMATCH", controller._last_diagnostic["code"])
                 controller._show_warning.assert_not_called()
-                controller._show_error.assert_not_called()
+                controller._notify_diagnostic.assert_not_called()
 
     def _assert_live_sample_starts_restart(self, edited_mesh):
         root = cmds.createNode("joint", name="bodyRoot")
@@ -1231,7 +1230,7 @@ class MayaHostTests(unittest.TestCase):
         controller = mtou_controller.Controller()
         body = controller._capture_scene(root)
         controller._set_connected = mock.Mock()
-        controller._show_error = mock.Mock()
+        controller._notify_diagnostic = mock.Mock()
         self.addCleanup(controller.close)
         cmds.select(secondary_root, replace=True)
         controller.set_secondary_object()
@@ -1275,7 +1274,7 @@ class MayaHostTests(unittest.TestCase):
                     message = mtou_protocol.recv_message(peer)
                     self.assertEqual((kind, input_revision),
                                      (message["type"], message["source_revision"]))
-                controller._show_error.assert_not_called()
+                controller._notify_diagnostic.assert_not_called()
 
     def test_primary_live_sample_starts_restart_before_deferred_refresh(self):
         self._assert_live_sample_starts_restart("body")
@@ -1290,7 +1289,7 @@ class MayaHostTests(unittest.TestCase):
         controller = mtou_controller.Controller()
         controller._capture_scene(root)
         controller._set_connected = mock.Mock()
-        controller._show_error = mock.Mock()
+        controller._notify_diagnostic = mock.Mock()
         self.addCleanup(controller.close)
         listener = self._restart_listener()
         with mock.patch.multiple(mtou_config, HOST="127.0.0.1", PORT=listener.getsockname()[1]), \
@@ -1324,7 +1323,7 @@ class MayaHostTests(unittest.TestCase):
                 self.assertIsNone(controller._cached_playback)
                 self.assertFalse(active.time_control.cache_holds_connection())
                 self.assertEqual("RESTART_TIMEOUT", controller._last_diagnostic["code"])
-                controller._show_error.assert_not_called()
+                controller._notify_diagnostic.assert_not_called()
 
     def test_termination_from_a_worker_thread_is_delivered_without_an_idle_loop(self):
         # mayapy never runs maya.utils.executeDeferred work; batch mode queues
@@ -1992,35 +1991,15 @@ class MayaHostTests(unittest.TestCase):
         # ...and the opened scene keeps its own camera, gate and frame.
         self._assert_foreign_state_kept()
 
-    def test_releasing_the_panel_theme_deletes_its_python_event_filters(self):
-        import shiboken2
-        from mtou_livelink.ui.layout import release_panel_theme
-        from PySide2 import QtCore
-
-        events = []
-
-        class Decoration(QtCore.QObject):
-            def eventFilter(self, watched, event):
-                events.append(event.type())
-                return False
-
-        card = QtCore.QObject()
-        self.addCleanup(shiboken2.delete, card)
-        decoration = Decoration(card)
-        card.installEventFilter(decoration)
-        closed_card = QtCore.QObject()
-        gone = Decoration(closed_card)
-        shiboken2.delete(closed_card)  # Qt deleted it with its window
-        self.assertFalse(shiboken2.isValid(gone))
-
-        release_panel_theme([decoration, gone])
-        release_panel_theme([decoration, gone])
-
-        self.assertFalse(shiboken2.isValid(decoration))
-        self.assertTrue(shiboken2.isValid(card))
-        self.assertEqual([], card.children())
-        QtCore.QCoreApplication.sendEvent(card, QtCore.QEvent(QtCore.QEvent.User))
-        self.assertEqual([], events)
+    def test_qt_windows_wrap_and_select_diagnostics_and_keep_long_names(self):
+        # Maya Standalone owns a different Qt application. Use Maya's Python
+        # in a separate process for native QWidget assertions.
+        import subprocess
+        check = pathlib.Path(__file__).with_name("maya_qt_window_tests.py")
+        result = subprocess.run([sys.executable, str(check)], capture_output=True,
+                                timeout=45)
+        self.assertEqual(0, result.returncode,
+                         (result.stdout + result.stderr).decode("utf-8", "replace"))
 
 
 if __name__ == "__main__":

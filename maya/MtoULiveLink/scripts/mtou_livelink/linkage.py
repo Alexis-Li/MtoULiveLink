@@ -22,6 +22,7 @@ group of a set it is closing.
 import threading
 import time
 
+from .strings import text
 from .config import (
     CHARACTER_OBJECT_ID,
     CONTROL_MAYA,
@@ -273,7 +274,7 @@ class LinkageSession(object):
         """Close the old set: hold groups until Unreal confirms the new one."""
         with self._lock:
             self._removing = True
-            self._detail = "正在移除副对象，等待 Unreal 确认"
+            self._detail = text("secondary_removal_pending")
 
     def adopt_set(self, set_revision, object_ids):
         """Adopt the set Unreal confirmed; the answer in flight belongs to the old set.
@@ -296,7 +297,7 @@ class LinkageSession(object):
             # the latest complete application stays what Unreal last showed.
             self._request = None
             self._apply_failure = None
-            self._detail = "对象集合已更新（{0} 个对象）".format(len(self._object_ids))
+            self._detail = text("object_set_updated").format(len(self._object_ids))
         self._emit(LinkageEvent(
             "set", mode=self.mode(), control=self._control,
             mode_revision=self.mode_revision(), detail=self._detail))
@@ -427,13 +428,13 @@ class LinkageSession(object):
             self._awaiting_confirmation = True
             self._entered_at = self._clock()
             self._unconfirmed_realtime = None
-            self._detail = "镜头联动已开始"
+            self._detail = text("linkage_started")
         self._session.submit_linkage(make_mode_message(
             self._session_id, revision, LINKAGE_MODE, CONTROL_UNREAL, "ready",
             "Maya follows the Unreal sequence time"))
         self._emit(LinkageEvent(
             "mode", mode=LINKAGE_MODE, control=CONTROL_UNREAL,
-            mode_revision=revision, detail="镜头联动已开始"))
+            mode_revision=revision, detail=text("linkage_started")))
         return self._mode_revision
 
     def leave(self, target, mode_revision):
@@ -462,7 +463,7 @@ class LinkageSession(object):
                 self._emit(LinkageEvent(
                     "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
                     mode_revision=revision,
-                    detail="已结束预览并恢复原状态"))
+                    detail=text("preview_ended")))
                 return ()
             if revision <= self._mode_revision:
                 raise LinkageError(
@@ -483,8 +484,8 @@ class LinkageSession(object):
             if target == "end":
                 self._entered = False
             self._detail = (
-                "已返回实时预览（Maya 保持暂停）" if target == "realtime"
-                else "已结束预览并恢复原状态")
+                text("realtime_restored") if target == "realtime"
+                else text("preview_ended"))
         self._session.submit_linkage(make_leave_linkage_message(
             self._session_id, revision, target, "; ".join(residual)))
         self._session.time_control.note_linkage_exit(revision)
@@ -589,9 +590,9 @@ class LinkageSession(object):
                         self._pending = self._issued
                     self._issued = None
             self._detail = (
-                "已应用 {0}".format(message.get("eval_id"))
+                text("linkage_applied").format(message.get("eval_id"))
                 if message.get("applied")
-                else "应用失败：{0}".format(message.get("reason") or ""))
+                else text("linkage_apply_failed").format(message.get("reason") or ""))
         self._emit(LinkageEvent(
             "applied", mode=LINKAGE_MODE, control=CONTROL_UNREAL,
             mode_revision=self._mode_revision, detail=self._detail))
@@ -711,14 +712,14 @@ class LinkageSession(object):
             self._release_lease()
         with self._lock:
             if residual:
-                summary = "Maya 无法完整恢复联动前的状态"
+                summary = text("maya_recovery_failed")
             elif revision > current:
-                summary = "Unreal 已结束镜头联动，Maya 已恢复并保持暂停"
+                summary = text("unreal_ended_linkage")
             else:
-                summary = "Unreal 未接管镜头联动，Maya 已恢复原状态"
+                summary = text("unreal_refused_linkage")
             self._detail = summary + ("：" + detail if detail else "")
             if residual:
-                self._detail += "（恢复残留：{0}）".format("；".join(residual))
+                self._detail += text("restoration_residual").format("；".join(residual))
         self._emit(LinkageEvent(
             "mode", mode=REALTIME_MODE, control=CONTROL_MAYA,
             mode_revision=revision, detail=self._detail,
@@ -740,7 +741,7 @@ class LinkageSession(object):
         that took over late hands its writers back instead of driving a target
         nobody answers. Returns the residual, or None when nothing waited.
         """
-        reason = "Unreal 未在 {0:g} 秒内确认镜头联动".format(
+        reason = text("linkage_ack_timeout").format(
             LINKAGE_MODE_CONFIRMATION_SECONDS)
         with self._lock:
             if self._mode != LINKAGE_MODE or not self._awaiting_confirmation:
@@ -764,11 +765,11 @@ class LinkageSession(object):
         self._announce_failed(revision, reason)
         self._release_lease()
         with self._lock:
-            self._detail = reason + "，Maya 已恢复原状态"
+            self._detail = reason + text("maya_recovered")
             if detail:
-                self._detail += "（Unreal 最近回复：{0}）".format(detail)
+                self._detail += text("latest_unreal_detail").format(detail)
             if residual:
-                self._detail += "（恢复残留：{0}）".format("；".join(residual))
+                self._detail += text("restoration_residual").format("；".join(residual))
         self._emit(LinkageEvent(
             "failed", mode=REALTIME_MODE, control=CONTROL_MAYA,
             mode_revision=revision, detail=self._detail,
@@ -803,7 +804,7 @@ class LinkageSession(object):
                     and sample_serial == self._issued_sample_serial):
                 self._issued = None
             if detail:
-                self._detail = "已丢弃过期结果：{0}".format(detail)
+                self._detail = text("stale_result_discarded").format(detail)
 
     def _check_identity_locked(self, message):
         session_id = exact_int(message.get("session_id"))
@@ -884,7 +885,7 @@ class LinkageSession(object):
             if target is not self._request:
                 self._request = target
                 self._request_first_sample = sample_serial
-            self._detail = "已采样 {0}".format(target.eval_id)
+            self._detail = text("sampled_pose").format(target.eval_id)
         message = make_group_message(
             self._session_id, set_revision, self._mode_revision,
             self._space_revision, target.eval_id, target.transport_serial,
@@ -893,7 +894,7 @@ class LinkageSession(object):
         if size > MAX_LINKAGE_GROUP_BYTES:
             with self._lock:
                 self._issued = None
-                self._detail = "整组姿势超过冻结的消息上限"
+                self._detail = text("group_size_limit")
             self._emit(LinkageEvent(
                 "failed", mode=LINKAGE_MODE, control=CONTROL_UNREAL,
                 mode_revision=self._mode_revision,
@@ -960,7 +961,7 @@ class LinkageSession(object):
             self._control = CONTROL_MAYA
         residual = self._restore(state)
         self._release_lease()
-        self._detail = "已断开连接并恢复预览接管"
+        self._detail = text("disconnected_takeover_restored")
         return tuple(residual)
 
     # ----------------------------------------------------------------- detail
