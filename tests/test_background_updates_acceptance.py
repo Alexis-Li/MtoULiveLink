@@ -401,12 +401,13 @@ class BackgroundAcceptanceTests(unittest.TestCase):
 def driver_functions():
     tree = ast.parse(DRIVER.read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-                 and node.name in ("connect_role", "run_command", "start")]
+                 and node.name in ("connect_role", "record_connection", "run_command", "start")]
     controller = mock.Mock()
     controller.objects_state.return_value = {"secondary": None}
     namespace = {"FIXTURE": {"root": "root"}, "CONTROLLER": controller,
                  "PANEL": mock.sentinel.panel, "gui": mock.Mock(),
                  "cmds": mock.Mock(), "RESULT": {}, "time": time,
+                 "ATTEMPT_LOCK": mock.MagicMock(), "ATTEMPTS": [],
                  "select_secondary": mock.Mock()}
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(DRIVER), "exec"), namespace)
     return namespace
@@ -425,6 +426,30 @@ class MayaDriverCommandTests(unittest.TestCase):
         state["connect_role"](False)
         self.assertEqual([mock.call(panel, "setRoleButton"),
                           mock.call(panel, "setSecondaryButton")], clicks.call_args_list)
+
+    def test_connection_stop_reason_survives_a_new_role_or_scene(self):
+        state = driver_functions()
+        controller = state["CONTROLLER"]
+        controller._session = None
+        controller._session_id_of.return_value = None
+        controller._connection_stop_diagnostic = {
+            "code": "SUBJECT_CHANGED", "summary": "连接对象已变更，连接已停止"}
+        state["record_connection"](
+            {"connection": "idle", "status": "角色已设置", "diagnostic": {"operation": "role"}})
+        state["record_connection"]({"connection": "idle", "status": "", "diagnostic": {}})
+        stopped, = state["RESULT"]["connections"]
+        self.assertEqual("SUBJECT_CHANGED", stopped["code"])
+        self.assertEqual("连接对象已变更，连接已停止", stopped["status"])
+        self.assertFalse(stopped["open"])
+
+        controller._session = mock.sentinel.new_session
+        controller._session_id_of.return_value = 2
+        state["record_connection"](
+            {"connection": "connected", "status": "已连接", "diagnostic": {}})
+        new = state["RESULT"]["connections"][-1]
+        self.assertTrue(new["open"])
+        self.assertEqual(2, new["session_id"])
+        self.assertIsNone(new["code"])
 
     def test_evaluated_time_ack_follows_synchronous_time_change(self):
         state = driver_functions()

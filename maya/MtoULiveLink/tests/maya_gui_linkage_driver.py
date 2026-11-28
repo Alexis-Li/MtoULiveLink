@@ -137,15 +137,20 @@ def panel_status():
 def record_connection(snapshot=None):
     snapshot = snapshot if snapshot is not None else CONTROLLER.snapshot()
     session = CONTROLLER._session
-    diagnostic = snapshot.get("diagnostic") or {}
+    reconnecting = snapshot["connection"] == "reconnecting"
+    # Setting a new role or opening a new scene updates the latest operation.
+    # Connection acceptance measures why the old session actually stopped.
+    stopped = (CONTROLLER._connection_stop_diagnostic
+               if session is None and not reconnecting else None)
+    diagnostic = stopped or snapshot.get("diagnostic") or {}
     record = {
         "stage": RESULT.get("stage", "startup"),
         "ready": CONTROLLER._session_ready() if session is not None else False,
         "open": session is not None,
         "session_id": CONTROLLER._session_id_of(session),
-        "reconnecting": snapshot["connection"] == "reconnecting",
+        "reconnecting": reconnecting,
         "code": diagnostic.get("code"),
-        "status": snapshot["status"],
+        "status": (stopped or {}).get("summary") or snapshot["status"],
     }
     history = RESULT.setdefault("connections", [])
     if not history or any(history[-1][key] != value for key, value in record.items()):
