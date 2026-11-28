@@ -3953,8 +3953,13 @@ void FMtoULiveLinkSource::HandleCacheCommandOnGameThread(const FMtoUCacheCommand
         CacheCommands.CancelUpload(Command.SessionId, Command.UploadId);
         return;
     }
-    ApplyCacheTransitionOnGameThread(
-        Command.SessionId, CacheSession.HandleCommand(Command));
+    const bool bWasRealtime = CacheSession.AcceptsLiveFrames();
+    const FMtoUCacheTransition Transition = CacheSession.HandleCommand(Command);
+    if (bWasRealtime && !CacheSession.AcceptsLiveFrames())
+    {
+        ClearRealtimeApplications();
+    }
+    ApplyCacheTransitionOnGameThread(Command.SessionId, Transition);
 }
 
 void FMtoULiveLinkSource::ApplyCacheTransitionOnGameThread(
@@ -3973,7 +3978,6 @@ void FMtoULiveLinkSource::ApplyCacheTransitionOnGameThread(
     switch (Transition.Kind)
     {
         case EKind::Entered:
-            ClearRealtimeApplications();
             SetStatus(TEXT("Cached Playback entry; holding recent pose"));
             break;
         case EKind::Receiving:

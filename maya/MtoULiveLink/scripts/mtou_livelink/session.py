@@ -812,7 +812,8 @@ class SenderWorker(threading.Thread):
                     self._ue_metrics = None
                 self._metrics_mode_revision = revision
                 self._metrics_peer_realtime = reply["mode"] == REALTIME_MODE
-                if self._metrics_pending_leave is not None and revision >= self._metrics_pending_leave:
+                if (self._metrics_pending_leave is not None
+                        and revision >= self._metrics_pending_leave):
                     self._metrics_pending_leave = None
         elif kind == "object_removed" and reply["session_id"] == session_id:
             revision = reply["set_revision"]

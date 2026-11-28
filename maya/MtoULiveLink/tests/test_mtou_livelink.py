@@ -5016,8 +5016,8 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(payload, actual)
             self.assertTrue(mtou_protocol.encode_message(actual))
             return
-        if operation in ("ready", "error", "realtime_metrics", "cache_ready", "cache_playing", "cache_complete",
-                         "cache_progress", "cache_stopped", "cache_cleared",
+        if operation in ("ready", "error", "realtime_metrics", "cache_ready", "cache_playing",
+                         "cache_complete", "cache_progress", "cache_stopped", "cache_cleared",
                          "cache_paused", "cache_resumed", "cache_seeked",
                          "cache_looped", "cache_loop_changed"):
             if expected["accepted"]:

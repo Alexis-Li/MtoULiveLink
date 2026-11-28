@@ -733,7 +733,8 @@ def validate_reply(reply):
     if reply_type == "hello_ack":
         _opaque_identity(reply["source_instance_id"], "source_instance_id")
         capabilities = reply["capabilities"]
-        if "realtime_metrics" in capabilities and exact_bool(capabilities["realtime_metrics"]) is None:
+        if ("realtime_metrics" in capabilities
+                and exact_bool(capabilities["realtime_metrics"]) is None):
             raise ValueError("hello_ack capabilities.realtime_metrics must be a JSON boolean")
         target_ids = []
         for target in reply["targets"]:

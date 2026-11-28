@@ -18214,7 +18214,9 @@ bool FMtoURealtimeMetricsWireTest::RunTest(const FString& Parameters)
         TestTrue(TEXT("secondary removal confirmed before another snapshot"), Maya.ReadReply(TEXT("object_removed"), Reply));
         ReadSnapshot(Maya, 2);
 
-        TestTrue(TEXT("cache entry sent"), Maya.Send(Packet(TEXT("{\"type\":\"cache_enter\"}"))));
+        TestTrue(TEXT("cache upload without a separate entry sent"), Maya.Send(Packet(
+            TEXT("{\"type\":\"cache_begin\",\"upload_id\":1,\"revision\":9,\"fps\":24,"
+                 "\"start_frame\":1,\"end_frame\":1,\"frame_count\":1,\"payload_size\":256}"))));
         TestTrue(TEXT("cached playback holds the connection"), PollUntil([&]()
         {
             Maya.Pump();
