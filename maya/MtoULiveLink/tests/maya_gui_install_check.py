@@ -4,7 +4,8 @@
 Run with a host Python (not mayapy):
 
     python maya_gui_install_check.py --maya <Maya2024>/bin/maya.exe
-        --old-entry <0.9.0 MtoULiveLink.py> --evidence <scratch dir>
+        --old-entry <0.9.0 MtoULiveLink.py> --app-dir-template <Maya 2024 prefs>
+        --evidence <scratch dir>
 
 The check builds the Maya component archive with `tools/package.py`
 and extracts it twice: under a path with a space and Chinese characters (which
@@ -22,8 +23,9 @@ dialogs are answered with their first button and recorded.
    without a backup, the copy and ``.mod`` are written, the existing button is
    kept and a restart is requested because the old release is loaded.
 3. ``upgrade``: after the restart the saved button opens the new release from
-   the module; ``run()`` and ``main()`` reuse one panel, closing and reopening
-   the panel and the 对象配对 window leaves one window each.
+   the module; ``run()`` and ``main()`` reuse one panel. Close the Qt panel
+   with diagnostics open, then click that same shelf button to reopen. The
+   Connection page offers the secondary object and just one panel opens.
 4. ``reinstall``: dropping the same ``install.mel`` again changes nothing
    that matters: no conflict, no restart, one ``.mod``, one button.
 5. ``same_session``: with the tool open, dropping the same package needs no
@@ -38,7 +40,7 @@ dialogs are answered with their first button and recorded.
    what is missing.
 8. ``rollback``: the README rollback (remove ``MtoULiveLink.mod`` and the
    copy, restore the previous single file) opens the previous release again.
-9. ``clean_install`` and ``clean_restart`` (a second, empty app directory):
+9. ``clean_install`` and ``clean_restart`` (fresh preferences, with no MtoU installed):
    the ASCII-path package's ``install.mel`` adds a button to the current shelf
    and opens the new release without a restart; after a restart the module
    loads from the extracted folder.
@@ -61,7 +63,9 @@ from pathlib import Path
 
 SHELF = "MtoU"
 SHELF_COMMAND = "import MtoULiveLink\nMtoULiveLink.run()"
-WINDOWS = ("MtoULiveLinkWindow", "MtoULiveLinkObjectsWindow")
+MAIN = "MtoULiveLinkWindow"
+DIAGNOSTICS = "MtoULiveLinkDiagnosticWindow"
+WINDOWS = (MAIN, DIAGNOSTICS)
 STEPS = ("install_old", "drag_install", "upgrade", "reinstall", "same_session",
          "broken_package", "partial_package", "missing_module", "missing_package", "rollback",
          "clean_install", "clean_restart")
@@ -86,6 +90,12 @@ def _in_maya():
 
     import maya.cmds as cmds
     import maya.utils
+    from PySide2 import QtCore, QtTest, QtWidgets
+    from shiboken2 import wrapInstance
+
+    from maya import OpenMayaUI as omui
+
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
     step = os.environ["MTOU_INSTALL_STEP"]
     evidence = Path(os.environ["MTOU_INSTALL_EVIDENCE"])
@@ -93,23 +103,23 @@ def _in_maya():
     result = {"step": step, "maya_version": cmds.about(version=True), "pid": os.getpid(),
               "errors": [], "dialogs": []}
 
-    def grab(name):
-        from PySide2.QtWidgets import QWidget
-        from shiboken2 import wrapInstance
+    def live_windows(name):
+        # Install/rollback also loads the historical single-file tool.
+        return [widget for widget in QtWidgets.QApplication.topLevelWidgets()
+                if widget.objectName() == name and widget.isVisible()]
 
-        from maya import OpenMayaUI as omui
+    def grab(name):
+        from maya_gui_controls import save_image
+
         shots = {}
         for window in WINDOWS:
-            pointer = omui.MQtUtil.findWindow(window)
-            if pointer:
-                widget = wrapInstance(int(pointer), QWidget)
+            for widget in live_windows(window):
                 path = evidence / "{0}-{1}-{2}.png".format(step, name, window)
-                widget.grab().save(str(path))
-                shots[window] = [widget.width(), widget.height()]
+                shots[window] = save_image(widget, path)["size"]
         result.setdefault("shots", {})[name] = shots
 
     def windows():
-        return {window: bool(cmds.window(window, exists=True)) for window in WINDOWS}
+        return {window: bool(live_windows(window)) for window in WINDOWS}
 
     def shelf_top():
         return maya.mel.eval("$tmp = $gShelfTopLevel")
@@ -146,10 +156,22 @@ def _in_maya():
         else:
             maya.mel.eval(command)
 
-    def press_saved():
+    def press_saved(native=False):
         buttons = tool_buttons()
         result["tool_buttons"] = [shelf for shelf, _ in buttons]
-        press(buttons[0][1])
+        shelf, button = buttons[0]
+        if not native:
+            press(button)
+            return
+        maya.mel.eval('shelfTabLayout -edit -selectTab "{0}" $gShelfTopLevel'.format(shelf))
+        pointer = omui.MQtUtil.findControl(button)
+        if not pointer:
+            raise RuntimeError("could not find the saved MtoU shelf button")
+        widget = wrapInstance(int(pointer), QtWidgets.QWidget)
+        if not widget.isVisible():
+            raise RuntimeError("the saved MtoU shelf button is hidden")
+        QtTest.QTest.mouseClick(widget, QtCore.Qt.LeftButton)
+        QtWidgets.QApplication.processEvents()
 
     def loaded():
         module = sys.modules.get("MtoULiveLink")
@@ -193,25 +215,27 @@ def _in_maya():
                 for name in cmds.moduleInfo(listModules=True) or [] if name == "MtoULiveLink"}
 
     def check_upgrade(first):
-        controller = first.run()
-        result["run_again_same_controller"] = controller is first.run()
-        result["main_same_controller"] = first.main() is controller
-        controller.open_objects_window()
-        controller.open_objects_window()
+        import maya_gui_controls as gui
+
+        panel, = live_windows(MAIN)
+        result["initial_window_from_shelf"] = True
+        result["run_again_same_panel"] = panel is first.run()
+        result["main_same_panel"] = first.main() is panel
+        diagnostic = panel.show_diagnostics()
+        assert panel.show_diagnostics() is diagnostic
         result["detail_windows_open"] = windows()
         grab("detail-windows")
-        for window in WINDOWS:
-            if cmds.window(window, exists=True):
-                cmds.deleteUI(window)
+        panel.close()
+        QtCore.QCoreApplication.sendPostedEvents(None, QtCore.QEvent.DeferredDelete)
         result["after_close"] = windows()
-        press_saved()
-        reopened = sys.modules["MtoULiveLink"].run()
-        result["reopened_new_controller"] = reopened is not controller
-        reopened.open_objects_window()
+        press_saved(native=True)
+        reopened, = live_windows(MAIN)
+        result["reopened_new_panel"] = reopened is not panel
+        gui.page(reopened, gui.CONNECTION)
+        result["secondary_on_connection_page"] = gui.control(
+            reopened, "setSecondaryButton").isVisible()
         result["reopened"] = windows()
-        result["window_count"] = {
-            window: sum(1 for name in cmds.lsUI(windows=True) or [] if name == window)
-            for window in WINDOWS}
+        result["window_count"] = {window: len(live_windows(window)) for window in WINDOWS}
         grab("reopened")
 
     def run_step():
@@ -239,7 +263,7 @@ def _in_maya():
             result["legacy_entry_left"] = (app_dir / "scripts" / "MtoULiveLink.py").exists()
             result["app_dir_listing"] = sorted(path.name for path in app_dir.iterdir())
         elif step in ("upgrade", "rollback", "clean_restart"):
-            press_saved()
+            press_saved(native=step == "upgrade")
             result["loaded"] = loaded()
             result["windows"] = windows()
             grab("open")
@@ -293,7 +317,6 @@ def _in_maya():
         cmds.quit(force=True)
 
     import maya.mel  # noqa: F401 - used by the step through maya.mel.eval
-    from PySide2 import QtCore
 
     waited = [0]
 
@@ -410,12 +433,15 @@ def evaluate(step, result, version, old_version, previous=None):
         module = (result.get("module") or {}).get("MtoULiveLink")
         expect(module and _inside(loaded.get("entry_file"), module),
                "the release did not load from the module")
-        for key in ("run_again_same_controller", "main_same_controller",
-                    "reopened_new_controller"):
+        for key in ("initial_window_from_shelf", "run_again_same_panel", "main_same_panel",
+                    "reopened_new_panel", "secondary_on_connection_page"):
             expect(result.get(key) is True, key + " is not true")
-        expect(not any((result.get("after_close") or {}).values()), "a window survived closing")
-        expect(all(count == 1 for count in (result.get("window_count") or {0: 0}).values()),
-               "a window exists more than once after reopening")
+        expect(result.get("detail_windows_open") == {MAIN: True, DIAGNOSTICS: True},
+               "the complete diagnostics did not open with the panel")
+        expect(result.get("after_close") == {MAIN: False, DIAGNOSTICS: False},
+               "a window survived closing")
+        expect(result.get("window_count") == {MAIN: 1, DIAGNOSTICS: 0},
+               "reopening from the existing shelf button did not show exactly one main panel")
     elif step == "reinstall":
         expect_installed(restart=False)
         expect(not install.get("conflicts") and not install.get("removed"),
@@ -441,8 +467,8 @@ def evaluate(step, result, version, old_version, previous=None):
         expect(any(missing in str(dialog.get("message")) for dialog in result.get("dialogs") or []),
                "the dialog does not name " + missing)
         expect(result.get("copy_linkage_kept") is True, "the installed copy was changed")
-        expect(result.get("mod_text") and result.get("mod_text") == (previous or {}).get("mod_text"),
-               "the .mod was changed")
+        mod_text = result.get("mod_text")
+        expect(mod_text and mod_text == (previous or {}).get("mod_text"), "the .mod was changed")
         if step == "broken_package":
             expect(len(result.get("tool_buttons_after") or []) == 1,
                    "an incomplete package changed the buttons")
@@ -469,9 +495,13 @@ def evaluate(step, result, version, old_version, previous=None):
 
 def main(argv):
     import argparse
+
+    from maya_gui_window_check import check_template
+
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--maya", required=True)
     parser.add_argument("--old-entry", required=True)
+    parser.add_argument("--app-dir-template", required=True)
     parser.add_argument("--evidence", required=True)
     parser.add_argument("--timeout", type=float, default=300.0)
     args = parser.parse_args(argv)
@@ -479,9 +509,11 @@ def main(argv):
     if not old_version:
         parser.error("--old-entry declares no __version__: " + args.old_entry)
 
+    template = Path(args.app_dir_template).resolve()
+    template_prefs = check_template(template)
     evidence = Path(args.evidence).resolve()
     if evidence.exists():
-        shutil.rmtree(evidence)
+        parser.error("--evidence must be a new folder: " + str(evidence))
     evidence.mkdir(parents=True)
     archive = _build_package(evidence)
     chinese = _extract(archive, evidence / "发布 目录" / "MtoULiveLink")
@@ -499,10 +531,13 @@ def main(argv):
                       encoding="utf-8")
     app_dir = evidence / "maya-app"
     clean_app_dir = evidence / "maya-app-clean"
+    shutil.copytree(template, app_dir)
+    shutil.copytree(template, clean_app_dir)
     scripts = app_dir / "scripts"
-    scripts.mkdir(parents=True)
+    scripts.mkdir(parents=True, exist_ok=True)
     copy = app_dir / "modules" / "MtoULiveLink"
-    summary = {"archive": archive.name, "steps": {}, "pids": {}}
+    summary = {"archive": archive.name, "template_prefs": template_prefs,
+               "steps": {}, "pids": {}}
 
     for step in STEPS:
         release = chinese

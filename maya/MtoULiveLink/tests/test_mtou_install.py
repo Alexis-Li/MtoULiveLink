@@ -340,9 +340,12 @@ class InstallCheckEvaluationTests(unittest.TestCase):
             "upgrade": {
                 "loaded": new,
                 "module": {"MtoULiveLink": os.path.join("app", "modules", "MtoULiveLink")},
-                "run_again_same_controller": True, "main_same_controller": True,
-                "reopened_new_controller": True, "after_close": {"w": False},
-                "window_count": {"w": 1}},
+                "initial_window_from_shelf": True, "run_again_same_panel": True,
+                "main_same_panel": True, "reopened_new_panel": True,
+                "secondary_on_connection_page": True,
+                "detail_windows_open": {self.check.MAIN: True, self.check.DIAGNOSTICS: True},
+                "after_close": {self.check.MAIN: False, self.check.DIAGNOSTICS: False},
+                "window_count": {self.check.MAIN: 1, self.check.DIAGNOSTICS: 0}},
             "reinstall": {
                 "install": dict(installed, removed=[]), "tool_buttons_after": ["s"],
                 "modules_listing": ["MtoULiveLink", "MtoULiveLink.mod"], "loaded": new},
@@ -447,10 +450,14 @@ class InstallCheckEvaluationTests(unittest.TestCase):
             old_entry = root / "old.py"
             old_entry.write_text('__version__ = "{0}"\n'.format(self.OLD), encoding="utf-8")
             evidence = root / "evidence"
+            prefs = root / "prefs-template" / "2024" / "prefs"
+            prefs.mkdir(parents=True)
+            (prefs / "userPrefs.mel").write_text("", encoding="utf-8")
             with mock.patch.object(self.check, "_run_maya", run_maya), \
                     mock.patch("builtins.print"):
                 code = self.check.main(["--maya", "maya", "--old-entry", str(old_entry),
-                                        "--evidence", str(evidence)])
+                                        "--evidence", str(evidence), "--app-dir-template",
+                                        str(root / "prefs-template")])
             summary = json.loads((evidence / "summary.json").read_text(encoding="utf-8"))
         return code, summary
 
@@ -474,7 +481,8 @@ class InstallCheckEvaluationTests(unittest.TestCase):
             with mock.patch.object(self.check, "_run_maya") as run_maya, \
                     mock.patch("sys.stderr"), self.assertRaises(SystemExit) as raised:
                 self.check.main(["--maya", "maya", "--old-entry", str(old_entry),
-                                 "--evidence", str(pathlib.Path(directory) / "evidence")])
+                                 "--evidence", str(pathlib.Path(directory) / "evidence"),
+                                 "--app-dir-template", directory])
         self.assertEqual(2, raised.exception.code)
         run_maya.assert_not_called()
 

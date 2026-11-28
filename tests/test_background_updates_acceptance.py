@@ -402,7 +402,10 @@ def driver_functions():
     tree = ast.parse(DRIVER.read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
                  and node.name in ("connect_role", "run_command", "start")]
-    namespace = {"FIXTURE": {"root": "root"}, "CONTROLLER": mock.Mock(),
+    controller = mock.Mock()
+    controller.objects_state.return_value = {"secondary": None}
+    namespace = {"FIXTURE": {"root": "root"}, "CONTROLLER": controller,
+                 "PANEL": mock.sentinel.panel, "gui": mock.Mock(),
                  "cmds": mock.Mock(), "RESULT": {}, "time": time,
                  "select_secondary": mock.Mock()}
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(DRIVER), "exec"), namespace)
@@ -413,13 +416,15 @@ class MayaDriverCommandTests(unittest.TestCase):
     def test_existing_fixture_still_connects_and_disconnected_role_does_not(self):
         state = driver_functions()
         state["connect_role"]()
-        state["CONTROLLER"].connect.assert_called_once()
-        state["CONTROLLER"].reset_mock()
+        clicks = state["gui"].click
+        panel = state["PANEL"]
+        self.assertEqual([mock.call(panel, "setRoleButton"), mock.call(panel, "connectButton")],
+                         clicks.call_args_list)
+        clicks.reset_mock()
         state["FIXTURE"]["secondary"] = {"root": "secondary"}
         state["connect_role"](False)
-        state["CONTROLLER"].set_role.assert_called_once()
-        state["CONTROLLER"].set_secondary_object.assert_called_once()
-        state["CONTROLLER"].connect.assert_not_called()
+        self.assertEqual([mock.call(panel, "setRoleButton"),
+                          mock.call(panel, "setSecondaryButton")], clicks.call_args_list)
 
     def test_evaluated_time_ack_follows_synchronous_time_change(self):
         state = driver_functions()
@@ -442,16 +447,11 @@ class MayaDriverCommandTests(unittest.TestCase):
                 state = driver_functions()
                 state.update({name: mock.Mock() for name in (
                     "write_result", "open_scene", "key_test_motion", "key_test_morphs",
-                    "install_callback_census", "install_session_census", "attach_panel_census",
-                    "connect_role", "fail", "tick")})
+                    "DialogObserver", "QtWidgets", "QtCore", "launch_panel",
+                    "install_session_census", "connect_role", "fail", "tick")})
                 state["FIXTURE"]["start_disconnected"] = disconnected
                 state["TIMER"] = [None]
-                qt_core = types.ModuleType("PySide2.QtCore")
-                qt_core.QTimer = mock.Mock()
-                entry = types.ModuleType("MtoULiveLink")
-                entry.run = mock.Mock(return_value=state["CONTROLLER"])
-                with mock.patch.dict(sys.modules, {"MtoULiveLink": entry, "PySide2.QtCore": qt_core}):
-                    state["start"]()
+                state["start"]()
                 state["fail"].assert_not_called()
                 state["connect_role"].assert_called_once_with(connect=not disconnected)
 
