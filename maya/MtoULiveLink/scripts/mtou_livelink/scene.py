@@ -140,22 +140,25 @@ def ensure_complete_capture(root, bones):
 def selected_root():
     selected = cmds.ls(selection=True, long=True) or []
     if len(selected) != 1 or cmds.nodeType(selected[0]) != "joint":
-        raise ValueError("Select exactly one deformation root joint before connecting.")
+        raise CharacterSceneError("INVALID_CHARACTER_ROOT")
     return selected[0]
 
 
 def long_transform(node):
     matches = cmds.ls(node, long=True) or []
     if len(matches) != 1:
-        raise ValueError("Expected exactly one Maya node: {0}".format(node))
+        raise CharacterSceneError(
+            "INVALID_DISPLAY", context={"reason": "display_node_unresolved", "path": node})
     path = matches[0]
     if cmds.nodeType(path) in ("mesh", "nurbsCurve"):
         parents = cmds.listRelatives(path, parent=True, fullPath=True) or []
         if not parents:
-            raise ValueError("The selected shape has no transform parent: {0}".format(path))
+            raise CharacterSceneError(
+                "INVALID_DISPLAY", context={"reason": "display_parent_missing", "path": path})
         path = parents[0]
     if cmds.nodeType(path) != "transform":
-        raise ValueError("The Display controller must be a transform or curve shape.")
+        raise CharacterSceneError(
+            "INVALID_DISPLAY", context={"reason": "display_node_type", "path": path})
     return path
 
 
@@ -773,8 +776,7 @@ class CharacterScene(object):
         matches = cmds.ls(root, long=True) or []
         if len(matches) != 1 or cmds.nodeType(matches[0]) != "joint":
             raise CharacterSceneError(
-                "INVALID_CHARACTER_ROOT",
-                "Select exactly one deformation root joint before connecting.")
+                "INVALID_CHARACTER_ROOT", context={"reason": "root_node_invalid", "path": root})
         return matches[0]
 
     @staticmethod
@@ -799,25 +801,29 @@ class CharacterScene(object):
         if display != role_top and not display.startswith(role_top + "|"):
             raise CharacterSceneError(
                 "INVALID_DISPLAY",
-                "The Display controller must be inside the character's top-level group.")
+                context={"reason": "display_group_mismatch", "path": display, "root": root})
         if namespace(display) != namespace(root):
             raise CharacterSceneError(
                 "INVALID_DISPLAY",
-                "The Display controller and character root must use the same namespace.")
+                context={"reason": "display_namespace_mismatch", "path": display, "root": root})
         attributes = enum_attributes(display)
         by_name = dict((item["attribute"], item) for item in attributes)
         if display_attribute is None:
-            if len(attributes) != 1:
+            if not attributes:
+                raise CharacterSceneError(
+                    "DISPLAY_ENUM_MISSING",
+                    context={"reason": "display_enum_missing", "path": display})
+            if len(attributes) > 1:
                 raise CharacterSceneError(
                     "AMBIGUOUS_DISPLAY_ATTRIBUTE",
-                    "Unable to identify exactly one Clothes enum attribute.",
                     context={"attribute_candidates": tuple(sorted(by_name))})
             display_attribute = attributes[0]["attribute"]
         if display_attribute not in by_name:
             raise CharacterSceneError(
                 "INVALID_DISPLAY_ATTRIBUTE",
-                "The selected Display attribute is not a Clothes enum.",
-                context={"attribute_candidates": tuple(sorted(by_name))})
+                context={"reason": "display_attribute_invalid", "path": display,
+                         "attribute": display_attribute,
+                         "attribute_candidates": tuple(sorted(by_name))})
         return display, display_attribute
 
     @classmethod
@@ -830,7 +836,7 @@ class CharacterScene(object):
                 return cls._resolve_display(root, matches[0], display_attribute)
             except CharacterSceneError as error:
                 if error.code not in ("INVALID_DISPLAY", "INVALID_DISPLAY_ATTRIBUTE",
-                                      "AMBIGUOUS_DISPLAY_ATTRIBUTE"):
+                                      "DISPLAY_ENUM_MISSING", "AMBIGUOUS_DISPLAY_ATTRIBUTE"):
                     raise
         return None, None
 
@@ -926,6 +932,18 @@ class CharacterScene(object):
         """Choose a label source without replacing the captured character."""
         self._ensure_available()
         display, attribute = self._resolve_display(self._root, display, display_attribute)
+        self._set_display_label_source(display, attribute)
+
+    @property
+    def display_binding(self):
+        return self._display_path, self._display_attribute
+
+    def clear_display_controller(self):
+        """Use the mesh names while the chosen Display controller is unavailable."""
+        self._ensure_available()
+        self._set_display_label_source(None, None)
+
+    def _set_display_label_source(self, display, attribute):
         self._display_path, self._display_attribute = display, attribute
         self._display_dag = dag_path(display) if display is not None else None
         self._rebuild_input_observers()

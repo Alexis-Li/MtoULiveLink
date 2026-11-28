@@ -16,9 +16,11 @@ SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from mtou_livelink.controller import Controller
-from mtou_livelink.diagnostics import make_diagnostic
+from mtou_livelink.config import CACHED_MODE, CONTROL_MAYA, CONTROL_UNREAL
+from mtou_livelink.diagnostics import linkage_diagnostic_text, make_diagnostic
 from mtou_livelink.preferences import ScenePreferences, SceneSettings
 from mtou_livelink.session import StreamingSessionEvent
+from mtou_livelink.timecontrol import TimeControl
 
 
 class PanelRulesTests(unittest.TestCase):
@@ -153,6 +155,75 @@ class PanelRulesTests(unittest.TestCase):
         self.assertEqual("INVALID_BINDING", result["code"])
         self.assertEqual("Live Binding removed", result["details"])
         self.assertEqual(1, popup.call_count)
+
+    def test_repeated_runtime_errors_refresh_diagnostics_even_when_eof_arrives_first(self):
+        from mtou_livelink.session import SenderWorker, StreamingSession
+
+        for eof_first in (False, True):
+            with self.subTest(eof_first=eof_first):
+                operations = Controller()
+                operations._connection = "connected"
+                operations._session = session = StreamingSession(None, 24, None)
+                session._worker = worker = SenderWorker(None)
+                holder = {"session": session}
+                session._on_statement = lambda reply: operations._on_session_statement(holder, reply)
+                deferred = []
+                operations._defer_ui = deferred.append
+                operations._interact = popup = mock.Mock()
+                first = {"type": "error", "code": "INVALID_BINDING", "details": "invalid target"}
+                second = {"type": "error", "code": "MODE_CONFLICT", "details": "mode switched"}
+                for reply in (first, second):
+                    session._route_reply(reply)
+                    deferred.pop(0)()
+                self.assertEqual("MODE_CONFLICT", operations.snapshot()["diagnostic"]["code"])
+
+                session._route_reply(first)
+                finish = StreamingSessionEvent("failed", diagnostic=worker._close_reason())
+                if not eof_first:
+                    deferred.pop(0)()
+                    self.assertEqual("INVALID_BINDING", operations.snapshot()["diagnostic"]["code"])
+                operations._on_streaming_session_event(session, finish)
+                if eof_first:
+                    deferred.pop(0)()
+                result = operations.snapshot()["diagnostic"]
+                self.assertEqual("INVALID_BINDING", result["code"])
+                self.assertEqual("preview", result["operation"])
+                self.assertEqual(first["details"], result["details"])
+                self.assertEqual(2, popup.call_count)
+
+    def test_terminal_runtime_error_does_not_replace_a_newer_operation(self):
+        from mtou_livelink.session import SenderWorker, StreamingSession
+
+        operations = Controller()
+        operations._connection = "connected"
+        operations._session = session = StreamingSession(None, 24, None)
+        session._worker = worker = SenderWorker(None)
+        holder = {"session": session}
+        session._on_statement = lambda reply: operations._on_session_statement(holder, reply)
+        deferred = []
+        operations._defer_ui = deferred.append
+        operations._interact = popup = mock.Mock()
+        session._route_reply({"type": "error", "code": "INVALID_BINDING", "details": "old target"})
+        operations._show_error(make_diagnostic("PREVIEW_BUILD_FAILED"), operation="linkage")
+        operations._on_streaming_session_event(
+            session, StreamingSessionEvent("failed", diagnostic=worker._close_reason()))
+        deferred.pop(0)()
+        self.assertEqual("interrupted", operations.snapshot()["connection"])
+        self.assertEqual("PREVIEW_BUILD_FAILED", operations.snapshot()["diagnostic"]["code"])
+        self.assertEqual(1, popup.call_count)
+
+    def test_single_character_cache_shares_unreal_authority_with_full_diagnostics(self):
+        operations = Controller()
+        operations._session = SimpleNamespace(time_control=TimeControl())
+        state = operations.snapshot()
+        self.assertEqual(CONTROL_MAYA, state["authority"])
+        self.assertEqual(state["authority"], state["linkage"]["control"])
+        operations._session.time_control.acquire(CACHED_MODE, self)
+        state = operations.snapshot()
+        self.assertEqual(CACHED_MODE, state["mode"])
+        self.assertEqual(CONTROL_UNREAL, state["authority"])
+        self.assertEqual(state["authority"], state["linkage"]["control"])
+        self.assertIn("控制方：Unreal", linkage_diagnostic_text(state["linkage"]))
 
     def test_controller_and_actual_entry_import_without_maya_or_qt_work(self):
         script = """

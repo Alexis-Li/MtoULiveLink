@@ -125,17 +125,27 @@ class DiagnosticWindow(QtWidgets.QDialog):
         scrollbar = browser.verticalScrollBar()
         top = scrollbar.value()
         browser.setHtml(html)
-        limit = browser.document().characterCount() - 1
-        if max(anchor, position) <= limit:
-            cursor = browser.textCursor()
+        document = browser.document()
+        cursor = QtGui.QTextCursor(document)
+        if max(anchor, position) < document.characterCount():
             cursor.setPosition(anchor)
             cursor.setPosition(position, QtGui.QTextCursor.KeepAnchor)
             if cursor.selectedText() == selection:
                 browser.setTextCursor(cursor)
-            elif selection:
-                matching = browser.document().find(selection)
-                if not matching.isNull():
-                    browser.setTextCursor(matching)
+                scrollbar.setValue(top)
+                return
+        if selection:
+            # Raw text keeps paragraph separators. Qt cursor positions count
+            # UTF-16 units even when Python counts a character as one.
+            content = document.toRawText()
+            start = content.find(selection)
+            if start >= 0:
+                first = len(content[:start].encode("utf-16-le")) // 2
+                last = first + len(selection.encode("utf-16-le")) // 2
+                new_anchor, new_position = (first, last) if anchor < position else (last, first)
+                cursor.setPosition(new_anchor)
+                cursor.setPosition(new_position, QtGui.QTextCursor.KeepAnchor)
+                browser.setTextCursor(cursor)
         scrollbar.setValue(top)
 
     def keyPressEvent(self, event):

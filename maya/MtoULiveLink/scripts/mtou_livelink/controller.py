@@ -3,6 +3,8 @@
 # Licensed under the GPL with additional terms; see NOTICE.
 """Maya operations and their state, independent of windows and Qt."""
 
+import logging
+import threading
 from dataclasses import replace
 from types import MappingProxyType
 from uuid import uuid4
@@ -44,7 +46,10 @@ from .session import StreamingSession, StreamingSessionError, bind_conflict_stat
 from .space import frames_per_second, validate_frame_rate
 from .timeline import MayaTimeline, load_playback_cap, normalize_playback_cap
 from .preferences import ScenePreferences, SceneSettings
-from .strings import text
+from .strings import SCENE_ERROR_DETAILS, text
+
+
+_logger = logging.getLogger(__name__)
 
 
 class InteractionCancelled(Exception):
@@ -85,6 +90,7 @@ class Controller:
         # Unreal errors this connection already reported in a dialog; the
         # same error ending the connection does not open a second one.
         self._reported_errors = set()
+        self._runtime_error_origin = None
         self._secondary_scene = None
         self._object_set_detail = ""
         self._observers = []
@@ -182,13 +188,11 @@ class Controller:
                     frame_range = timeline.playback_range()
             except (RuntimeError, ValueError, TypeError):
                 pass
-        mode = self._mode
         linkage = self.linkage_status()
         return MappingProxyType({
             "connection": "reconnecting" if self._restart is not None else self._connection,
-            "status": self._status, "mode": mode,
-            "authority": (CONTROL_UNREAL if mode == CACHED_MODE else
-                          linkage["control"] if mode == LINKAGE_MODE else CONTROL_MAYA),
+            "status": self._status, "mode": linkage["mode"],
+            "authority": linkage["control"],
             "fps": self._fps, "frame": scene_frame, "frame_range": frame_range,
             "root": character.root if character else self._pending_root,
             "outfit": character.outfit if character else None,
@@ -313,8 +317,6 @@ class Controller:
     def _choose_enum(self, candidates):
         if len(candidates) == 1:
             return candidates[0]
-        if not candidates:
-            raise ValueError(text("display_no_enum"))
         chosen = self._request("choose_enum", tuple(candidates))
         if chosen not in candidates:
             raise InteractionCancelled()
@@ -435,43 +437,60 @@ class Controller:
                  settings.secondary_display_attribute, True)):
             if not root:
                 continue
+            root_exists = self._exact_scene_path(root)
             scene = self._secondary_scene if secondary else self._scene
             if references and scene is not None:
                 try:
                     current_root = scene.snapshot().root
                 except CharacterSceneError:
                     current_root = None
-                if current_root == root and self._exact_scene_path(root):
-                    if not display or (self._exact_scene_path(display)
-                                       and getattr(scene, "_display_path", None) == display
-                                       and getattr(scene, "_display_attribute", None) == attribute):
-                        continue
-                if secondary:
-                    self.disconnect(status="Maya secondary object changed", code="SUBJECT_CHANGED")
-                    self._clear_secondary()
-                else:
-                    self._clear_role("Maya character changed")
-            if not self._exact_scene_path(root) or (secondary and roots_overlap(self._primary_root(), root)):
+                if current_root != root or not root_exists:
+                    if secondary:
+                        self.disconnect(
+                            status="Maya secondary object changed", code="SUBJECT_CHANGED")
+                        self._clear_secondary()
+                    else:
+                        self._clear_role("Maya character changed")
+                    scene = None
+            if not root_exists or (secondary and roots_overlap(self._primary_root(), root)):
                 missing.append(root)
                 continue
+            explicit_display = bool(display)
             discover_display = True
             if display:
                 try:
                     if not self._exact_scene_path(display):
-                        raise ValueError(display)
-                    CharacterScene._resolve_display(root, display, attribute)
-                except (CharacterSceneError, ValueError):
-                    missing.append("{0}.{1}".format(display, attribute))
+                        raise CharacterSceneError("INVALID_DISPLAY")
+                    display, attribute = CharacterScene._resolve_display(root, display, attribute)
+                except (RuntimeError, ValueError) as error:
+                    missing_display = "{0}.{1}".format(display, attribute)
+                    details = self._scene_diagnostic(error)["details"]
+                    if missing_display not in details:
+                        details = "\n".join(filter(None, (missing_display, details)))
+                    missing.append(details)
                     display = attribute = None
                     discover_display = False
             try:
+                if references and scene is not None:
+                    if explicit_display:
+                        if scene.display_binding != (display, attribute):
+                            if display:
+                                scene.set_display_controller(display, attribute)
+                            else:
+                                scene.clear_display_controller()
+                        if not secondary:
+                            display_uuid = cmds.ls(display, uuid=True)[0] if display else None
+                            self._capture_args = (root, display_uuid, attribute, discover_display)
+                    continue
                 capture = self._capture_secondary if secondary else self._capture_scene
                 scene = capture(root, display or None, attribute or None,
                                 restoring=True, discover_display=discover_display)
                 if secondary:
                     self._secondary_scene = scene
-            except CharacterSceneError as error:
-                missing.append("{0}\n{1}".format(root, error.details or error.message))
+            except (RuntimeError, ValueError) as error:
+                diagnostic = self._scene_diagnostic(error)
+                details = diagnostic["details"] or diagnostic["summary"]
+                missing.append("{0}\n{1}".format(root, details))
         if missing:
             self._diagnostics.record(
                 make_diagnostic("PREFERENCES_ROLE_MISSING", details="\n".join(missing)),
@@ -491,7 +510,8 @@ class Controller:
             self._restore_saved_roles(references=True)
             self._publish()
 
-        self._defer_ui(restore)
+        if self._defer_ui(restore) is False:
+            self._reference_refresh_pending = False
 
     def _add_scene_replace_callback(self, name, callback=None):
         if om is None:
@@ -724,7 +744,7 @@ class Controller:
     def _selected_display(self):
         selected = cmds.ls(selection=True, long=True) or []
         if len(selected) != 1:
-            raise ValueError(text("select_one_display"))
+            raise CharacterSceneError("DISPLAY_SELECTION_REQUIRED")
         return long_transform(selected[0])
 
     def _duplicate_paths(self):
@@ -748,9 +768,16 @@ class Controller:
         self._set_connected(connected, text("duplicates_selected").format(len(existing)))
 
     def _scene_diagnostic(self, error, default_code="ROLE_SETUP_FAILED"):
+        if not isinstance(error, CharacterSceneError):
+            return make_diagnostic(default_code, details=str(error))
         code = error.code if error.code in DIAGNOSTICS else default_code
-        diagnostic = make_diagnostic(
-            code, error.message, details=error.details)
+        context = error.context
+        description = SCENE_ERROR_DETAILS.get(context.get("reason"))
+        message = error.message if error.message != error.code else ""
+        details = error.details if error.details != error.code else ""
+        if description:
+            details = description.format(**context)
+        diagnostic = make_diagnostic(code, message, details=details)
         if error.duplicate_paths:
             diagnostic["duplicate_paths"] = list(error.duplicate_paths)
         return diagnostic
@@ -785,8 +812,7 @@ class Controller:
             root = selected_root()
             secondary = self._secondary_scene
             if secondary is not None and roots_overlap(secondary.snapshot().root, root):
-                raise ValueError(
-                    text("primary_overlap"))
+                raise CharacterSceneError("PRIMARY_ROOT_OVERLAP")
             self._pending_root = root
             snapshot = self._capture_scene(root).snapshot()
             status = text("role_captured")
@@ -798,30 +824,18 @@ class Controller:
                 status = self._last_diagnostic.get("summary", status) + " · " + status
             self._save_settings(operation="role", root=snapshot.root, display="", display_attribute="")
             self._set_connected(False, status)
-        except CharacterSceneError as error:
-            if error.code == "AMBIGUOUS_DISPLAY":
-                self._pending_root = root
-                self._set_connected(
-                    False, error.message + text("choose_display_help"))
-            else:
-                self._pending_root = None
-                self._set_connected(False, error.message)
-            self._show_error(self._scene_diagnostic(error))
-        except (RuntimeError, ValueError) as exc:
-            self._set_connected(False, str(exc))
-            code = str(exc) if str(exc) in DIAGNOSTICS else "ROLE_SETUP_FAILED"
-            self._show_error(make_diagnostic(code, str(exc), solution=str(exc), details=str(exc)))
+        except (RuntimeError, ValueError) as error:
+            self._pending_root = None
+            diagnostic = self._scene_diagnostic(error)
+            self._set_connected(False, diagnostic["summary"])
+            self._show_error(diagnostic)
 
     def set_display_controller(self):
         self._diagnostics.begin("display")
-        root = self._pending_root
-        if root is None and self._scene is not None:
-            root = self._scene.snapshot().root
-        if not root:
-            self._show_error(make_diagnostic(
-                "INTERNAL_ERROR", text("root_required")))
-            return
         try:
+            root = self._primary_root()
+            if not root:
+                raise CharacterSceneError("DISPLAY_ROOT_REQUIRED")
             # Validate the requested selection first: an invalid selection
             # must never tear down the live session or a usable scene.
             display = self._selected_display()
@@ -832,14 +846,10 @@ class Controller:
                     raise
                 attribute = self._choose_enum(error.context.get("attribute_candidates", ()))
                 display, attribute = CharacterScene._resolve_display(root, display, attribute)
-        except CharacterSceneError as error:
-            self._show_error(self._scene_diagnostic(error))
-            return
         except InteractionCancelled:
             return
-        except (RuntimeError, ValueError) as exc:
-            code = str(exc) if str(exc) in DIAGNOSTICS else "ROLE_SETUP_FAILED"
-            self._show_error(make_diagnostic(code, str(exc), solution=str(exc), details=str(exc)))
+        except (RuntimeError, ValueError) as error:
+            self._show_error(self._scene_diagnostic(error))
             return
         try:
             if self._scene is not None:
@@ -861,8 +871,9 @@ class Controller:
                                 display=display, display_attribute=attribute)
             status = text("display_captured")
             self._set_connected(False, status + bind_conflict_status(snapshot))
-        except CharacterSceneError as error:
+        except (RuntimeError, ValueError) as error:
             self._show_error(self._scene_diagnostic(error))
+
     def _on_character_scene_event(self, event):
         if event.kind == "character_change_started":
             self._restart_for_input_change()
@@ -922,7 +933,8 @@ class Controller:
             if self._session is session:
                 self._advance_restart(session)
 
-        self._defer_ui(advance)
+        if self._defer_ui(advance) is False and self._restart_dispatch is session:
+            self._restart_dispatch = None
 
     def _release_restart_resources(self, session):
         if self._restart_released is session:
@@ -1066,6 +1078,7 @@ class Controller:
         self._status = text("connecting_peer")
         self._publish()
         self._reported_errors = set()
+        self._runtime_error_origin = None
         holder = {}
 
         def on_event(event):
@@ -1181,6 +1194,7 @@ class Controller:
             self._cached_retention = cached_playback.detach(event)
             self._cached_view = cached_playback.view
         self._session = None
+        origin, self._runtime_error_origin = self._runtime_error_origin, None
         # The negotiated session is gone, so linkage can no longer answer
         # targets: release the pump, the session and every borrowed resource.
         self._shutdown_linkage()
@@ -1194,12 +1208,19 @@ class Controller:
                     recovery["details"], previous))
             signature = _error_signature(diagnostic)
             shown = signature in self._reported_errors
-            if not shown and signature != _error_signature(self._last_diagnostic):
-                runtime_mode = diagnostic.get("runtime_mode")
+            runtime_mode = diagnostic.get("runtime_mode")
+            # EOF can arrive before the panel update that accompanied the
+            # error. Use that reply's operation stamp for either delivery.
+            stamp = self._pending_connect_attempt if self._connection == "connecting" else None
+            stale = False
+            if (runtime_mode and origin is not None
+                    and origin[0].get("session") is session and origin[1] == signature):
+                stamp = origin[2]
+                stale = stamp != self._diagnostics.stamp
+            if not stale and signature != _error_signature(self._last_diagnostic):
                 failed_mode = runtime_mode or mode
                 operation = {CACHED_MODE: "cache", LINKAGE_MODE: "linkage"}.get(
                     failed_mode, "preview" if runtime_mode == REALTIME_MODE else "connect")
-                stamp = self._pending_connect_attempt if self._connection == "connecting" else None
                 self._diagnostics.record(diagnostic, operation, "failure", stamp)
             self._connection = "interrupted"
             if automatic:
@@ -1207,7 +1228,7 @@ class Controller:
             if event.recapture_scene:
                 self._clear_scene(keep_capture=True)
             self._set_connected(False, diagnostic["summary"])
-            if not automatic and not shown and self.settings.show_popups:
+            if not automatic and not stale and not shown and self.settings.show_popups:
                 # Unreal closing after an error it reported shows that one dialog.
                 self._notify_diagnostic(diagnostic)
             return
@@ -1669,7 +1690,7 @@ class Controller:
         """
         holder = holder if holder is not None else {"session": self._session}
         received_session = holder.get("session")
-        if (_stopped_by_maya(received_session) or
+        if (self.closed or _stopped_by_maya(received_session) or
                 (received_session is not None and received_session is not self._session)):
             return False
         if reply.get("kind") == ERROR_KIND_SCHEDULING:
@@ -1688,6 +1709,7 @@ class Controller:
             return False
         diagnostic = error_reply_diagnostic(reply)
         stamp = self._diagnostics.stamp
+        self._runtime_error_origin = (holder, _error_signature(diagnostic), stamp)
         operation = "linkage" if self._mode == LINKAGE_MODE else "preview"
         self._defer_ui(lambda: self._show_runtime_error(
             diagnostic, holder.get("session"), operation, stamp))
@@ -1695,15 +1717,15 @@ class Controller:
 
     def _show_runtime_error(self, diagnostic, session, operation, stamp):
         if (self.closed or session is None or self._session is not session
-                or _stopped_by_maya(session) or getattr(session, "restarting", False)):
+                or _stopped_by_maya(session) or getattr(session, "restarting", False)
+                or stamp != self._diagnostics.stamp):
             return
-        signature = _error_signature(diagnostic)
-        if signature in self._reported_errors:
-            return
-        self._reported_errors.add(signature)
         self._diagnostics.record(diagnostic, operation, "failure", stamp)
         self._publish()
-        if self.settings.show_popups and stamp == self._diagnostics.stamp:
+        signature = _error_signature(diagnostic)
+        if (self.settings.show_popups and stamp == self._diagnostics.stamp
+                and signature not in self._reported_errors):
+            self._reported_errors.add(signature)
             self._notify_diagnostic(diagnostic)
 
     def _on_linkage_event(self, event):
@@ -1750,13 +1772,23 @@ class Controller:
 
     def _defer_ui(self, action):
         """Run one panel update on Maya's main thread."""
+        if self.closed:
+            return False
+
+        def on_main_thread():
+            if not self.closed and threading.current_thread() is threading.main_thread():
+                action()
+
         if cmds is None:
-            action()
-            return
+            on_main_thread()
+            return threading.current_thread() is threading.main_thread()
         try:
-            mayaapi.run_deferred(action, cmds.evalDeferred)
-        except (AttributeError, RuntimeError, TypeError):
-            action()
+            mayaapi.run_deferred(on_main_thread, cmds.evalDeferred)
+        except (AttributeError, RuntimeError, TypeError) as error:
+            if not self.closed:
+                _logger.warning("Maya could not queue a panel update: %s", error)
+            return False
+        return True
 
     def _session_id_of(self, session):
         """Unreal's session id for this connection, from the hello reply."""
@@ -1781,8 +1813,12 @@ class Controller:
         """The authoritative linkage snapshot every window renders."""
         linkage = self._linkage
         status = linkage.status() if linkage is not None else None
-        mode = status.mode if status is not None else self._mode
-        control = status.control if status is not None else CONTROL_MAYA
+        mode = self._mode
+        control = CONTROL_MAYA
+        if mode == CACHED_MODE:
+            control = CONTROL_UNREAL
+        elif mode == LINKAGE_MODE and status is not None:
+            control = status.control
         recovery = self._linkage_recovery()
         overdue = bool(linkage.convergence_overdue()) if linkage is not None else False
         wait = _linkage_wait_seconds(linkage) if overdue else 0.0
@@ -1862,11 +1898,9 @@ class Controller:
             root, display = selected_secondary_root()
             primary = self._primary_root()
             if primary and roots_overlap(primary, root):
-                raise ValueError(
-                    text("secondary_overlap"))
-        except (RuntimeError, ValueError) as exc:
-            self._show_error(make_diagnostic(
-                "ROLE_SETUP_FAILED", str(exc), solution=str(exc), details=str(exc)))
+                raise CharacterSceneError("SECONDARY_ROOT_OVERLAP")
+        except (RuntimeError, ValueError) as error:
+            self._show_error(self._scene_diagnostic(error))
             return
         replaced = self._session is not None
         if replaced:
@@ -2115,8 +2149,7 @@ def selected_secondary_root():
     joints = [path for path in selected if cmds.nodeType(path) == "joint"]
     others = [path for path in selected if path not in joints]
     if len(joints) != 1 or len(others) > 1:
-        raise ValueError(
-            text("secondary_select_root"))
+        raise CharacterSceneError("INVALID_SECONDARY_ROOT")
     display = long_transform(others[0]) if others else None
     return joints[0], display
 

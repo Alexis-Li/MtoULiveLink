@@ -12,6 +12,7 @@ import tempfile
 import pathlib
 import socket
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
@@ -234,12 +235,14 @@ class MainThreadDeferralTests(unittest.TestCase):
         with mock.patch.object(mtou_mayaapi, "utils", fake_utils), \
                 mock.patch.object(mtou_controller, "cmds", fake_cmds):
             controller = mtou_controller.Controller()
-
-            def action():
-                return None
-
-            controller._defer_ui(action)
-        self.assertEqual([action], queued)
+            ran = []
+            with concurrent.futures.ThreadPoolExecutor() as worker:
+                self.assertTrue(worker.submit(
+                    controller._defer_ui, lambda: ran.append(threading.current_thread())).result(5))
+                self.assertEqual(1, len(queued))
+                self.assertEqual([], ran)
+            queued[0]()
+        self.assertEqual([threading.main_thread()], ran)
         fake_cmds.evalDeferred.assert_not_called()
 
     def test_without_maya_utils_the_cmds_queue_is_used(self):
@@ -247,12 +250,45 @@ class MainThreadDeferralTests(unittest.TestCase):
         with mock.patch.object(mtou_mayaapi, "utils", None), \
                 mock.patch.object(mtou_controller, "cmds", fake_cmds):
             controller = mtou_controller.Controller()
-
-            def action():
-                return None
-
+            action = mock.Mock()
             controller._defer_ui(action)
-        fake_cmds.evalDeferred.assert_called_once_with(action)
+        fake_cmds.evalDeferred.assert_called_once()
+        action.assert_not_called()
+        fake_cmds.evalDeferred.call_args.args[0]()
+        action.assert_called_once_with()
+
+    def test_failed_maya_queue_never_runs_the_panel_update_on_the_sender(self):
+        controller = mtou_controller.Controller()
+        action = mock.Mock()
+        with mock.patch.object(mtou_controller, "cmds", mock.Mock()), \
+                mock.patch.object(mtou_mayaapi, "run_deferred",
+                                  side_effect=RuntimeError("Maya idle queue is gone")), \
+                self.assertLogs(mtou_controller.__name__, level="WARNING"):
+            with concurrent.futures.ThreadPoolExecutor() as worker:
+                self.assertFalse(worker.submit(controller._defer_ui, action).result(5))
+        action.assert_not_called()
+
+    def test_closing_discards_queued_updates(self):
+        controller = mtou_controller.Controller()
+        action = mock.Mock()
+        with mock.patch.object(mtou_controller, "cmds", mock.Mock()), \
+                mock.patch.object(mtou_mayaapi, "run_deferred") as defer:
+            self.assertTrue(controller._defer_ui(action))
+            controller.close()
+            self.assertFalse(controller._defer_ui(action))
+            defer.assert_called_once()
+            defer.call_args.args[0]()
+        action.assert_not_called()
+
+    def test_without_maya_only_the_main_thread_can_deliver_updates(self):
+        controller = mtou_controller.Controller()
+        action = mock.Mock()
+        with mock.patch.object(mtou_controller, "cmds", None), \
+                concurrent.futures.ThreadPoolExecutor() as worker:
+            self.assertFalse(worker.submit(controller._defer_ui, action).result(5))
+            action.assert_not_called()
+            self.assertTrue(controller._defer_ui(action))
+        action.assert_called_once_with()
 
     def test_a_late_group_refusal_is_counted_not_shown(self):
         # A group still in flight when linkage ended is refused by Unreal; the

@@ -568,13 +568,7 @@ class PanelWindow(QtWidgets.QDialog):
 
     def _interact(self, kind, data):
         if kind == "choose_enum":
-            dialog = QtWidgets.QInputDialog(self)
-            dialog.setWindowTitle(text("choose_outfit_attribute"))
-            dialog.setLabelText(text("multiple_outfit_attributes"))
-            dialog.setComboBoxItems(data)
-            dialog.setOkButtonText(text("ok"))
-            dialog.setCancelButtonText(text("cancel"))
-            return dialog.textValue() if qt_compat.dialog_exec(dialog) else None
+            return self._choose_outfit_attribute(data)
         if kind == "large_cache":
             size, total = data
             dialog = QtWidgets.QMessageBox(self)
@@ -588,6 +582,39 @@ class PanelWindow(QtWidgets.QDialog):
             return dialog.clickedButton() is proceed
         self._show_popup(kind, data)
         return None
+
+    def _choose_outfit_attribute(self, candidates):
+        if len(candidates) > 5:
+            dialog = QtWidgets.QInputDialog(self)
+            dialog.setWindowTitle(text("choose_outfit_attribute"))
+            dialog.setLabelText(text("multiple_outfit_attributes"))
+            dialog.setComboBoxItems(candidates)
+            dialog.setOkButtonText(text("ok"))
+            dialog.setCancelButtonText(text("cancel"))
+            return dialog.textValue() if qt_compat.dialog_exec(dialog) else None
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(text("choose_outfit_attribute"))
+        dialog.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(label(text("multiple_outfit_attributes")))
+        chosen = candidates[0]
+
+        def choose(value):
+            nonlocal chosen
+            chosen = value
+
+        options = Segments(
+            [(value, "", value) for value in candidates], choose)
+        options.select(chosen)
+        layout.addWidget(options)
+        buttons = QtWidgets.QDialogButtonBox()
+        buttons.addButton(text("ok"), QtWidgets.QDialogButtonBox.AcceptRole)
+        buttons.addButton(text("cancel"), QtWidgets.QDialogButtonBox.RejectRole)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        return chosen if qt_compat.dialog_exec(dialog) else None
 
     def _show_popup(self, kind, diagnostic):
         info = QtWidgets.QMessageBox(self)

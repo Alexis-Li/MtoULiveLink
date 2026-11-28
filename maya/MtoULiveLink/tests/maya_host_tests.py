@@ -657,10 +657,126 @@ class MayaHostTests(unittest.TestCase):
                 outside = cmds.createNode("transform", name="outside")
                 controller._selected_display.return_value = outside
                 controller.set_display_controller()
-                self.assertIn("inside the character",
-                              controller._notify_diagnostic.call_args[0][0]["message"])
+                diagnostic = controller._notify_diagnostic.call_args[0][0]
+                self.assertEqual("INVALID_DISPLAY", diagnostic["code"])
+                self.assertIn("不在同一个角色组内", diagnostic["details"])
                 self.assertEqual(outfit, controller._scene.snapshot().outfit)
                 controller._clear_scene()
+
+    def test_reference_reload_revalidates_saved_display_without_replacing_the_root(self):
+        from maya.api import OpenMaya as om
+
+        with tempfile.TemporaryDirectory() as scratch:
+            paths = {}
+            for case in ("valid", "renamed", "removed", "different_type", "different_entries"):
+                cmds.file(new=True, force=True)
+                display = cmds.createNode("transform", name="customLabel")
+                if case not in ("removed", "different_type"):
+                    cmds.addAttr(display, longName="renamedWardrobe" if case == "renamed" else "wardrobe",
+                                 attributeType="enum",
+                                 enumName="Options" if case == "different_entries" else "ClothesChosen")
+                elif case == "different_type":
+                    cmds.addAttr(display, longName="wardrobe", attributeType="bool")
+                paths[case] = pathlib.Path(scratch, case + ".ma").as_posix()
+                cmds.file(rename=paths[case])
+                cmds.file(save=True, type="mayaAscii")
+
+            for case, secondary in (("valid", False), ("renamed", False), ("removed", True),
+                                    ("different_type", False), ("different_entries", True)):
+                with self.subTest(case=case, secondary=secondary):
+                    cmds.file(new=True, force=True)
+                    cmds.file(paths["valid"], reference=True, namespace="wardrobe")
+                    group = cmds.createNode("transform", name="character")
+                    cmds.parent("wardrobe:customLabel", group)
+                    self._create_display(group, entries="ClothesFallback", namespace="wardrobe")
+                    root = cmds.createNode("joint", name="wardrobe:root", parent=group)
+                    root = cmds.ls(root, long=True)[0]
+                    display = cmds.ls("wardrobe:customLabel", long=True)[0]
+                    self._skinned_outfit(root, "outfit")
+                    reference_node = cmds.referenceQuery(display, referenceNode=True)
+                    controller = mtou_controller.Controller()
+                    try:
+                        if secondary:
+                            cmds.select(root, display, replace=True)
+                            controller.set_secondary_object()
+                            scene = controller._secondary_scene
+                        else:
+                            cmds.select(root, replace=True)
+                            controller.set_role()
+                            cmds.select(display, replace=True)
+                            controller.set_display_controller()
+                            scene = controller._scene
+                        mtou_mayaapi.drain_deferred()
+                        self.assertEqual("ClothesChosen", scene.snapshot().outfit)
+                        revision = scene.snapshot().revision
+                        reference_changed = mock.Mock(wraps=controller._on_reference_changed)
+                        callback = om.MSceneMessage.addCallback(om.MSceneMessage.kAfterLoadReference,
+                                                                reference_changed)
+                        try:
+                            cmds.file(paths[case], loadReference=reference_node)
+                            modified = cmds.file(query=True, modified=True)
+                            reference_changed.assert_called()
+                            mtou_mayaapi.drain_deferred()
+                        finally:
+                            om.MMessage.removeCallback(callback)
+                        self.assertEqual([display], cmds.ls(display, long=True))
+                        self.assertEqual([root], cmds.ls(root, long=True))
+                        self.assertIs(scene, controller._secondary_scene if secondary else controller._scene)
+                        self.assertEqual(root, scene.snapshot().root)
+                        self.assertEqual(revision, scene.snapshot().revision)
+                        self.assertEqual(modified, cmds.file(query=True, modified=True))
+                        if case == "valid":
+                            self.assertEqual((display, "wardrobe"), scene.display_binding)
+                            self.assertNotEqual("PREFERENCES_ROLE_MISSING", controller._last_diagnostic.get("code"))
+                        else:
+                            self.assertEqual((None, None), scene.display_binding)
+                            self.assertEqual("outfit", scene.snapshot().outfit)
+                            self.assertEqual("PREFERENCES_ROLE_MISSING", controller._last_diagnostic["code"])
+                            self.assertIn(display + ".wardrobe", controller._last_diagnostic["details"])
+                    finally:
+                        controller.close()
+
+    def test_role_and_display_selection_errors_have_chinese_recovery_and_raw_host_details(self):
+        group, root, _ = self._create_character_group()
+        mesh = self._skinned_outfit(root, "outfit")
+        controller = mtou_controller.Controller()
+        self.addCleanup(controller.close)
+        for selection in ((), (group,), (group, root)):
+            with self.subTest(root_selection=selection):
+                cmds.select(selection, replace=True) if selection else cmds.select(clear=True)
+                controller.set_role()
+                diagnostic = controller._last_diagnostic
+                self.assertEqual("INVALID_CHARACTER_ROOT", diagnostic["code"])
+                self.assertIn("请只选中一个角色的变形根骨骼", diagnostic["solution"])
+        cmds.select(clear=True)
+        controller.set_secondary_object()
+        self.assertEqual("INVALID_SECONDARY_ROOT", controller._last_diagnostic["code"])
+        self.assertIn("副对象", controller._last_diagnostic["solution"])
+        controller.set_display_controller()
+        self.assertEqual("DISPLAY_ROOT_REQUIRED", controller._last_diagnostic["code"])
+        with mock.patch.object(cmds, "ls", side_effect=RuntimeError("Maya plug read failed")):
+            controller.set_role()
+        diagnostic = controller._last_diagnostic
+        self.assertEqual("ROLE_SETUP_FAILED", diagnostic["code"])
+        self.assertIn("根骨骼", diagnostic["solution"])
+        self.assertEqual("Maya plug read failed", diagnostic["details"])
+
+        cmds.select(root, replace=True)
+        controller.set_role()
+        empty_display = cmds.createNode("transform", name="emptyDisplay", parent=group)
+        light = cmds.createNode("pointLight", name="wrongDisplay", parent=group)
+        for selection, code, guidance in (
+                ((), "DISPLAY_SELECTION_REQUIRED", "请只选中一个 Display 控制器"),
+                ((root, empty_display), "DISPLAY_SELECTION_REQUIRED", "请只选中一个 Display 控制器"),
+                ((empty_display,), "DISPLAY_ENUM_MISSING", "带有 Clothes 选项"),
+                ((light,), "INVALID_DISPLAY", "与根骨骼同命名空间"),
+                ((mesh,), "INVALID_DISPLAY", "与根骨骼同命名空间")):
+            with self.subTest(display_selection=selection):
+                cmds.select(selection, replace=True) if selection else cmds.select(clear=True)
+                controller.set_display_controller()
+                diagnostic = controller._last_diagnostic
+                self.assertEqual(code, diagnostic["code"])
+                self.assertIn(guidance, diagnostic["solution"])
 
     def test_curve_manifest_and_bind_input_changes_increase_revision(self):
         root = cmds.joint(name="root")

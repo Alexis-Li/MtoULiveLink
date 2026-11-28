@@ -669,7 +669,7 @@ class PanelObjectTests(unittest.TestCase):
         self.select("|Hero|root|spine")
         self.controller.set_secondary_object()
         self.assertIsNone(self.controller._secondary_scene)
-        self.assertEqual("ROLE_SETUP_FAILED", self.errors[-1]["code"])
+        self.assertEqual("SECONDARY_ROOT_OVERLAP", self.errors[-1]["code"])
         self.assertTrue(mtou_controller.roots_overlap("|A|root", "|A|root|b"))
         self.assertFalse(mtou_controller.roots_overlap("|A|root", "|A|root2"))
 

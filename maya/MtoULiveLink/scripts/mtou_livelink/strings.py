@@ -78,7 +78,37 @@ DIAGNOSTICS = {
         "请复制完整诊断并重新启动连接。"),
     "ROLE_SETUP_FAILED": (
         "角色设置未完成",
-        "请按弹窗中的提示检查根骨骼和 Display 控制器。"),
+        "请查看诊断详情，检查根骨骼和 Display 控制器后重试。"),
+    "INVALID_CHARACTER_ROOT": (
+        "需要一个角色变形根骨骼",
+        "请只选中一个角色的变形根骨骼，再点“设置角色”。"),
+    "INVALID_SECONDARY_ROOT": (
+        "需要一个副对象变形根骨骼",
+        "请只选中副对象的一个变形根骨骼，可同时选中它的 Display 控制器。"),
+    "PRIMARY_ROOT_OVERLAP": (
+        "主角色和副对象的骨骼层级重叠",
+        "请选择与副对象骨骼层级独立的变形根骨骼，再点“设置角色”。"),
+    "SECONDARY_ROOT_OVERLAP": (
+        "副对象和主角色的骨骼层级重叠",
+        "请选择与主角色骨骼层级独立的变形根骨骼，再点“设为副对象”。"),
+    "DISPLAY_ROOT_REQUIRED": (
+        "尚未设置角色",
+        "请先选中角色的变形根骨骼并点击“设置角色”。"),
+    "DISPLAY_SELECTION_REQUIRED": (
+        "需要选中一个 Display 控制器",
+        "请只选中一个 Display 控制器，再点“设置 Display 控制器”。"),
+    "INVALID_DISPLAY": (
+        "无法使用所选的 Display 控制器",
+        "请检查诊断中的节点路径，选择角色组内与根骨骼同命名空间的 Display 控制器。"),
+    "DISPLAY_ENUM_MISSING": (
+        "所选控制器没有服装属性",
+        "请选择带有 Clothes 选项的枚举属性的 Display 控制器。"),
+    "AMBIGUOUS_DISPLAY_ATTRIBUTE": (
+        "找到多个服装属性",
+        "请在“选择服装属性”窗口中选择用来标识服装的属性。"),
+    "INVALID_DISPLAY_ATTRIBUTE": (
+        "所选服装属性已失效",
+        "请重新设置 Display 控制器并选择带有 Clothes 选项的枚举属性。"),
     "DUPLICATE_BONE_NAMES": (
         "骨架中存在重名骨骼",
         "可以继续连接并由 UE 尝试映射；也可点击“选中重名骨骼”定位整理。"),
@@ -189,6 +219,20 @@ DIAGNOSTICS = {
 }
 
 
+SCENE_ERROR_DETAILS = {
+    "root_node_invalid": "未找到有效的变形根骨骼：{path}",
+    "display_node_unresolved": "无法唯一找到 Display 控制器：{path}",
+    "display_parent_missing": "所选形状没有变换节点作为父级：{path}",
+    "display_node_type": "所选节点不属于可用的 Display 控制器：{path}",
+    "display_group_mismatch": (
+        "Display 控制器与根骨骼不在同一个角色组内。\n控制器：{path}\n根骨骼：{root}"),
+    "display_namespace_mismatch": (
+        "Display 控制器与根骨骼的命名空间不一致。\n控制器：{path}\n根骨骼：{root}"),
+    "display_enum_missing": "控制器：{path}",
+    "display_attribute_invalid": "服装属性：{path}.{attribute}",
+}
+
+
 
 LEGAL_TITLE = "关于 MtoU Live Link"
 _LEGAL_TEXT = (
@@ -226,7 +270,6 @@ TEXT = {
     "cancel_requires_capture": "仅在捕获过程中可取消。",
     "leave_requires_linkage": "进入联动后可返回实时。",
     "end_requires_linkage": "进入联动后可结束联动。",
-    "display_no_enum": "所选控制器没有包含 Clothes 选项的 enum 属性。",
     "cache_requires_role": "请先完成角色设置并连接 Unreal。",
     "cache_single_character": "缓存播放只支持单个角色。",
     "cache_remove_secondary": "在连接页移除副对象后，再进入缓存播放。",
@@ -249,14 +292,10 @@ TEXT = {
     "cache_paused_at": "缓存已暂停于源帧 {3}（已应用 {0}/{1} 帧）",
     "cache_segment_done": "播放段完成（源帧 {4}–{5}），已停在最后一帧",
     "cache_resumed_realtime": "{0}（已恢复实时预览）",
-    "select_one_display": "请只选择一个 Display 曲线控制器。",
     "duplicates_missing": "重名骨骼已不存在，请重新设置角色",
     "duplicates_selected": "已选中 {0} 个重名骨骼",
-    "primary_overlap": "主角色不能是副对象本身，也不能与副对象的骨骼层级重叠。",
     "role_captured": "角色已设置，可以连接",
     "duplicate_bones_found": "（检测到 {0} 个重名骨骼，将由 UE 尝试映射）",
-    "choose_display_help": "：选中 Display 控制器后点击“选择 Display 控制器”",
-    "root_required": "请先选择根骨骼并设置角色。",
     "display_source_set": "服装名称来源已设置",
     "display_changing": "正在更换 Display 控制器，请重新连接",
     "display_captured": "Display 控制器已设置，可以连接",
@@ -306,7 +345,6 @@ TEXT = {
     "restoration_residual": "（恢复残留：{0}）",
     "linkage_not_confirmed": "Unreal 未确认镜头联动：Maya 已恢复原状态，连接不变",
     "linkage_not_started": "未进入镜头联动。",
-    "secondary_overlap": "副对象不能是主角色本身，也不能在主角色的骨骼层级里。",
     "secondary_captured": "副对象已设置（{0} 根骨骼），连接后与主角色一起预览",
     "secondary_removed": "已移除副对象",
     "secondary_wait_restore": "正在移除副对象，等待 Unreal 恢复它原来的状态…",
@@ -340,7 +378,6 @@ TEXT = {
     "realtime_preview": "实时预览",
     "cached_playback": "缓存播放",
     "linkage_label": "镜头联动",
-    "secondary_select_root": "请只选择副对象的一个变形根骨骼（可同时选中它的 Display 控制器）。",
     "linkage_active_label": "镜头联动中",
     "unreal_control": "Unreal 控制时间",
     "linkage_retry_for": "应用失败，重试 {0} 秒",
