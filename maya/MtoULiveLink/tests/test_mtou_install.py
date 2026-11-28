@@ -361,9 +361,9 @@ class InstallCheckEvaluationTests(unittest.TestCase):
                 "install": {"installed": False}, "copy_linkage_kept": True, "mod_text": mod,
                 "dialogs": [{"message": "scripts/mtou_livelink/linkage.py"}]},
             "missing_module": {"opened": False, "error_type": "ImportError",
-                               "error": "mtou_livelink.linkage is missing."},
+                               "error": "MtoU_LiveLink 安装不完整：找不到 mtou_livelink.linkage。"},
             "missing_package": {"opened": False, "error_type": "ImportError",
-                                "error": "mtou_livelink is missing."},
+                                "error": "MtoU_LiveLink 安装不完整：找不到 mtou_livelink。"},
             "rollback": {"loaded": old, "windows": panel},
             "clean_install": {
                 "install": dict(installed, shelf="added"), "tool_buttons_after": ["s"],
@@ -416,6 +416,9 @@ class InstallCheckEvaluationTests(unittest.TestCase):
         results["missing_module"]["error"] = "mtou_livelink is missing."
         self.assertEqual(["the report does not name mtou_livelink.linkage"],
                          self.evaluate("missing_module", results))
+        results["missing_package"]["error"] = "找不到 mtou_livelink.linkage。"
+        self.assertEqual(["the report does not name mtou_livelink"],
+                         self.evaluate("missing_package", results))
 
     def test_a_step_error_or_missing_result_fails(self):
         results = self.results()

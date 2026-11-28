@@ -54,6 +54,7 @@ compares every step with the expectations above, records them under
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -477,7 +478,8 @@ def evaluate(step, result, version, old_version, previous=None):
         expect(result.get("error_type") == "ImportError",
                "the report is a {0}, not an ImportError".format(result.get("error_type")))
         missing = "mtou_livelink.linkage" if step == "missing_module" else "mtou_livelink"
-        expect(missing + " is missing" in str(result.get("error")),
+        name = r"(?<![\w.])" + re.escape(missing) + r"(?!\w|\.\w)"
+        expect(re.search(name, str(result.get("error")), re.ASCII),
                "the report does not name " + missing)
     elif step == "clean_install":
         expect_installed(restart=False)
