@@ -8,7 +8,7 @@ Runs inside an interactive Maya session started by the Unreal test:
 with ``MTOU_LINKAGE_DRIVER_FIXTURE`` naming the fixture. The driver opens the
 supplied rig without saving it, keys disposable test motion on the controls
 that drive the listed joints, starts the tool through its public ``run()``
-entry, sets the role and connects through the panel's own controller actions,
+entry, sets the role and connects through the panel's own Qt controls,
 and then follows the commands Unreal writes to the command file. Everything
 runs on Maya's main thread from a Qt timer, so the panel's own timers,
 scriptJobs and deferred callbacks run exactly as they do for an artist.
@@ -31,7 +31,7 @@ before removing the Display naming and enum-label conventions in memory.
 ``new_joint`` creates a disposable skinned root in the open scene.
 
 Optional ``secondary`` sets the second object before the first connect, from
-the same selection the 对象配对 window reads: ``root``, optional ``display``,
+the same selection the Connection page reads: ``root``, optional ``display``,
 ``oracle_joints``, ``keyed_joints`` and ``morph_namespace`` with the meanings
 above. Snapshots then carry ``objects`` with ``character`` and ``secondary``
 rows of ``joints`` and ``morphs``.
@@ -45,9 +45,10 @@ Commands (``{"id": n, "action": ...}``): ``enter``, ``connect``, ``disconnect``,
 ``panel_diagnostics`` under the shot name), ``stage`` (with ``name``: every dialog is
 recorded with the latest stage, so the test can tell which ones a scenario
 expects), ``sample_plugins`` (with ``name``), ``set_secondary``,
-``remove_secondary`` (the 对象配对 window's **设为副对象** and **移除副对象**),
-``secondary_is_primary`` (**设为副对象** with the main character's root
-selected), ``objects_window`` (``target`` ``open``/``close``),
+``remove_secondary`` (the Connection page's **设为副对象** and **移除副对象**),
+``secondary_is_primary`` (tests the Controller's guard against replacing the
+second object with the primary root), ``secondary_page`` (``target``
+``connection``/``camera``),
 ``drop_secondary_once`` (the next linkage group leaves out the second object;
 this disposable process only), ``resources`` (the census in ``resources``:
 live OpenMaya callbacks counted at their registration, the tool's scriptJobs,
@@ -95,7 +96,9 @@ TESTS = str(Path(__file__).resolve().parent)
 if TESTS not in sys.path:
     sys.path.insert(0, TESTS)
 
+import maya_gui_controls as gui
 import maya_prefs_template
+from mtou_livelink.qt_compat import QtCore, QtWidgets
 
 RESULT = {"phase": "starting", "ok": True, "ack": -1, "dialogs": [], "errors": [],
           "events": [], "shots": [], "maya_version": cmds.about(version=True),
@@ -122,29 +125,32 @@ def install_session_census():
 
 
 def attach_panel_census():
-    """Read the actual panel when its status changes, even between driver ticks."""
-    set_text = CONTROLLER._set_text
-
-    def observed(control, value):
-        set_text(control, value)
-        if control and control == CONTROLLER._status_text:
-            record_connection()
-
-    CONTROLLER._set_text = observed
+    """Record transient reconnecting states even between driver ticks."""
+    CONTROLLER.subscribe(record_connection)
+    record_connection()
 
 
-def record_connection():
+def panel_status():
+    return gui.control(PANEL, "connectionStatus").text() if gui.windows(gui.MAIN) else None
+
+
+def record_connection(snapshot=None):
+    snapshot = snapshot if snapshot is not None else CONTROLLER.snapshot()
     session = CONTROLLER._session
-    diagnostic = getattr(CONTROLLER, "_last_diagnostic", None) or {}
+    reconnecting = snapshot["connection"] == "reconnecting"
+    # Setting a new role or opening a new scene updates the latest operation.
+    # Connection acceptance measures why the old session actually stopped.
+    stopped = (CONTROLLER._connection_stop_diagnostic
+               if session is None and not reconnecting else None)
+    diagnostic = stopped or snapshot.get("diagnostic") or {}
     record = {
         "stage": RESULT.get("stage", "startup"),
         "ready": CONTROLLER._session_ready() if session is not None else False,
         "open": session is not None,
         "session_id": CONTROLLER._session_id_of(session),
-        "reconnecting": getattr(CONTROLLER, "_restart", None) is not None,
+        "reconnecting": reconnecting,
         "code": diagnostic.get("code"),
-        "status": cmds.text(CONTROLLER._status_text, query=True, label=True)
-        if CONTROLLER._status_text and cmds.text(CONTROLLER._status_text, exists=True) else None,
+        "status": (stopped or {}).get("summary") or snapshot["status"],
     }
     history = RESULT.setdefault("connections", [])
     if not history or any(history[-1][key] != value for key, value in record.items()):
@@ -186,24 +192,42 @@ def fail(message):
     write_result()
 
 
-# A modal dialog would stop the event loop the whole test runs on. Every
-# dialog is recorded and answered with its default button instead; only this
-# disposable Maya process is affected.
-_original_confirm = cmds.confirmDialog
+class DialogObserver(QtCore.QObject):
+    """Record the visible Qt dialog before returning it to its default action."""
 
+    def eventFilter(self, dialog, event):
+        if (event.type() != QtCore.QEvent.Show
+                or not isinstance(dialog, QtWidgets.QDialog)
+                or dialog.objectName() in (gui.MAIN, gui.DIAGNOSTICS)
+                or not (isinstance(dialog, QtWidgets.QMessageBox) or dialog.isModal())):
+            return False
+        code = dialog.property("diagnosticCode")
+        diagnostic = CONTROLLER.snapshot().get("diagnostic") if code and CONTROLLER else None
+        if code and (not diagnostic or diagnostic.get("code") != code):
+            diagnostic = {"code": code}
+        message = dialog.text() if isinstance(dialog, QtWidgets.QMessageBox) else "\n".join(
+            label.text() for label in dialog.findChildren(QtWidgets.QLabel) if label.isVisible())
+        RESULT["dialogs"].append({
+            "title": dialog.windowTitle(), "message": message,
+            "diagnostic": diagnostic, "stage": RESULT.get("stage", "startup")})
+        write_result()
 
-def _recorded_confirm(*args, **kwargs):
-    diagnostic = getattr(CONTROLLER, "_last_diagnostic", None) if CONTROLLER else None
-    RESULT["dialogs"].append({"title": kwargs.get("title"), "message": kwargs.get("message"),
-                              "diagnostic": diagnostic, "stage": RESULT.get("stage", "startup")})
-    write_result()
-    return kwargs.get("defaultButton") or (kwargs.get("button") or ["OK"])[0]
+        def answer():
+            if not dialog.isVisible():
+                return
+            button = dialog.defaultButton() if isinstance(dialog, QtWidgets.QMessageBox) else None
+            if button is not None:
+                button.click()
+            else:
+                dialog.reject()
 
-
-cmds.confirmDialog = _recorded_confirm
+        QtCore.QTimer.singleShot(0, answer)
+        return False
 
 
 def open_scene():
+    """Load the fixture and recreate its disposable animation keys on each open."""
+    load_start = time.time()
     try:
         cmds.file(FIXTURE["scene"], open=True, force=True, prompt=False,
                   executeScriptNodes=False, ignoreVersion=True)
@@ -211,6 +235,9 @@ def open_scene():
         if not FIXTURE.get("allow_scene_load_warnings") or not cmds.objExists(FIXTURE["root"]):
             raise
         RESULT["scene_load_warning"] = str(exc)[:400]
+    RESULT.setdefault("load_seconds", round(time.time() - load_start, 1))
+    key_test_motion()
+    key_test_morphs()
 
 
 def joint_path(short, root=None):
@@ -443,30 +470,20 @@ def animated_morphs(namespace, now):
 
 
 def grab_windows(name):
-    """Save the main panel, the 诊断详情 and the open 对象配对 window as PNG images."""
-    from maya import OpenMayaUI as omui
-    try:
-        from PySide2.QtWidgets import QWidget
-        from shiboken2 import wrapInstance
-    except ImportError:  # Maya 2025+
-        from PySide6.QtWidgets import QWidget
-        from shiboken6 import wrapInstance
+    """Save the visible panel and diagnostics window as PNGs."""
     saved = []
-    for window in ("MtoULiveLinkWindow", "MtoULiveLinkDiagnosticWindow",
-                   "MtoULiveLinkObjectsWindow"):
-        pointer = omui.MQtUtil.findWindow(window)
-        if not pointer:
-            continue
-        widget = wrapInstance(int(pointer), QWidget)
-        path = Path(FIXTURE["evidence"]) / "{0}-{1}.png".format(name, window)
-        widget.grab().save(str(path))
-        saved.append({"window": window, "path": str(path),
-                      "size": [widget.width(), widget.height()]})
+    for name_id in (gui.MAIN, gui.DIAGNOSTICS):
+        for widget in gui.windows(name_id):
+            path = Path(FIXTURE["evidence"]) / f"{name}-{name_id}.png"
+            saved.append(gui.save_image(widget, path))
     RESULT["shots"].extend(saved)
     return saved
 
 
+PANEL = None
 CONTROLLER = None
+CALLBACKS = None
+DIALOG_OBSERVER = None
 LAST_ID = [-1]
 TIMER = [None]
 
@@ -476,59 +493,8 @@ def record_plugins():
                          "loaded": sorted(cmds.pluginInfo(query=True, listPlugins=True) or [])}
 
 
-# ------------------------------------------------------------ resource census
-# INT-09: every Maya callback the tool registers is counted where it reaches
-# OpenMaya. The census wraps the add and remove entry points of the message
-# classes before the tool imports them, so it sees the registrations
-# themselves rather than the tool's own bookkeeping.
-LIVE_CALLBACKS = {}
-
-
-class _CountingMessages(object):
-    def __init__(self, real, family):
-        self._real = real
-        self._family = family
-
-    def __getattr__(self, name):
-        value = getattr(self._real, name)
-        if name.startswith("add") and callable(value):
-            def add(*args, **kwargs):
-                callback_id = value(*args, **kwargs)
-                LIVE_CALLBACKS[callback_id] = self._family
-                return callback_id
-            return add
-        if name in ("removeCallback", "removeCallbacks") and callable(value):
-            def remove(ids, *args, **kwargs):
-                result = value(ids, *args, **kwargs)
-                for callback_id in (ids if name == "removeCallbacks" else [ids]):
-                    LIVE_CALLBACKS.pop(callback_id, None)
-                return result
-            return remove
-        return value
-
-
-class _CountingOpenMaya(object):
-    FAMILIES = ("MSceneMessage", "MTimerMessage", "MEventMessage", "MNodeMessage",
-                "MDGMessage", "MMessage")
-
-    def __init__(self, real):
-        self._real = real
-
-    def __getattr__(self, name):
-        value = getattr(self._real, name)
-        if name in self.FAMILIES:
-            return _CountingMessages(value, name)
-        return value
-
-
-# Every scriptJob id a panel of this process registered, closed panels' too.
+# Every scriptJob ID a panel of this process registered, including closed panels.
 TOOL_SCRIPT_JOBS = set()
-
-
-def install_callback_census():
-    from mtou_livelink import mayaapi
-    if not isinstance(mayaapi.om, _CountingOpenMaya):
-        mayaapi.om = _CountingOpenMaya(mayaapi.om)
 
 
 def census():
@@ -537,7 +503,7 @@ def census():
     import socket
     import threading
     families = {}
-    for family in LIVE_CALLBACKS.values():
+    for family in CALLBACKS.live.values():
         families[family] = families.get(family, 0) + 1
     # Only the jobs a panel registered: Maya's own come and go on their own.
     if CONTROLLER is not None:
@@ -550,9 +516,8 @@ def census():
                 sockets += 1
         except Exception:
             continue
-    windows = [name for name in ("MtoULiveLinkWindow", "MtoULiveLinkObjectsWindow")
-               if cmds.window(name, exists=True)]
-    return {"callbacks": len(LIVE_CALLBACKS), "callback_families": families,
+    windows = [name for name in (gui.MAIN, gui.DIAGNOSTICS) if gui.windows(name)]
+    return {"callbacks": len(CALLBACKS.live), "callback_families": families,
             "script_jobs": len(jobs),
             "threads": sorted(thread.name for thread in threading.enumerate()
                               if thread is not threading.main_thread()),
@@ -577,14 +542,21 @@ def scene_state():
     }
 
 
-def open_panel():
-    """The public entry again, then the role and the connection."""
-    global CONTROLLER
+def launch_panel():
+    global CONTROLLER, PANEL
     import MtoULiveLink
+
     if CONTROLLER is not None:
         TOOL_SCRIPT_JOBS.update(CONTROLLER._script_jobs)
-    CONTROLLER = MtoULiveLink.run()
+    PANEL = MtoULiveLink.run()
+    CONTROLLER = PANEL.controller
+    TOOL_SCRIPT_JOBS.update(CONTROLLER._script_jobs)
     attach_panel_census()
+
+
+def open_panel():
+    """The public entry again, then the role and the connection."""
+    launch_panel()
     connect_role()
 
 
@@ -640,12 +612,13 @@ def alternate_root():
 
 def connect_role(connect=True):
     cmds.select(FIXTURE["root"], replace=True)
-    CONTROLLER.set_role()
-    if FIXTURE.get("secondary"):
+    gui.page(PANEL, gui.CONNECTION)
+    gui.click(PANEL, "setRoleButton")
+    if FIXTURE.get("secondary") and not CONTROLLER.objects_state().get("secondary"):
         select_secondary()
-        CONTROLLER.set_secondary_object()
+        gui.click(PANEL, "setSecondaryButton")
     if connect:
-        CONTROLLER.connect()
+        gui.click(PANEL, "connectButton")
 
 
 REALTIME_PLAYBACK_OPTIONS = {}
@@ -688,11 +661,15 @@ def probe_realtime_performance(command):
 def run_command(command):
     action = command.get("action")
     if action == "enter":
-        CONTROLLER.enter_linkage()
+        gui.page(PANEL, gui.CAMERA)
+        gui.click(PANEL, "enterLinkageButton")
     elif action == "connect":
-        CONTROLLER.connect()
+        if CONTROLLER._session is None and CONTROLLER.snapshot()["connection"] != "reconnecting":
+            gui.click(PANEL, "connectButton")
     elif action == "leave":
-        CONTROLLER.leave_linkage(command.get("target", "realtime"))
+        gui.page(PANEL, gui.CAMERA)
+        target = command.get("target", "realtime")
+        gui.click(PANEL, "endLinkageButton" if target == "end" else "leaveLinkageButton")
     elif action == "stage":
         # Names the scenario the following dialogs belong to.
         RESULT["stage"] = command.get("name") or "startup"
@@ -707,14 +684,21 @@ def run_command(command):
             RESULT, command.get("name") or "sample", RESULT.get("stage", "startup"),
             cmds.pluginInfo(query=True, listPlugins=True) or [], time.time() - STARTED)
     elif action == "panel_shot":
-        from mtou_livelink.controller import DIAGNOSTIC_WINDOW_NAME
-
-        CONTROLLER.show_diagnostics()
-        field, = [name for name in cmds.lsUI(type="scrollField", long=True) or []
-                  if name.startswith(DIAGNOSTIC_WINDOW_NAME + "|")]
         name = command.get("name", "panel")
-        RESULT.setdefault("panel_diagnostics", {})[name] = cmds.scrollField(field, query=True, text=True)
+        was_open = bool(gui.windows(gui.DIAGNOSTICS))
+        diagnostic_window = PANEL.show_diagnostics()
+        details = gui.control(diagnostic_window, "diagnosticDetails").toPlainText()
+        RESULT.setdefault("panel_diagnostics", {})[name] = details
+        RESULT.setdefault("panel_latest_diagnostics", {})[name] = gui.control(
+            PANEL, "diagnosticLatest").toPlainText()
+        RESULT.setdefault("panel_capture_state", {})[name] = {
+            "connection": gui.control(PANEL, "connectionStatus").text(),
+            "authority": gui.control(PANEL, "timeAuthority").text(),
+            "beam_animation": PANEL.beam.animation_active,
+        }
         grab_windows(name)
+        if not was_open:
+            diagnostic_window.close()
     elif action == "time":
         preserve = command.get("preserve_undo") and cmds.undoInfo(query=True, state=True)
         if preserve:
@@ -727,18 +711,20 @@ def run_command(command):
         RESULT["time_evaluated"] = {"frame": cmds.currentTime(query=True),
                                     "seconds": time.perf_counter()}
     elif action == "disconnect":
-        CONTROLLER.disconnect()
+        if CONTROLLER._session is not None or CONTROLLER.snapshot()["connection"] == "reconnecting":
+            gui.click(PANEL, "connectButton")
     elif action == "fatal_protocol":
         # A real malformed packet on the existing session exercises the fatal
         # protocol end path. The product's serializer and sender stay in use.
         CONTROLLER._session._worker.submit_control(
             {"type": "frame", "transforms": None, "curves": []})
     elif action == "workflow":
-        # The 动画／模型 tab buttons' own handler.
-        CONTROLLER._on_workflow_changed(command["target"])
+        gui.page(PANEL, gui.CONNECTION)
+        target = command["target"]
+        gui.click(PANEL, "workflowModel" if target == "model" else "workflowAnimation")
     elif action == "blendshapes":
-        cmds.checkBox(CONTROLLER._bs_checkbox, edit=True, value=command["enabled"])
-        CONTROLLER._on_blendshapes_toggled()
+        gui.page(PANEL, gui.CONNECTION)
+        gui.set_checked(PANEL, "blendshapesCheck", command["enabled"])
     elif action == "set_attrs":
         edit_attrs(command["edits"])
     elif action in ("undo", "redo"):
@@ -749,32 +735,39 @@ def run_command(command):
     elif action == "set_role":
         root = alternate_root() if command["target"] == "alternate" else FIXTURE["root"]
         cmds.select(root, replace=True)
-        CONTROLLER.set_role()
+        gui.page(PANEL, gui.CONNECTION)
+        gui.click(PANEL, "setRoleButton")
     elif action == "mode":
-        # The 实时预览／缓存播放 buttons' own handler.
-        from mtou_livelink import controller as panel
-        CONTROLLER._on_mode_changed(
-            panel.CACHED_MODE if command["target"] == "cached" else panel.REALTIME_MODE)
+        gui.page(PANEL, gui.PREVIEW)
+        target = command["target"]
+        gui.click(PANEL, "cachedMode" if target == "cached" else "realtimeMode")
     elif action == "capture":
-        # 自定义捕获范围 and its fields, then 捕获并上传.
         start, end = command["range"]
-        cmds.checkBox(CONTROLLER._custom_range_checkbox, edit=True, value=True)
-        cmds.intField(CONTROLLER._range_start_field, edit=True, value=int(start))
-        cmds.intField(CONTROLLER._range_end_field, edit=True, value=int(end))
-        CONTROLLER._capture_cached_playback()
+        gui.set_capture_range(PANEL, start, end)
+        gui.click(PANEL, "captureButton")
     elif action == "set_secondary":
         select_secondary()
-        CONTROLLER.set_secondary_object()
+        gui.page(PANEL, gui.CONNECTION)
+        gui.click(PANEL, "setSecondaryButton")
     elif action == "secondary_is_primary":
+        # With a second object already set, the page only offers its removal.
+        # Exercise the replacement guard directly so the old set must survive.
         cmds.select(FIXTURE["root"], replace=True)
         CONTROLLER.set_secondary_object()
     elif action == "remove_secondary":
-        CONTROLLER.remove_secondary_object()
-    elif action == "objects_window":
-        if command.get("target") == "close":
-            CONTROLLER.close_objects_window()
-        else:
-            CONTROLLER.open_objects_window()
+        gui.page(PANEL, gui.CONNECTION)
+        gui.click(PANEL, "removeSecondaryButton")
+    elif action == "secondary_page":
+        target = gui.CAMERA if command["target"] == "camera" else gui.CONNECTION
+        gui.page(PANEL, target)
+        root_label = gui.control(PANEL, "secondaryRoot")
+        root = CONTROLLER.objects_state()["secondary"]
+        label_matches = root in (root_label.text(), root_label.toolTip())
+        RESULT["secondary_page"] = {
+            "connection_page": target == gui.CONNECTION,
+            "secondary_visible": bool(root and root_label.isVisible() and label_matches
+                                      and gui.control(PANEL, "removeSecondaryButton").isVisible()),
+        }
     elif action == "drop_secondary_once":
         drop_secondary_once()
     elif action == "resources":
@@ -783,7 +776,7 @@ def run_command(command):
         RESULT["scene_state"] = scene_state()
     elif action == "close_panel":
         # The panel window's own close, as its title bar does.
-        cmds.deleteUI("MtoULiveLinkWindow", window=True)
+        PANEL.close()
     elif action == "open_panel":
         open_panel()
     elif action == "new_scene":
@@ -834,19 +827,15 @@ def drop_secondary_once():
     linkage.make_group_message = incomplete
 
 
-PANEL_CONTROLS = (("enter", "_enter_linkage_button"), ("leave_realtime", "_leave_linkage_button"),
-                  ("leave_end", "_end_linkage_button"), ("realtime", "_realtime_mode_button"),
-                  ("cached", "_cached_mode_button"), ("capture", "_capture_button"))
+PANEL_CONTROLS = (("enter", "enterLinkageButton"), ("leave_realtime", "leaveLinkageButton"),
+                  ("leave_end", "endLinkageButton"), ("realtime", "realtimeMode"),
+                  ("cached", "cachedMode"), ("capture", "captureButton"))
 
 
 def control_states():
-    """Whether each panel button a person can click is enabled; None while the panel is closed."""
-    states = {}
-    for name, attribute in PANEL_CONTROLS:
-        control = getattr(CONTROLLER, attribute, None)
-        states[name] = (bool(cmds.control(control, query=True, enable=True))
-                        if control and cmds.control(control, exists=True) else None)
-    return states
+    """Enabled controls, including those on other tabs; None with the panel closed."""
+    return {name: gui.control(PANEL, control).isEnabled() if gui.windows(gui.MAIN) else None
+            for name, control in PANEL_CONTROLS}
 
 
 def tick():
@@ -867,13 +856,11 @@ def tick():
         RESULT["link_camera_exists"] = bool(cmds.objExists("MtoU_LinkCamera"))
         RESULT["panel_camera"] = (camera_record() or {}).get("camera")
         view = CONTROLLER._cached_view
+        ui_state = CONTROLLER.snapshot()
         RESULT["panel"] = {
-            "workflow": CONTROLLER._workflow, "mode": CONTROLLER._mode,
+            "workflow": CONTROLLER.settings.workflow, "mode": ui_state["mode"],
             "cached_state": getattr(view, "state", None) if view else None,
-            # The panel's controls are gone while it is closed (close_panel).
-            "status": cmds.text(CONTROLLER._status_text, query=True, label=True)
-            if CONTROLLER._status_text and cmds.text(CONTROLLER._status_text, exists=True)
-            else None,
+            "status": panel_status(),
             "controls": control_states()}
         try:
             command = json.loads(Path(FIXTURE["command"]).read_text(encoding="utf-8-sig"))
@@ -893,7 +880,8 @@ def quit_maya():
     TIMER[0].stop()
     RESULT["phase"] = "quitting"
     try:
-        CONTROLLER.close()
+        if gui.windows(gui.MAIN):
+            PANEL.close()
     except Exception:
         RESULT["errors"].append("close: " + traceback.format_exc()[-800:])
     # The supplied rig is never saved; the keyed copy only lived in memory.
@@ -904,20 +892,16 @@ def quit_maya():
 
 
 def start():
-    global CONTROLLER
+    global CALLBACKS, DIALOG_OBSERVER
     try:
+        DIALOG_OBSERVER = DialogObserver()
+        QtWidgets.QApplication.instance().installEventFilter(DIALOG_OBSERVER)
         RESULT["phase"] = "loading"
         write_result()
-        load_start = time.time()
         open_scene()
-        RESULT["load_seconds"] = round(time.time() - load_start, 1)
-        key_test_motion()
-        key_test_morphs()
-        install_callback_census()
+        CALLBACKS = gui.CallbackCensus.install()
         install_session_census()
-        import MtoULiveLink
-        CONTROLLER = MtoULiveLink.run()
-        attach_panel_census()
+        launch_panel()
         if FIXTURE.get("legacy_display"):
             prepare_root_only()
         if FIXTURE.get("initial_edits"):
@@ -930,11 +914,7 @@ def start():
         connect_role(connect=not FIXTURE.get("start_disconnected", False))
         RESULT["phase"] = "running"
         write_result()
-        try:
-            from PySide2.QtCore import QTimer
-        except ImportError:
-            from PySide6.QtCore import QTimer
-        TIMER[0] = QTimer()
+        TIMER[0] = QtCore.QTimer()
         TIMER[0].timeout.connect(tick)
         TIMER[0].start(50)
     except Exception:

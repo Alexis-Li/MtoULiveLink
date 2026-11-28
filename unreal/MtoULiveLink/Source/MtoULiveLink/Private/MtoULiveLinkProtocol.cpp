@@ -3,6 +3,8 @@
 // Licensed under the GPL with additional terms; see NOTICE.
 #include "MtoULiveLinkProtocol.h"
 
+#include "Misc/EngineVersion.h"
+
 
 #include "Containers/StringConv.h"
 #include "Dom/JsonObject.h"
@@ -911,7 +913,8 @@ bool FMtoUProtocol::ParseHello(
     };
     if (!ReadCapability(TEXT("linkage"), OutMessage.bLinkage)
         || !ReadCapability(TEXT("cache"), OutMessage.bCache)
-        || !ReadCapability(TEXT("model"), OutMessage.bModel))
+        || !ReadCapability(TEXT("model"), OutMessage.bModel)
+        || !ReadCapability(TEXT("realtime_metrics"), OutMessage.bRealtimeMetrics))
     {
         return false;
     }
@@ -2058,7 +2061,8 @@ TArray<uint8> FMtoUProtocol::EncodeHelloAck(
     const TArray<FMtoUHelloTarget>& Targets,
     int32 SpaceRevision,
     const TSharedPtr<FJsonObject>& Anchor,
-    const FString& SourceInstanceId)
+    const FString& SourceInstanceId,
+    bool bRealtimeMetrics)
 {
     const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
     Object->SetStringField(TEXT("type"), TEXT("hello_ack"));
@@ -2066,10 +2070,20 @@ TArray<uint8> FMtoUProtocol::EncodeHelloAck(
     Object->SetNumberField(TEXT("version"), FMtoUProtocol::Version);
     Object->SetNumberField(TEXT("session_id"), SessionId);
 
+    Object->SetStringField(TEXT("ue_host_version"), FEngineVersion::Current().ToString());
+    if (!PluginVersionName().IsEmpty())
+    {
+        Object->SetStringField(TEXT("ue_plugin_version"), PluginVersionName());
+    }
+
     const TSharedRef<FJsonObject> Capabilities = MakeShared<FJsonObject>();
     Capabilities->SetBoolField(TEXT("linkage"), bLinkage);
     Capabilities->SetBoolField(TEXT("cache"), bCache);
     Capabilities->SetBoolField(TEXT("model"), bModel);
+    if (bRealtimeMetrics)
+    {
+        Capabilities->SetBoolField(TEXT("realtime_metrics"), true);
+    }
     Object->SetObjectField(TEXT("capabilities"), Capabilities);
 
     // The targets are the explicitly paired targets, primary first; the list
@@ -2092,6 +2106,21 @@ TArray<uint8> FMtoUProtocol::EncodeHelloAck(
         ? Anchor.ToSharedRef()
         : MakeShared<FJsonObject>());
     Object->SetObjectField(TEXT("space"), Space);
+    return EncodeObject(Object);
+}
+
+TArray<uint8> FMtoUProtocol::EncodeRealtimeMetrics(
+    int32 SessionId, int32 SetRevision, int32 EditorFPS, TOptional<double> ApplyMs)
+{
+    const TSharedRef<FJsonObject> Object = MakeShared<FJsonObject>();
+    Object->SetStringField(TEXT("type"), TEXT("realtime_metrics"));
+    Object->SetNumberField(TEXT("session_id"), SessionId);
+    Object->SetNumberField(TEXT("set_revision"), SetRevision);
+    Object->SetNumberField(TEXT("editor_fps"), EditorFPS);
+    if (ApplyMs.IsSet())
+    {
+        Object->SetNumberField(TEXT("apply_ms"), ApplyMs.GetValue());
+    }
     return EncodeObject(Object);
 }
 

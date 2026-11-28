@@ -185,8 +185,8 @@ class ConnectionHarness(unittest.TestCase):
                 mock.patch.object(select, "select", fake_select),
                 mock.patch.object(mtou_controller.Controller, "_linkage_host",
                                   lambda controller, scene, ids, rate: FakeHost()),
-                mock.patch.object(mtou_controller.Controller, "_show_error",
-                                  lambda controller, diagnostic, session=False:
+                mock.patch.object(mtou_controller.Controller, "_notify_diagnostic",
+                                  lambda controller, diagnostic, warning=False:
                                   harness.errors.append(diagnostic))):
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -292,20 +292,11 @@ class ConnectionHarness(unittest.TestCase):
         self.assertLess(time.monotonic() - started, ANSWER_SECONDS)
 
     def mode(self, mode):
-        self.controller._on_mode_changed(mode)
+        self.controller.set_mode(mode)
         self.flush()
 
     def enter_linkage_enabled(self):
-        """What the panel's 进入联动 button shows now: (enabled, tooltip)."""
-        shown = {}
-        self.controller._enter_linkage_button = "enterLinkage"
-        with mock.patch.object(self.controller, "_set_enabled",
-                               lambda control, enabled: shown.update(
-                                   {(control, "enabled"): enabled})),                 mock.patch.object(self.controller, "_set_tooltip",
-                                  lambda control, tooltip: shown.update(
-                                      {(control, "tooltip"): tooltip})):
-            self.controller._update_linkage_controls()
-        return (shown[("enterLinkage", "enabled")], shown[("enterLinkage", "tooltip")])
+        return self.controller.actions()["enter_linkage"]
 
 
 class FourClickTests(ConnectionHarness):

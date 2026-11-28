@@ -11,6 +11,8 @@ repository's issues.
 
 - Maya 2024 is now required; Maya 2022 is no longer supported. Update the Maya
   and Unreal components together for input-change reconnection. (#46)
+- Reinstall both components and set the character and any second object in Maya's
+  **连接** page for each scene. An earlier **Follow Scene** limit becomes **60** fps. (#47)
 - Update the Maya and Unreal components together: protocol v12 refuses a mixed
   pair before it touches either scene. (#14)
 - The scene reference is removed: Unreal's **场景参考** group in the Binding Actor
@@ -22,26 +24,36 @@ repository's issues.
 ### Added
 
 - Both archives now contain `LICENSE` and `NOTICE`, and the copyright and license
-  are shown under **关于** at the bottom right of the Maya panel and in Unreal's
-  plugin entry. The license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
-- **实时预览性能** shows stage timings, Maya's actual send rate, and Unreal's
-  actual pose update rate and editor FPS. **复制完整诊断** includes these readings. (#45)
+  are shown under **关于** on Maya's **诊断** page and in Unreal's plugin entry.
+  The license is GPL-3.0-only with the additional terms in `NOTICE`. (#7)
+- Maya's **完整诊断** shows sampling times and actual send rate. Unreal's
+  **实时预览性能** and **复制完整诊断** include stage timings, pose update rate and editor FPS. (#45)
+- Maya remembers the character, second object, workflow, BlendShape transmission,
+  popups, transmission limit and capture range for each saved scene. (#47)
+- Maya's **诊断** shows measured Unreal pose application time and editor FPS in
+  live preview. **完整诊断** shows both hosts' loaded versions. (#47)
 
 ### Changed
 
+- The Maya panel now has **连接**, **预览**, **相机** and **诊断** pages. Set the character
+  and any second object in **连接**. Follow Unreal's Sequence from **相机**. (#47)
+- Choose a **传输上限** of 15, 20, 24, 30 or 60 fps in **预览**. Select and copy
+  text directly in Maya's **完整诊断** window. (#47)
 - Real-time Preview skips duplicate poses while the character is still. (#45)
-- Set Character now needs only the deformation root. Visible skinned meshes
+- **设置角色** now needs only the deformation root. Visible skinned meshes
   determine the outfit; Display supplies an optional label. (#46)
-- Changes to the outfit, workflow, Transfer BS or character parts reconnect
-  automatically for the same character and targets; stops and failures require Connect. (#46)
+- Changes to the outfit, workflow, **传递 BS** or character parts reconnect for
+  the same character and targets. After a stop or failure, click **连接**. (#46)
 - A refused protocol version now reads 连接失败 · 插件协议版本不匹配 and lists the plugin and
   protocol version that Maya and Unreal each have loaded (未知（对端未提供） for an item the
   other side did not provide), with the advice to reinstall both from one release. (#34)
 
 ### Fixed
 
-- Entering **镜头联动** again right after **结束预览** keeps Maya and Unreal in sync.
-  If Maya cannot restore the previous state, it disconnects and lists the remaining items in 诊断详情. (#45)
+- **诊断** and the open **完整诊断** window show the latest result and its recovery
+  steps even after a connection warning. Earlier differences remain available. (#47)
+- Starting linkage again right after **结束联动** in Maya or **结束预览** in Unreal
+  keeps both in sync. If Maya cannot restore the previous state, it disconnects and lists what remains in **完整诊断**. (#45)
 - Visible Template and Reference meshes now contribute BlendShapes; hidden
   meshes are excluded, including LOD and visibility overrides. (#46)
 - Unreal keeps updating while connected with Maya in front, and restores normal
@@ -49,9 +61,8 @@ repository's issues.
 
 - A realtime frame from another protocol version now reports the plugin protocol
   mismatch before disconnecting, and Maya identifies its running version. (#39)
-- **结束预览** during Cached Playback no longer freezes Unreal: the cache keeps the
-  connection until **实时**, which then clears it and resumes the live pose. **进入联动**
-  stays unavailable until Unreal confirms that clear. (#9)
+- Ending linkage during Cached Playback no longer freezes Unreal. Select **实时**
+  in Maya to clear the cache and resume live poses. Linkage waits for Unreal to confirm the clear. (#9)
 - During Cached Playback, Unreal's **进入联动** is disabled and the 镜头联动 status reads
   缓存播放中; an entry from either host is refused before any Sequencer track is muted,
   so the cache upload is not interrupted. (#9)
@@ -71,10 +82,10 @@ repository's issues.
   not needed to connect again. (#11)
 - Leaving linkage no longer reports a "恢复残留" for a locked output-resolution attribute
   that linkage never changed; only an attribute that could not be put back is listed. (#12)
-- The Sequencer tracks that **进入联动** muted are handed back when the connection ends
+- The Sequencer tracks that linkage muted are handed back when the connection ends
   before the character connects and when the MtoU source is removed in the Live Link
   window; they no longer stay muted. (#13)
-- After a disconnect, **进入联动** is refused at once and no Sequencer track is muted. (#13)
+- After a disconnect, starting linkage is refused at once and no Sequencer track is muted. (#13)
 - When a track cannot be handed back at the end of a connection, the Binding Actor's
   Details show 恢复未完成 in the **恢复结果** row instead of reporting a restore. (#13)
 - Placing, refreshing or deleting a Binding Actor that does not take part in the

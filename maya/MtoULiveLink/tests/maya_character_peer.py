@@ -125,7 +125,7 @@ def main():
                 result["scene_load_warning"] = str(exc)[:400]
 
         class Controller(mtou_controller.Controller):
-            def _show_error(self, diagnostic):
+            def _notify_diagnostic(self, diagnostic, warning=False):
                 result.setdefault("diagnostics", []).append(diagnostic)
 
         controller = Controller()
@@ -207,8 +207,8 @@ def main():
                     last_id = command["id"]
                     action = command["action"]
                     if action == "connect":
-                        controller._workflow = command["workflow"]
-                        controller._blendshapes_enabled = True
+                        controller.set_workflow(command["workflow"])
+                        controller.set_blendshapes(True)
                         controller.connect()
                         until(lambda: controller._session is not None and controller._session._phase == "ready", "ready")
                         result["warning"] = controller._last_warning
@@ -249,13 +249,13 @@ def main():
                         # Production path: Maya captures and uploads; UE owns
                         # the subsequent play, stop and replay actions.
                         result.pop("cache_error", None)
-                        controller._on_mode_changed(mtou_config.CACHED_MODE)
+                        controller.set_mode(mtou_config.CACHED_MODE)
                         cached = controller._ensure_cached_playback()
                         started = time.time()
                         selected_range = command.get("custom_range")
                         controller._selected_capture_range = (
                             lambda: tuple(selected_range) if selected_range else None)
-                        controller._capture_cached_playback()
+                        controller.capture_cache()
                         until(lambda: cached.view.state in (
                             cached.READY, cached.FAILED, cached.REALTIME), "cache upload")
                         result["cache_capture_seconds"] = time.time() - started
@@ -271,7 +271,7 @@ def main():
                         result["cache_play_id"] = controller._cached_playback._play_id
                         result["phase"] = "observed"
                     elif action == "cache_live":
-                        controller._on_mode_changed(mtou_config.REALTIME_MODE)
+                        controller.set_mode(mtou_config.REALTIME_MODE)
                         until(lambda: controller._cached_playback is None
                               or controller._cached_playback.view.state
                               == controller._cached_playback.REALTIME, "cache live")

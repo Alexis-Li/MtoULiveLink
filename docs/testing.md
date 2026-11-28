@@ -348,7 +348,7 @@ GUI workflow. Set `oracle_frames` to two different displayed poses, `part_name`
 to a compatible part already listed in `parts`, and `incompatible_mesh` to an
 asset from another Skeleton. `failure_code` is the expected diagnostic for
 that negotiation. The test also enables `part_name` with its mesh cleared in
-an unsaved Binding transaction. It reads Maya's 诊断详情 window and checks that
+an unsaved Binding transaction. It reads Maya's 诊断 page and 完整诊断 window and checks that
 both hosts report `INVALID_BINDING`, name the part and describe the missing
 Skeletal Mesh. It then undoes the edit and explicitly connects.
 Each `visibility_cases` and `outfit_cases` entry gives a
@@ -364,7 +364,8 @@ a skinned root in the open test scene. `maya.keyed_morphs` names matching
 non-zero Maya and Unreal weights for the displayed-component oracle.
 
 In a two-object `ProductionSequence` fixture, add `composition_reconnect` to
-`scenarios` to apply its first `composition_swaps` entry during linkage.
+`scenarios` to apply its first `composition_swaps` entry during linkage. The Connection page is also left and revisited during
+linkage to check that it still shows the same secondary object.
 The test checks that the old set ends, the Sequencer writers and Maya camera
 and time are restored, and both objects negotiate realtime on a new session.
 The existing `destroy_target` and `close_world` cases exercise subject exits
@@ -417,44 +418,66 @@ because Maya is still autoloading while it plays.
 
 ## Maya GUI checks
 
-Both scripts run with a host Python, not `mayapy`, and start real Maya GUI
-sessions.
+Both scripts run with a host Python and start real Maya 2024 GUI sessions from
+the Maya component archive built from the checkout. Pass an initialized Maya
+2024 preference directory with `--app-dir-template`, for example the
+`minimal` template described above. The checks copy it into a new `--evidence`
+directory. They leave the original preferences and the user's scenes alone.
 
 ### Install check
 
 `maya/MtoULiveLink/tests/maya_gui_install_check.py` checks the packaged
-`install.mel` in real Maya GUI sessions:
+`install.mel` in real Maya GUI sessions. It covers upgrade from the 0.9.0
+single file using the existing shelf button, Chinese and ASCII install paths,
+reinstall and update while open, missing parts, rollback and clean install.
+After upgrade it clicks that saved button to open the Qt panel, verifies
+that repeated entry calls reuse the panel, closes it with diagnostics open,
+and clicks the saved button again. One panel opens with the secondary object
+action on the Connection page.
 
-- upgrade from the 0.9.0 single file with a saved shelf button;
-- Chinese and ASCII install paths;
-- reinstall, and an update while the tool is open;
-- a broken and a partial package, and missing parts;
-- rollback and a clean install.
-
-Pass `--old-entry` the 0.9.0 `MtoULiveLink.py`, available with
-`git show 6512f3e^:maya/MtoULiveLink/scripts/MtoULiveLink.py`. The script exits
-1 and prints `FAIL <step>: ...` when a step misses its expected result;
-`summary.json` keeps every step's observations and failures.
+Pass `--old-entry` the 0.9.0 `MtoULiveLink.py` from
+`git show 6512f3e^:maya/MtoULiveLink/scripts/MtoULiveLink.py`.
+`summary.json` keeps every step's observations and failures, and the script
+exits with code 1 if any step fails.
 
 ### Window check
 
-`maya/MtoULiveLink/tests/maya_gui_window_check.py` closes the panel and
-the 对象配对 window from their title bars (`WM_CLOSE`) and their own buttons,
-repeats close and reopen, switches workflow, makes a new scene and opens a
-scene, and quits Maya in each state. Throughout, an open panel must hold one
-window, its scriptJob
-and its two scene-replacement callbacks. A scenario passes only when Maya
-exits with code 0, in time, without a crash log and without a Python traceback
-in its Script Editor history.
+`maya/MtoULiveLink/tests/maya_gui_window_check.py` verifies repeated entry,
+native title-bar closes, complete diagnostics open and close cycles, workflow
+changes, scene replacement, and ownership of diagnostics when the panel
+closes. It checks the actual Qt windows, tool scriptJobs, registered Maya
+callbacks and remaining tool nodes. A scenario must also exit with code 0,
+in time, without a crash log or a Python traceback in its Script Editor
+history.
 
-Run it after changing window or panel lifecycle, once with the default quit
-and once with `--quit title-bar` (closing Maya's main window).
+Run all default scenarios after a lifecycle change, once with the default
+quit and once with `--quit title-bar` to close Maya's own main window.
 
-Pass `--app-dir-template` a Maya 2024 preference directory that a person has
-started Maya with once and whose first-start dialogs they answered; the check
-copies it for every process and never answers those dialogs. Without such a
-template, report it as a missing prerequisite instead of starting Maya with an
-empty preference directory.
+### Panel visuals and scene settings
+
+Run the additional scenarios with fresh evidence:
+
+```powershell
+python maya/MtoULiveLink/tests/maya_gui_window_check.py --maya <Maya2024>/bin/maya.exe --app-dir-template <fixtures>/maya-prefs-minimal --evidence <scratch>/maya-panel --step panel_visuals --step scene_settings
+```
+
+`panel_visuals` opens the five views and saves their PNGs at the panel's
+default size. It uses a disposable Maya rig and a local protocol peer to
+drive a real connection, BlendShape difference, Sequence linkage and a
+long error. The camera card receives display data for the long sequence
+name. The driver checks elided names and their tooltips, the beam when
+the system animation setting reported to the panel is disabled, and the
+error's wrapping, scrolling and copying. It compares complete diagnostics
+opened before and after the same failure. Inspect the PNGs for layout,
+type, color, buttons and visible text.
+
+`scene_settings` starts two Maya processes using one isolated preference
+copy. It creates two temporary scenes and a save-as copy, then verifies
+settings restoration after changing scenes, reopening the panel and starting
+a new Maya. It replaces a binding reference with a rig at the same long
+paths, then with one whose short names match under a different hierarchy.
+The saved path is required for recovery. It checks Maya's modified flag and
+the saved scene file hashes before and after restoring settings.
 
 ## Acceptance fixtures
 

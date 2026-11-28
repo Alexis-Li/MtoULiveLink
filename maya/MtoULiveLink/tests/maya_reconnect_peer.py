@@ -73,7 +73,7 @@ def main():
 
         class HeadlessController(mtou_controller.Controller):
             # Presentation only: retain the real lifecycle and error transition.
-            def _show_error(self, diagnostic):
+            def _notify_diagnostic(self, diagnostic, warning=False):
                 result.setdefault("diagnostics", []).append(diagnostic)
 
         controller = HeadlessController()
@@ -104,7 +104,7 @@ def main():
             controller.connect()
             pump_until(lambda: controller._cached_playback is not None
                        and not controller._cached_playback._closed, "ready")
-            controller._on_mode_changed(mtou_config.CACHED_MODE)
+            controller.set_mode(mtou_config.CACHED_MODE)
             return controller._cached_playback
 
         def announce(phase):
@@ -113,7 +113,7 @@ def main():
                 json.dumps(result, indent=2, ensure_ascii=True), encoding="utf-8")
 
         first = connect()
-        controller._capture_cached_playback()
+        controller.capture_cache()
         pump_until(lambda: first.view.state == first.READY, "A upload ready")
         announce("a_ready")
         pump_until(lambda: first.view.state == first.COMPLETED, "A capture/play complete")
@@ -136,7 +136,7 @@ def main():
         assert Path(second._cache._frames_path) == cache_path
         # A different current animation makes an accidental recapture visible.
         cmds.setKeyframe(joints[0], attribute="translateX", time=4, value=999)
-        controller._upload_retained_cache()
+        controller.upload_cache()
         pump_until(lambda: second.view.state == second.READY, "B retained upload ready")
         announce("b_ready")
         pump_until(lambda: second.view.state == second.COMPLETED,
@@ -153,7 +153,7 @@ def main():
         cmds.setKeyframe(joints[0], attribute="translateX", time=-1, value=-10)
         cmds.setKeyframe(joints[0], attribute="translateX", time=0, value=0)
         controller._selected_capture_range = lambda: (-1, 1)
-        controller._capture_cached_playback()
+        controller.capture_cache()
         pump_until(lambda: second.view.state == second.READY, "C custom upload ready")
         assert second.view.cache_summary.capture_start == -1
         assert second.view.cache_summary.capture_end == 1

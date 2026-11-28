@@ -4934,7 +4934,8 @@
         "capabilities": {
           "linkage": true,
           "cache": true,
-          "model": true
+          "model": true,
+          "realtime_metrics": true
         },
         "maya_subject_id": "maya-subject"
       },
@@ -5061,7 +5062,8 @@
         "capabilities": {
           "linkage": true,
           "cache": true,
-          "model": true
+          "model": true,
+          "realtime_metrics": true
         },
         "plugin_version": "0.0.0-example",
         "maya_subject_id": "maya-subject"
@@ -8053,7 +8055,8 @@
         "capabilities": {
           "linkage": true,
           "cache": true,
-          "model": true
+          "model": true,
+          "realtime_metrics": true
         },
         "plugin_version": "0.0.0-example",
         "maya_subject_id": "maya-subject",
@@ -10170,6 +10173,617 @@
       "expected": {
         "accepted": true,
         "close": false
+      }
+    },
+    {
+      "id": "hello-realtime-metrics-omitted",
+      "operation": "hello",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true
+        },
+        "maya_subject_id": "maya-subject"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "hello-realtime-metrics-disabled",
+      "operation": "hello",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true,
+          "realtime_metrics": false
+        },
+        "maya_subject_id": "maya-subject"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "hello-realtime-metrics-wrong-type",
+      "operation": "hello",
+      "applies_to": [
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello",
+        "version": 12,
+        "host": "maya",
+        "maya_version": "2024",
+        "scene": {
+          "linear_unit": "cm",
+          "unit_scale_cm": 1.0,
+          "fps": 30.0
+        },
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true,
+          "realtime_metrics": 1
+        },
+        "maya_subject_id": "maya-subject"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "realtime_metrics"
+        ]
+      }
+    },
+    {
+      "id": "hello-ack-runtime-versions-and-realtime-metrics",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true,
+          "realtime_metrics": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [
+          {
+            "object_id": "character",
+            "kind": "skeletal_mesh",
+            "binding_path": "/Game/Characters/Hero",
+            "generation": "1"
+          }
+        ],
+        "source_instance_id": "source-instance",
+        "ue_host_version": "5.7.4-example",
+        "ue_plugin_version": "0.0.0-example"
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "hello-ack-ue_host_version-wrong-type",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true,
+          "realtime_metrics": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [
+          {
+            "object_id": "character",
+            "kind": "skeletal_mesh",
+            "binding_path": "/Game/Characters/Hero",
+            "generation": "1"
+          }
+        ],
+        "source_instance_id": "source-instance",
+        "ue_host_version": 5.7,
+        "ue_plugin_version": "0.0.0-example"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "ue_host_version"
+        ]
+      }
+    },
+    {
+      "id": "hello-ack-ue_plugin_version-wrong-type",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true,
+          "realtime_metrics": true
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [
+          {
+            "object_id": "character",
+            "kind": "skeletal_mesh",
+            "binding_path": "/Game/Characters/Hero",
+            "generation": "1"
+          }
+        ],
+        "source_instance_id": "source-instance",
+        "ue_host_version": "5.7.4-example",
+        "ue_plugin_version": [
+          "0.0.0"
+        ]
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "ue_plugin_version"
+        ]
+      }
+    },
+    {
+      "id": "hello-ack-realtime_metrics-wrong-type",
+      "operation": "hello_ack",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "hello_ack",
+        "version": 12,
+        "session_id": 4242,
+        "capabilities": {
+          "linkage": true,
+          "cache": true,
+          "model": true,
+          "realtime_metrics": "true"
+        },
+        "space": {
+          "space_revision": 1,
+          "anchor": {
+            "translation": [
+              0,
+              0,
+              0
+            ],
+            "rotation": [
+              0,
+              0,
+              0,
+              1
+            ],
+            "scale": [
+              1,
+              1,
+              1
+            ]
+          }
+        },
+        "targets": [
+          {
+            "object_id": "character",
+            "kind": "skeletal_mesh",
+            "binding_path": "/Game/Characters/Hero",
+            "generation": "1"
+          }
+        ],
+        "source_instance_id": "source-instance",
+        "ue_host_version": "5.7.4-example",
+        "ue_plugin_version": "0.0.0-example"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "realtime_metrics"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-first-snapshot-without-application",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": 60
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "realtime-metrics-application",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": 60,
+        "apply_ms": 1.375
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "realtime-metrics-measured-zero",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya",
+        "unreal"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": 0,
+        "apply_ms": 0
+      },
+      "expected": {
+        "accepted": true,
+        "close": false
+      }
+    },
+    {
+      "id": "realtime-metrics-session_id-boolean",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": true,
+        "set_revision": 7,
+        "editor_fps": 60
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-session_id-zero",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 0,
+        "set_revision": 7,
+        "editor_fps": 60
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "session_id"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-set_revision-negative",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": -1,
+        "editor_fps": 60
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "set_revision"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-set_revision-fraction",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 3.5,
+        "editor_fps": 60
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "set_revision"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-editor_fps-string",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": "60"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "editor_fps"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-editor_fps-negative",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": -1
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "editor_fps"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-editor_fps-too-large",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": 2147483648
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "editor_fps"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-apply_ms-boolean",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": 60,
+        "apply_ms": true
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "apply_ms"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-apply_ms-string",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": 60,
+        "apply_ms": "1.5"
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "apply_ms"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-apply_ms-negative",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7,
+        "editor_fps": 60,
+        "apply_ms": -0.5
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "apply_ms"
+        ]
+      }
+    },
+    {
+      "id": "realtime-metrics-fps-missing",
+      "operation": "realtime_metrics",
+      "applies_to": [
+        "maya"
+      ],
+      "payload": {
+        "type": "realtime_metrics",
+        "session_id": 4242,
+        "set_revision": 7
+      },
+      "expected": {
+        "accepted": false,
+        "close": true,
+        "error_code": "INVALID_MESSAGE",
+        "keywords": [
+          "editor_fps"
+        ]
       }
     }
   ],

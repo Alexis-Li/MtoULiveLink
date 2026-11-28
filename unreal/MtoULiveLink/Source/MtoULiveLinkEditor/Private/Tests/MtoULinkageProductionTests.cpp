@@ -1413,9 +1413,9 @@ private:
             }
             if (HasSecondary())
             {
-                Add(TEXT("the pairing window opens during linkage"), 30.0, [this]()
+                Add(TEXT("the Connection page shows the secondary object during linkage"), 30.0, [this]()
                 {
-                    return SendOnce(TEXT("objects_window"), TEXT("open"));
+                    return SendOnce(TEXT("secondary_page"), TEXT("connection"));
                 });
             }
             Add(TEXT("panel screenshots during linkage"), 60.0, [this]()
@@ -1434,28 +1434,34 @@ private:
             Add(TEXT("Details renders during linkage"), 60.0, [this]() { return RenderDetails(TEXT("linkage")); });
             if (HasSecondary())
             {
-                // Closing and reopening the pairing window changes nothing of the set.
-                Add(TEXT("the pairing window closes during linkage"), 30.0, [this]()
+                // Switching away and back to the Connection page leaves the set intact.
+                Add(TEXT("switch away from the Connection page during linkage"), 30.0, [this]()
                 {
-                    return SendOnce(TEXT("objects_window"), TEXT("close"));
+                    return SendOnce(TEXT("secondary_page"), TEXT("camera"));
                 });
-                Add(TEXT("the pairing window reopens with the same set"), 30.0, [this]()
+                Add(TEXT("return to the Connection page with the same set"), 30.0, [this]()
                 {
-                    if (!SendOnce(TEXT("objects_window"), TEXT("open")))
+                    if (!SendOnce(TEXT("secondary_page"), TEXT("connection")))
                     {
                         return false;
                     }
                     const TSharedPtr<FJsonObject> Status = MayaStatus();
                     bool bActive = false;
-                    Test->TestTrue(TEXT("linkage continues while the pairing window closes and reopens"),
+                    Test->TestTrue(TEXT("linkage continues while switching Maya pages"),
                         Status.IsValid() && Status->TryGetBoolField(TEXT("active"), bActive) && bActive
                         && MtoUGetLinkageView().Mode == TEXT("linkage"));
-                    Test->TestTrue(TEXT("the reopened pairing window shows the same second object"), MayaSetHasSecondary());
+                    const TSharedPtr<FJsonObject>* SecondaryPage = nullptr;
+                    const bool bVisible = MayaResult.IsValid()
+                        && MayaResult->TryGetObjectField(TEXT("secondary_page"), SecondaryPage)
+                        && (*SecondaryPage)->GetBoolField(TEXT("connection_page"))
+                        && (*SecondaryPage)->GetBoolField(TEXT("secondary_visible"));
+                    Test->TestTrue(TEXT("the Connection page still shows the same second object"),
+                        bVisible && MayaSetHasSecondary());
                     return true;
                 });
-                Add(TEXT("panel screenshots after reopening"), 60.0, [this]()
+                Add(TEXT("panel screenshots after returning to the Connection page"), 60.0, [this]()
                 {
-                    return SendOnce(TEXT("panel_shot"), FString(), TEXT("linkage-reopened"));
+                    return SendOnce(TEXT("panel_shot"), FString(), TEXT("linkage-connection-page"));
                 });
             }
         }
@@ -1926,12 +1932,6 @@ private:
      */
     void AddLifecycle()
     {
-        // Closing the panel or replacing the scene closes 对象配对 with it, and
-        // reopening the panel does not reopen it: the baseline has the panel only.
-        Add(TEXT("[lifecycle] the pairing window closes before the baseline"), 30.0, [this]()
-        {
-            return SendOnce(TEXT("objects_window"), TEXT("close"));
-        });
         Add(TEXT("[lifecycle] warm-up cycle and baseline census"), 300.0, [this]()
         {
             if (!LifecycleCycle(TEXT("cycle")))
@@ -3527,8 +3527,10 @@ private:
         {
             Add(TEXT("[arms] build the synthetic arms target"), 300.0, [this]() { return BuildArmsTarget(); });
         }
-        Add(What + TEXT(" ends the set"), 120.0, [this, bArms, What]()
+        Add(What + TEXT(": retire the old set and automatically negotiate the replacement"), 120.0,
+            [this, bArms, What]()
         {
+            const FMtoULinkageView View = MtoUGetLinkageView();
             if (RefusalPhase == 0)
             {
                 if (!ArmsMesh.IsValid())
@@ -3537,14 +3539,70 @@ private:
                     bAbort = true;
                     return true;
                 }
+                if (!SetConnected() || View.Identity.SessionId == 0 || NegotiatedObjects() != 2)
+                {
+                    return false;
+                }
+                SwapSession = View.Identity.SessionId;
+                SwapAttempts = MayaAttempts();
                 SecondaryBinding->SkeletalMesh = bArms ? ArmsMesh.Get() : FullBodyMesh.Get();
                 SecondaryActor->NotifyBindingInputsChanged();
                 RefusalPhase = 1;
                 return false;
             }
-            return SetEnded(What);
+            if (!SetConnected() || View.Identity.SessionId == 0 || View.Identity.SessionId == SwapSession
+                || View.Mode != TEXT("realtime") || View.bTakeoverHeld || View.bTransitioning)
+            {
+                return false;
+            }
+
+            const TArray<TSharedPtr<FJsonValue>>* Connections = nullptr;
+            if (!MayaResult->TryGetArrayField(TEXT("connections"), Connections) || Connections->IsEmpty())
+            {
+                return false;
+            }
+            const TSharedPtr<FJsonObject>& Current = Connections->Last()->AsObject();
+            int32 CurrentSession = 0;
+            bool bReady = false;
+            if (!Current->TryGetNumberField(TEXT("session_id"), CurrentSession)
+                || CurrentSession != View.Identity.SessionId
+                || !Current->TryGetBoolField(TEXT("ready"), bReady) || !bReady)
+            {
+                return false;
+            }
+
+            bool bSawOldSession = false;
+            bool bSawOldStop = false;
+            for (const TSharedPtr<FJsonValue>& Entry : *Connections)
+            {
+                const TSharedPtr<FJsonObject>& Observation = Entry->AsObject();
+                int32 SessionId = 0;
+                if (Observation->TryGetNumberField(TEXT("session_id"), SessionId) && SessionId == SwapSession)
+                {
+                    bSawOldSession = true;
+                }
+                bool bOpen = true;
+                if (bSawOldSession && Observation->TryGetBoolField(TEXT("open"), bOpen) && !bOpen)
+                {
+                    bSawOldStop = true;
+                    break;
+                }
+            }
+            Test->TestTrue(*(What + TEXT(": Maya closed the old connection before the replacement was ready")),
+                bSawOldStop);
+            Test->TestEqual(*(What + TEXT(": exactly one automatic Maya connection attempt")),
+                MayaAttempts(), SwapAttempts + 1);
+            Test->TestEqual(*(What + TEXT(": both objects negotiated on the same new connection")),
+                NegotiatedObjects(), 2);
+            Test->TestTrue(*(What + TEXT(": the existing bindings and object pairings are preserved")),
+                Actor->GetBinding() == Binding.Get() && SecondaryActor->GetBinding() == SecondaryBinding.Get()
+                && MtoUGetLinkagePairedObject(*Actor) == Fixture->GetStringField(TEXT("object_id"))
+                && MtoUGetLinkagePairedObject(*SecondaryActor) == SecondaryObjectId && MayaPairingKept());
+            Log(FString::Printf(TEXT("%s: session %d -> %d, automatic attempts %d -> %d"),
+                *What, SwapSession, View.Identity.SessionId, SwapAttempts, MayaAttempts()));
+            RefusalPhase = 0;
+            return true;
         });
-        Add(What + TEXT(": connects again"), 600.0, [this, What]() { return ReconnectSet(What); });
         Add(What + TEXT(": required bones"), 30.0, [this, bArms, What]()
         {
             const TArray<FName> Required = RequiredBones(SecondaryBinding.Get());

@@ -84,7 +84,7 @@ def main():
 
         class HeadlessController(mtou_controller.Controller):
             # Presentation only: retain the real lifecycle and error transition.
-            def _show_error(self, diagnostic):
+            def _notify_diagnostic(self, diagnostic, warning=False):
                 result.setdefault("diagnostics", []).append(diagnostic)
 
         controller = HeadlessController()
@@ -140,7 +140,7 @@ def main():
             controller.connect()
             pump_until(lambda: controller._cached_playback is not None
                        and not controller._cached_playback._closed, "ready")
-            controller._on_mode_changed(mtou_config.CACHED_MODE)
+            controller.set_mode(mtou_config.CACHED_MODE)
             return controller._cached_playback
 
         def record_outcomes(cached, name):
@@ -199,7 +199,7 @@ def main():
         # interactive control the Unreal test drives.
         first = connect()
         record_outcomes(first, "A")
-        controller._capture_cached_playback()
+        controller.capture_cache()
         # The outcome record is latched: Unreal drives the interactive sequence
         # as soon as its own view is Ready, so a transient view state is not a
         # reliable rendezvous here.
@@ -228,7 +228,7 @@ def main():
         result["outcome_types"] = [outcome.get("type") for outcome in result["outcomes"]]
         # Leaving cached playback clears Unreal's cache and resumes live
         # frames, while the completed local cache stays for a later upload.
-        controller._on_mode_changed(mtou_config.REALTIME_MODE)
+        controller.set_mode(mtou_config.REALTIME_MODE)
         pump_until(lambda: first.view.state == first.REALTIME, "A leave")
         result["cache_retained_after_leave"] = cache_path.exists()
         announce("a_left")
@@ -240,7 +240,7 @@ def main():
         replay_diagnostics = len(result.get("diagnostics", []))
         second = connect()
         record_outcomes(second, "B")
-        controller._capture_cached_playback()
+        controller.capture_cache()
         pump_until(lambda: seen("cache_ready", session="B"), "B upload ready")
         result["sessions"].append({
             "name": "B",
@@ -255,7 +255,7 @@ def main():
         pump_until(lambda: seen("cache_complete", session="B")
                    or seen("cache_stopped", session="B"), "B playback outcome")
         second_path = Path(second._cache._frames_path)
-        controller._on_mode_changed(mtou_config.REALTIME_MODE)
+        controller.set_mode(mtou_config.REALTIME_MODE)
         pump_until(lambda: second.view.state == second.REALTIME, "B leave")
         announce("b_left")
         controller.close()

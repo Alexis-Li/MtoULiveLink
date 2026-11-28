@@ -401,9 +401,14 @@ class BackgroundAcceptanceTests(unittest.TestCase):
 def driver_functions():
     tree = ast.parse(DRIVER.read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-                 and node.name in ("connect_role", "run_command", "start")]
-    namespace = {"FIXTURE": {"root": "root"}, "CONTROLLER": mock.Mock(),
+                 and node.name in ("connect_role", "open_scene", "record_connection",
+                                   "reopen_scene", "run_command", "start")]
+    controller = mock.Mock()
+    controller.objects_state.return_value = {"secondary": None}
+    namespace = {"FIXTURE": {"root": "root"}, "CONTROLLER": controller,
+                 "PANEL": mock.sentinel.panel, "gui": mock.Mock(),
                  "cmds": mock.Mock(), "RESULT": {}, "time": time,
+                 "ATTEMPT_LOCK": mock.MagicMock(), "ATTEMPTS": [],
                  "select_secondary": mock.Mock()}
     exec(compile(ast.Module(body=functions, type_ignores=[]), str(DRIVER), "exec"), namespace)
     return namespace
@@ -413,13 +418,55 @@ class MayaDriverCommandTests(unittest.TestCase):
     def test_existing_fixture_still_connects_and_disconnected_role_does_not(self):
         state = driver_functions()
         state["connect_role"]()
-        state["CONTROLLER"].connect.assert_called_once()
-        state["CONTROLLER"].reset_mock()
+        clicks = state["gui"].click
+        panel = state["PANEL"]
+        self.assertEqual([mock.call(panel, "setRoleButton"), mock.call(panel, "connectButton")],
+                         clicks.call_args_list)
+        clicks.reset_mock()
         state["FIXTURE"]["secondary"] = {"root": "secondary"}
         state["connect_role"](False)
-        state["CONTROLLER"].set_role.assert_called_once()
-        state["CONTROLLER"].set_secondary_object.assert_called_once()
-        state["CONTROLLER"].connect.assert_not_called()
+        self.assertEqual([mock.call(panel, "setRoleButton"),
+                          mock.call(panel, "setSecondaryButton")], clicks.call_args_list)
+
+    def test_connection_stop_reason_survives_a_new_role_or_scene(self):
+        state = driver_functions()
+        controller = state["CONTROLLER"]
+        controller._session = None
+        controller._session_id_of.return_value = None
+        controller._connection_stop_diagnostic = {
+            "code": "SUBJECT_CHANGED", "summary": "连接对象已变更，连接已停止"}
+        state["record_connection"](
+            {"connection": "idle", "status": "角色已设置", "diagnostic": {"operation": "role"}})
+        state["record_connection"]({"connection": "idle", "status": "", "diagnostic": {}})
+        stopped, = state["RESULT"]["connections"]
+        self.assertEqual("SUBJECT_CHANGED", stopped["code"])
+        self.assertEqual("连接对象已变更，连接已停止", stopped["status"])
+        self.assertFalse(stopped["open"])
+
+        controller._session = mock.sentinel.new_session
+        controller._session_id_of.return_value = 2
+        state["record_connection"](
+            {"connection": "connected", "status": "已连接", "diagnostic": {}})
+        new = state["RESULT"]["connections"][-1]
+        self.assertTrue(new["open"])
+        self.assertEqual(2, new["session_id"])
+        self.assertIsNone(new["code"])
+
+    def test_reopen_recreates_disposable_motion_before_connecting(self):
+        state = driver_functions()
+        calls = mock.Mock()
+        state["FIXTURE"].update(scene="fixture.ma", start_frame=42)
+        state.update(cmds=calls.cmds, key_test_motion=calls.key_test_motion,
+                     key_test_morphs=calls.key_test_morphs, connect_role=calls.connect_role)
+        state["reopen_scene"]()
+        self.assertEqual([
+            mock.call.cmds.file("fixture.ma", open=True, force=True, prompt=False,
+                                executeScriptNodes=False, ignoreVersion=True),
+            mock.call.key_test_motion(),
+            mock.call.key_test_morphs(),
+            mock.call.cmds.currentTime(42.0, update=True),
+            mock.call.connect_role(),
+        ], calls.mock_calls)
 
     def test_evaluated_time_ack_follows_synchronous_time_change(self):
         state = driver_functions()
@@ -441,17 +488,12 @@ class MayaDriverCommandTests(unittest.TestCase):
             with self.subTest(disconnected=disconnected):
                 state = driver_functions()
                 state.update({name: mock.Mock() for name in (
-                    "write_result", "open_scene", "key_test_motion", "key_test_morphs",
-                    "install_callback_census", "install_session_census", "attach_panel_census",
-                    "connect_role", "fail", "tick")})
+                    "write_result", "open_scene",
+                    "DialogObserver", "QtWidgets", "QtCore", "launch_panel",
+                    "install_session_census", "connect_role", "fail", "tick")})
                 state["FIXTURE"]["start_disconnected"] = disconnected
                 state["TIMER"] = [None]
-                qt_core = types.ModuleType("PySide2.QtCore")
-                qt_core.QTimer = mock.Mock()
-                entry = types.ModuleType("MtoULiveLink")
-                entry.run = mock.Mock(return_value=state["CONTROLLER"])
-                with mock.patch.dict(sys.modules, {"MtoULiveLink": entry, "PySide2.QtCore": qt_core}):
-                    state["start"]()
+                state["start"]()
                 state["fail"].assert_not_called()
                 state["connect_role"].assert_called_once_with(connect=not disconnected)
 

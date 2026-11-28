@@ -1,7 +1,6 @@
 # ruff: noqa: E402
 import contextlib
 import errno
-import itertools
 import json
 import math
 import pathlib
@@ -169,7 +168,7 @@ class IncompleteInstallTests(unittest.TestCase):
 
         self.assertNotEqual(0, code)
         self.assertIn("MtoU_LiveLink 安装不完整：找不到 mtou_livelink", stderr)
-        self.assertIn("drag its install.mel into a Maya viewport", stderr)
+        self.assertIn("install.mel 拖入 Maya 视口重新安装", stderr)
 
     def test_missing_module_is_named_in_the_report(self):
         code, stderr = self.import_entry(keep_package=True, drop_module="linkage.py")
@@ -189,39 +188,28 @@ class LatestFrameTests(unittest.TestCase):
 
 
 class PlaybackCapPersistenceTests(unittest.TestCase):
-    def _option_var_cmds(self, stored=None):
-        state = {"stored": stored}
+    def test_missing_and_invalid_legacy_values_use_the_default(self):
+        cmds = mock.Mock()
+        cmds.optionVar.side_effect = (False, True, "120 fps")
+        with patch_global("cmds", cmds):
+            for value in (None, "120 fps"):
+                with self.subTest(value=value):
+                    self.assertEqual(mtou_config.DEFAULT_PLAYBACK_CAP, mtou_timeline.load_playback_cap())
+        self.assertEqual([mock.call(exists=mtou_config.PLAYBACK_CAP_OPTION_VAR),
+                          mock.call(exists=mtou_config.PLAYBACK_CAP_OPTION_VAR),
+                          mock.call(query=mtou_config.PLAYBACK_CAP_OPTION_VAR)],
+                         cmds.optionVar.call_args_list)
 
-        def option_var(**kwargs):
-            if "exists" in kwargs:
-                return state["stored"] is not None
-            if "query" in kwargs:
-                return state["stored"]
-            if "stringValue" in kwargs:
-                _, value = kwargs["stringValue"]
-                state["stored"] = value
-                return None
-            raise AssertionError("unexpected optionVar call: {0}".format(kwargs))
-
-        return type("FakeCmds", (), {"optionVar": staticmethod(option_var)}), state
-
-    def test_missing_and_invalid_values_fall_back_to_twenty_fps(self):
-        fake_cmds, state = self._option_var_cmds()
-        with patch_global("cmds", fake_cmds):
-            self.assertEqual(mtou_config.DEFAULT_PLAYBACK_CAP, mtou_timeline.load_playback_cap())
-            self.assertEqual(mtou_config.DEFAULT_PLAYBACK_CAP, state["stored"])
-
-            state["stored"] = "120 fps"
-            self.assertEqual(mtou_config.DEFAULT_PLAYBACK_CAP, mtou_timeline.load_playback_cap())
-            self.assertEqual(mtou_config.DEFAULT_PLAYBACK_CAP, state["stored"])
-
-    def test_valid_values_round_trip_through_native_option_storage(self):
-        fake_cmds, state = self._option_var_cmds("15 fps")
-        with patch_global("cmds", fake_cmds):
-            self.assertEqual("15 fps", mtou_timeline.load_playback_cap())
-            self.assertEqual("15 fps", state["stored"])
-            mtou_timeline.save_playback_cap("Follow Scene")
-            self.assertEqual("Follow Scene", state["stored"])
+    def test_legacy_caps_migrate_without_changing_native_options(self):
+        for legacy, expected in (("15 fps", 15), ("20 fps", 20), ("30 fps", 30), ("Follow Scene", 60)):
+            with self.subTest(legacy=legacy):
+                cmds = mock.Mock()
+                cmds.optionVar.side_effect = (True, legacy)
+                with patch_global("cmds", cmds):
+                    self.assertEqual(expected, mtou_timeline.load_playback_cap())
+                self.assertEqual([mock.call(exists=mtou_config.PLAYBACK_CAP_OPTION_VAR),
+                                  mock.call(query=mtou_config.PLAYBACK_CAP_OPTION_VAR)],
+                                 cmds.optionVar.call_args_list)
 
 
 class PlaybackSchedulingTests(unittest.TestCase):
@@ -4072,48 +4060,22 @@ class CacheUploadTests(unittest.TestCase):
 
 
 class ControllerLifecycleTests(unittest.TestCase):
-    def test_main_window_offers_persisted_playback_caps(self):
-        fake_cmds = mock.MagicMock()
-        fake_cmds.currentUnit.return_value = "film"
-        fake_cmds.control.return_value = True
-        stored = {"value": "15 fps"}
-
-        def option_var(**kwargs):
-            if "exists" in kwargs:
-                return True
-            if "query" in kwargs:
-                return stored["value"]
-            if "stringValue" in kwargs:
-                _, stored["value"] = kwargs["stringValue"]
-                return None
-            raise AssertionError("unexpected optionVar call: {0}".format(kwargs))
-
-        fake_cmds.optionVar.side_effect = option_var
+    def test_controller_supports_all_five_caps_without_a_window(self):
+        self.assertEqual((15, 20, 24, 30, 60), mtou_config.PLAYBACK_CAP_CHOICES)
         controller = mtou_controller.Controller()
-        with patch_global("cmds", fake_cmds), \
-                patch_global("om", mock.MagicMock()):
-            controller.build_ui()
-
-        labels = [call[1]["label"] for call in fake_cmds.menuItem.call_args_list]
-        self.assertEqual(list(mtou_config.PLAYBACK_CAP_CHOICES), labels)
-        self.assertEqual("15 fps", controller._playback_cap)
-        self.assertTrue(any(
-            call[1].get("edit") and call[1].get("value") == "15 fps"
-            for call in fake_cmds.optionMenu.call_args_list))
+        for cap in mtou_config.PLAYBACK_CAP_CHOICES:
+            controller.set_playback_cap(cap)
+            self.assertEqual(cap, controller.settings.playback_cap)
 
     def test_changing_playback_cap_updates_existing_session_without_reconnect(self):
-        fake_cmds = mock.MagicMock()
-        fake_cmds.control.return_value = True
         controller = mtou_controller.Controller()
-        controller._playback_cap_menu = "capMenu"
         controller._session = mock.Mock()
         controller._session.time_control = mtou_timecontrol.TimeControl()
 
-        with patch_global("cmds", fake_cmds):
-            controller._on_playback_cap_changed("30 fps")
+        controller.set_playback_cap(30)
 
-        self.assertEqual("30 fps", controller._playback_cap)
-        controller._session.change_cap.assert_called_once_with("30 fps")
+        self.assertEqual(30, controller.settings.playback_cap)
+        controller._session.change_cap.assert_called_once_with(30)
 
 
     def test_session_ready_requires_public_is_ready_never_probes_phase(self):
@@ -4196,29 +4158,19 @@ class ControllerLifecycleTests(unittest.TestCase):
         self.assertIs(retention, controller._cached_retention)
         self.assertFalse(hasattr(controller, "_cached_cache"))
 
-    def test_failed_capture_view_clears_cache_text_and_restores_realtime_mode(self):
-        fake_cmds = mock.MagicMock()
-        fake_cmds.control.return_value = True
+    def test_failed_capture_clears_the_cache_and_restores_realtime_mode(self):
         controller = mtou_controller.Controller()
         session, lease = cached_session(is_ready=True)
         controller._session = session
-        controller._cache_text = "cacheText"
-        controller._light = "light"
-        controller._status_text = "statusText"
-        with patch_global("cmds", fake_cmds):
-            # A recoverable capture failure that already resumed Real-time
-            # Preview publishes a REALTIME view with the truthful diagnostic;
-            # the controller completes the same transition in the UI.
-            lease.release()
-            controller._on_cached_playback_view(mtou_cache.CachedPlaybackView(
-                mtou_cache.CachedPlayback.REALTIME,
-                diagnostic=mtou_diagnostics.make_diagnostic("CACHED_PLAYBACK_CANCELLED")))
+        lease.release()
+        controller._on_cached_playback_view(mtou_cache.CachedPlaybackView(
+            mtou_cache.CachedPlayback.REALTIME,
+            diagnostic=mtou_diagnostics.make_diagnostic("CACHED_PLAYBACK_CANCELLED")))
 
         self.assertEqual(mtou_config.REALTIME_MODE, controller._mode)
-        self.assertIn("缓存：无", [call[1]["label"]
-                                  for call in fake_cmds.text.call_args_list])
-        labels = [call[1].get("label") for call in fake_cmds.text.call_args_list]
-        self.assertIn("●  已连接", [label for label in labels if label])
+        self.assertIsNone(controller._cached_view.cache_summary)
+        self.assertTrue(controller._session_ready())
+        self.assertIn("已恢复实时预览", controller._cache_status)
 
     def test_interactive_playback_views_render_their_own_status_text(self):
         views = (
@@ -4250,19 +4202,12 @@ class ControllerLifecycleTests(unittest.TestCase):
                 mtou_cache.CachedPlayback.COMPLETED, current=4, total=4),
              "缓存播放完成，已停在最后一帧"),
         )
-        fake_cmds = mock.MagicMock()
-        fake_cmds.control.return_value = True
         controller = mtou_controller.Controller()
         controller._session = cached_session(is_ready=True)[0]
-        controller._status_text = "statusText"
-        with patch_global("cmds", fake_cmds):
-            for view, expected in views:
-                with self.subTest(state=view.state, current=view.current):
-                    controller._on_cached_playback_view(view)
-                    labels = [call[1]["label"]
-                              for call in fake_cmds.text.call_args_list
-                              if call[1].get("label")]
-                    self.assertEqual(expected, labels[-1])
+        for view, expected in views:
+            with self.subTest(state=view.state, current=view.current):
+                controller._on_cached_playback_view(view)
+                self.assertEqual(expected, controller._cache_status)
 
     def test_switching_cached_mode_pauses_and_resumes_the_same_connection(self):
         class ReadySession(object):
@@ -4281,11 +4226,11 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller._set_connected = mock.Mock()
         controller._show_error = mock.Mock()
 
-        controller._on_mode_changed(mtou_config.CACHED_MODE)
+        controller.set_mode(mtou_config.CACHED_MODE)
         self.assertEqual(mtou_config.CACHED_MODE, controller._mode)
         cached.enter.assert_called_once_with()
 
-        controller._on_mode_changed(mtou_config.REALTIME_MODE)
+        controller.set_mode(mtou_config.REALTIME_MODE)
         self.assertEqual(mtou_config.REALTIME_MODE, controller._mode)
         cached.leave.assert_called_once_with()
 
@@ -4296,49 +4241,31 @@ class ControllerLifecycleTests(unittest.TestCase):
         controller._cached_playback = cached
         controller._ensure_cached_playback = mock.Mock(return_value=cached)
         controller._refresh_fps = mock.Mock(return_value=24.0)
-        controller._set_text = mock.Mock()
-        controller._update_mode_controls = mock.Mock()
 
-        controller._capture_cached_playback()
-
+        controller.capture_cache()
         cached.capture.assert_called_once_with(
             24.0, controller._confirm_large_cache, capture_range=None)
-        self.assertFalse(hasattr(controller, "_cached_cache"))
+        controller.set_capture_range(True, -12, 80)
+        controller.capture_cache()
+        self.assertEqual((-12, 80), cached.capture.call_args.kwargs["capture_range"])
 
-        controller._set_enabled = mock.Mock()
-        controller._set_tooltip = mock.Mock()
-        controller._capture_button = "capture"
-        controller._upload_button = "upload"
-        controller._cancel_capture_button = "cancel"
-        controller._realtime_mode_button = "realtime"
-        controller._cached_mode_button = "cached"
-        controller._connect_button = "connect"
-        controller._disconnect_button = "disconnect"
-        controller._playback_cap_menu = "cap"
         controller._cached_view = mtou_cache.CachedPlaybackView(
-            mtou_cache.CachedPlayback.REPLAYING, can_capture=True,
-            can_leave=True)
-        controller._update_mode_selection = mock.Mock()
-        mtou_controller.Controller._update_mode_controls(controller)
-        enabled = {recorded_call[0][0]: recorded_call[0][1]
-                   for recorded_call in controller._set_enabled.call_args_list}
-        self.assertTrue(enabled["capture"])
-        self.assertFalse(enabled["upload"])
-        self.assertFalse(enabled["cancel"])
-        self.assertTrue(enabled["realtime"])
-        tooltips = {recorded_call[0][0]: recorded_call[0][1]
-                    for recorded_call in controller._set_tooltip.call_args_list}
-        self.assertEqual("", tooltips["capture"])
-        self.assertNotEqual("", tooltips["upload"])
-        self.assertNotEqual("", tooltips["cancel"])
+            mtou_cache.CachedPlayback.REPLAYING, can_capture=True, can_leave=True)
+        actions = controller.actions()
+        self.assertTrue(actions["capture"][0])
+        self.assertFalse(actions["upload"][0])
+        self.assertFalse(actions["cancel"][0])
+        self.assertTrue(actions["realtime"][0])
+        self.assertTrue(actions["upload"][1])
+        self.assertTrue(actions["cancel"][1])
 
     def test_same_warning_signature_does_not_interrupt_twice(self):
         controller = mtou_controller.Controller()
-        controller._warning_checkbox = 'showWarnings'
         session = object()
         controller._session = session
-        controller._workflow = mtou_config.WORKFLOW_ANIMATION
-        controller._scene = object()
+        controller._scene = mock.Mock()
+        controller._scene.snapshot.return_value = character_snapshot(
+            1, "|root", "Clothes01", [("root", -1)], [])
         controller._cached_retention = None
         controller._set_connected = mock.Mock()
         controller._on_cached_playback_view = mock.Mock()
@@ -4375,8 +4302,7 @@ class ControllerLifecycleTests(unittest.TestCase):
         diagnostic = mtou_diagnostics.make_diagnostic(
             "INTERNAL_ERROR", "socket worker failed", details="traceback line")
 
-        with mock.patch.object(controller, "_refresh_fps", return_value=30.0):
-            text = controller._diagnostic_text(diagnostic)
+        text = mtou_diagnostics.diagnostic_result(diagnostic)
 
         self.assertIn("MtoU_LiveLink \u53d1\u751f\u5185\u90e8\u9519\u8bef", text)
         self.assertIn("INTERNAL_ERROR", text)
@@ -4404,78 +4330,41 @@ class ControllerLifecycleTests(unittest.TestCase):
             1, "|root", "Clothes01", [("root", -1)], [], mesh_paths=["|body"])
         scene = mock.Mock()
         scene.snapshot.return_value = snapshot
-        fake_cmds = mock.MagicMock()
-        fake_cmds.control.return_value = True
-        fake_cmds.confirmDialog.return_value = "确定"
         controller = mtou_controller.Controller()
+        controller._interact = notifications = mock.Mock()
         session = object()
         controller._session = session
         controller._scene = scene
         controller._set_connected = mock.Mock()
-
-        with patch_global("cmds", fake_cmds):
-            controller._on_streaming_session_event(session, event)
+        controller._on_streaming_session_event(session, event)
 
         # The status bar shows the summary alone.
         controller._set_connected.assert_called_once_with(
             False, "连接失败 · 插件协议版本不匹配")
         # The dialog: summary, both releases, then what to do.
-        dialog = fake_cmds.confirmDialog.call_args[1]
-        self.assertEqual("MtoU 连接问题", dialog["title"])
+        kind, dialog = notifications.call_args.args
+        self.assertEqual("error", kind)
         self.assertEqual("\n\n".join([
             "连接失败 · 插件协议版本不匹配",
             "Maya 端 · 插件 {0}，协议 {1}\nUE 端 · 插件 1.1.0，协议 13".format(
                 mtou_config.__version__, mtou_config.PROTOCOL_VERSION),
             "请从同一发行包重新安装两端组件，重启 Maya 和 UE 后连接。",
-        ]), dialog["message"])
-        # 诊断详情 adds the releases and keeps the peer's own text.
-        with mock.patch.object(controller, "_refresh_fps", return_value=30.0):
-            text = controller._diagnostic_text()
-        self.assertIn("Error code: PROTOCOL_VERSION_MISMATCH", text)
-        self.assertIn(
-            "版本：\nMaya 端 · 插件 {0}，协议 {1}\nUE 端 · 插件 1.1.0，协议 13".format(
-                mtou_config.__version__, mtou_config.PROTOCOL_VERSION), text)
-        self.assertIn("expected 13", text)
+        ]), mtou_diagnostics.diagnostic_dialog_text(dialog))
+        # The current result keeps the original peer text and its versions.
+        result = controller.snapshot()["diagnostic"]
+        self.assertEqual("PROTOCOL_VERSION_MISMATCH", result["code"])
+        self.assertEqual({"plugin_version": "1.1.0", "protocol_version": 13},
+                         result["versions"]["unreal"])
+        self.assertIn("expected 13", mtou_diagnostics.diagnostic_result(result))
 
     def test_dialog_without_version_lines_is_summary_and_advice(self):
-        fake_cmds = mock.MagicMock()
-        fake_cmds.confirmDialog.return_value = "确定"
-        controller = mtou_controller.Controller()
-
-        with patch_global("cmds", fake_cmds):
-            controller._show_error(mtou_diagnostics.make_diagnostic("UNREAL_NOT_REACHABLE"))
-
+        diagnostic = mtou_diagnostics.make_diagnostic("UNREAL_NOT_REACHABLE")
         summary, advice = mtou_diagnostics.DIAGNOSTICS["UNREAL_NOT_REACHABLE"]
-        self.assertEqual(
-            summary + "\n\n" + advice, fake_cmds.confirmDialog.call_args[1]["message"])
+        self.assertEqual(summary + "\n\n" + advice,
+                         mtou_diagnostics.diagnostic_dialog_text(diagnostic))
 
-    def test_diagnostic_window_wraps_text_and_fills_resized_window(self):
-        fake_cmds = mock.MagicMock()
-        fake_cmds.window.side_effect = [False, "diagnosticWindow"]
-        fake_cmds.formLayout.return_value = "diagnosticForm"
-        fake_cmds.scrollField.return_value = "diagnosticField"
-        fake_cmds.button.return_value = "copyButton"
-        controller = mtou_controller.Controller()
-        controller._diagnostic_text = mock.Mock(return_value="long diagnostic details")
 
-        with patch_global("cmds", fake_cmds):
-            controller.show_diagnostics()
-
-        create_window = fake_cmds.window.call_args_list[1]
-        self.assertLessEqual(create_window[1]["widthHeight"][1], 400)
-        create_field = fake_cmds.scrollField.call_args_list[0]
-        self.assertTrue(create_field[1]["wordWrap"])
-        self.assertNotIn("height", create_field[1])
-        layout_edit = fake_cmds.formLayout.call_args_list[-1]
-        self.assertTrue(layout_edit[1]["edit"])
-        self.assertIn(
-            ("diagnosticField", "bottom", 6, "copyButton"),
-            layout_edit[1]["attachControl"])
-        self.assertIn(
-            ("copyButton", "bottom", 8),
-            layout_edit[1]["attachForm"])
-
-    def test_connection_performance_is_in_the_window_and_copied_text(self):
+    def test_connection_performance_exposes_active_sampler_and_delivery_measurements(self):
         controller = mtou_controller.Controller()
         controller._session = session = mtou_session.StreamingSession(mock.Mock(), 24.0, None)
         session._worker = worker = mtou_session.SenderWorker(None)
@@ -4483,22 +4372,12 @@ class ControllerLifecycleTests(unittest.TestCase):
         worker.submit({"type": "frame"})
         worker.submit({"type": "frame"})
         session._sample_timings.add("validation", 0.001)
-        fake_cmds = mock.MagicMock()
-        fake_cmds.window.side_effect = [False, "diagnosticWindow"]
-        controller._copy_text = mock.Mock()
-
-        with patch_global("cmds", fake_cmds):
-            controller.show_diagnostics()
-            shown = fake_cmds.scrollField.call_args.kwargs["text"]
-            fake_cmds.scrollField.return_value = shown
-            fake_cmds.button.call_args.kwargs["command"]()
-
+        shown = mtou_diagnostics.realtime_diagnostic_text(controller.metrics())
         self.assertIn("实际发送频率：0 帧/秒", shown)
         self.assertIn("被新帧替换：1 帧", shown)
         self.assertIn("有限值检查：1.00 ms", shown)
         self.assertIn("JSON 编码", shown)
         self.assertNotIn("骨骼矩阵读取", shown)
-        controller._copy_text.assert_called_once_with(shown)
 
     def test_connect_presents_session_start_failure_without_retaining_session(self):
         snapshot = character_snapshot(
@@ -4530,7 +4409,7 @@ class ControllerLifecycleTests(unittest.TestCase):
             controller.connect()
 
         self.assertIsNone(controller._session)
-        diagnostic = controller._show_error.call_args[0][0]
+        diagnostic = controller._last_diagnostic
         self.assertEqual("INTERNAL_ERROR", diagnostic["code"])
 
     def test_stale_session_event_does_not_change_current_controller_state(self):
@@ -4573,7 +4452,6 @@ class ControllerLifecycleTests(unittest.TestCase):
             2, "|root", "Clothes02", [("root", -1)], [],
             bind_conflict_count=3)
         controller = mtou_controller.Controller()
-        controller._render_snapshot = mock.Mock()
         controller._set_connected = mock.Mock()
 
         controller._on_character_scene_event(
@@ -4727,51 +4605,24 @@ class ControllerLifecycleTests(unittest.TestCase):
 
 
 class WorkflowTests(unittest.TestCase):
-    def _fake_ui_cmds(self):
-        fake_cmds = mock.MagicMock()
-        fake_cmds.currentUnit.return_value = "film"
-        fake_cmds.control.return_value = True
-        counter = itertools.count()
-        for name in ("text", "optionMenu", "button", "checkBox",
-                     "menuItem", "scriptJob"):
-            getattr(fake_cmds, name).side_effect = (
-                lambda *args, __name=name, **kwargs:
-                    "{0}-{1}".format(__name, next(counter)))
-        return fake_cmds
 
 
-    def test_model_workflow_hides_cached_playback_and_shows_blendshape_toggle(self):
-        fake_cmds = self._fake_ui_cmds()
+    def test_workflow_state_controls_cache_and_blendshape_options(self):
         controller = mtou_controller.Controller()
-        visibility = {}
-
-        def set_visible(control, **kwargs):
-            visibility[control] = kwargs["visible"]
-
-        fake_cmds.control.side_effect = lambda control, **kwargs: (
-            set_visible(control, **kwargs) if "visible" in kwargs else True)
-
-        with patch_global("cmds", fake_cmds), \
-                patch_global("om", mock.MagicMock()):
-            controller.build_ui()
-            animation_visibility = dict(visibility)
-            visibility.clear()
-            controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
-            model_visibility = dict(visibility)
-            model_workflow = controller._workflow
-            visibility.clear()
-            controller._on_workflow_changed(mtou_config.WORKFLOW_ANIMATION)
-            back_visibility = dict(visibility)
-
-        self.assertEqual(mtou_config.WORKFLOW_MODEL, model_workflow)
-        self.assertEqual(mtou_config.WORKFLOW_ANIMATION, controller._workflow)
-        for state in (animation_visibility, back_visibility):
-            self.assertTrue(state[controller._realtime_mode_button])
-            self.assertFalse(state[controller._bs_checkbox])
-        self.assertFalse(model_visibility[controller._realtime_mode_button])
-        self.assertFalse(model_visibility[controller._cached_mode_button])
-        self.assertFalse(model_visibility[controller._cache_text])
-        self.assertTrue(model_visibility[controller._bs_checkbox])
+        controller._session = cached_session(is_ready=True)[0]
+        controller._session.request_restart.return_value = None
+        controller._session.poll_connection.return_value = False
+        controller._session.secondary_scene = None
+        initial = controller.actions()
+        self.assertTrue(initial["cached"][0])
+        self.assertFalse(initial["blendshapes"][0])
+        controller.set_workflow(mtou_config.WORKFLOW_MODEL)
+        model = controller.actions()
+        self.assertFalse(model["cached"][0])
+        self.assertFalse(model["range"][0])
+        self.assertTrue(model["blendshapes"][0])
+        controller.set_workflow(mtou_config.WORKFLOW_ANIMATION)
+        self.assertEqual(initial, controller.actions())
 
     def test_workflow_change_fences_then_releases_cached_playback_before_prepared(self):
         controller = mtou_controller.Controller()
@@ -4799,13 +4650,13 @@ class WorkflowTests(unittest.TestCase):
         fake_cmds.currentUnit.return_value = "film"
 
         with patch_global("cmds", fake_cmds):
-            controller._on_workflow_changed(mtou_config.WORKFLOW_MODEL)
+            controller.set_workflow(mtou_config.WORKFLOW_MODEL)
             session.request_restart.assert_called_once_with(2)
             self.assertTrue(lease.active)
             session.prepare_restart.assert_not_called()
             queued.pop(0)()
 
-        self.assertEqual(mtou_config.WORKFLOW_MODEL, controller._workflow)
+        self.assertEqual(mtou_config.WORKFLOW_MODEL, controller.settings.workflow)
         self.assertEqual(mtou_config.REALTIME_MODE, controller._mode)
         session.stop.assert_not_called()
         cached.discard.assert_called_once_with(verify_restoration=True)
@@ -4815,42 +4666,29 @@ class WorkflowTests(unittest.TestCase):
 
     def test_switching_back_to_animation_keeps_model_disconnected_state(self):
         controller = mtou_controller.Controller()
-        controller._workflow = mtou_config.WORKFLOW_MODEL
+        controller.set_workflow(mtou_config.WORKFLOW_MODEL)
         controller._set_connected = mock.Mock()
 
-        controller._on_workflow_changed(mtou_config.WORKFLOW_ANIMATION)
+        controller.set_workflow(mtou_config.WORKFLOW_ANIMATION)
 
-        self.assertEqual(mtou_config.WORKFLOW_ANIMATION, controller._workflow)
+        self.assertEqual(mtou_config.WORKFLOW_ANIMATION, controller.settings.workflow)
 
     def test_toggling_blendshapes_while_connected_requires_new_negotiation(self):
-        fake_cmds = self._fake_ui_cmds()
         controller = mtou_controller.Controller()
-        controller._bs_checkbox = "bsCheckBox"
         controller._session = mock.Mock()
         controller._session.request_restart.return_value = mtou_session.RestartWindow()
         controller._defer_ui = mock.Mock()
-        controller._blendshapes_enabled = True
 
-        fake_cmds.checkBox.side_effect = None
-        fake_cmds.checkBox.return_value = False
-        with patch_global("cmds", fake_cmds):
-            controller._on_blendshapes_toggled()
+        controller.set_blendshapes(False)
 
-        self.assertFalse(controller._blendshapes_enabled)
+        self.assertFalse(controller.settings.blendshapes_enabled)
         controller._session.request_restart.assert_called_once_with(2)
         controller._session.stop.assert_not_called()
 
     def test_toggling_blendshapes_while_disconnected_keeps_state_only(self):
-        fake_cmds = self._fake_ui_cmds()
         controller = mtou_controller.Controller()
-        controller._bs_checkbox = "bsCheckBox"
-
-        fake_cmds.checkBox.side_effect = None
-        fake_cmds.checkBox.return_value = False
-        with patch_global("cmds", fake_cmds):
-            controller._on_blendshapes_toggled()
-
-        self.assertFalse(controller._blendshapes_enabled)
+        controller.set_blendshapes(False)
+        self.assertFalse(controller.settings.blendshapes_enabled)
 
     def test_connect_sends_selected_workflow_and_blendshape_choice(self):
         started = []
@@ -4880,7 +4718,7 @@ class WorkflowTests(unittest.TestCase):
                                   side_effect=record_start):
             controller.connect()
             controller._session = None
-            controller._workflow = mtou_config.WORKFLOW_MODEL
+            controller.set_workflow(mtou_config.WORKFLOW_MODEL)
             controller.connect()
 
         self.assertEqual(2, len(started))
@@ -4995,6 +4833,7 @@ class WorkflowTests(unittest.TestCase):
     def test_clothes_change_fences_session_and_refreshes_outfit_manifest(self):
         controller = mtou_controller.Controller()
         session = mock.Mock()
+        session.set_objects = (mtou_config.CHARACTER_OBJECT_ID,)
         controller._session = session
         session.request_restart.return_value = mtou_session.RestartWindow()
         controller._defer_ui = mock.Mock()
@@ -5005,7 +4844,6 @@ class WorkflowTests(unittest.TestCase):
         scene = mock.Mock()
         scene.snapshot.return_value = before
         controller._scene = scene
-        controller._render_snapshot = mock.Mock()
         controller._set_connected = mock.Mock()
 
         controller._on_character_scene_event(
@@ -5014,15 +4852,14 @@ class WorkflowTests(unittest.TestCase):
         session.request_restart.assert_called_once_with(2)
         session.stop.assert_not_called()
 
+        scene.snapshot.return_value = after
         controller._on_character_scene_event(
             mtou_scene.CharacterSceneEvent("outfit_changed", snapshot=after))
 
         self.assertIs(scene, controller._scene)
         self.assertEqual("|root", controller._scene.snapshot().root)
-        controller._render_snapshot.assert_called_once()
-        rendered = controller._render_snapshot.call_args[0][0]
-        self.assertEqual("Clothes02", rendered.outfit)
-        self.assertEqual(("NewSmile",), rendered.curve_names)
+        self.assertEqual("Clothes02", controller.snapshot()["outfit"])
+        self.assertEqual(("NewSmile",), controller._scene.snapshot().curve_names)
         status = controller._set_connected.call_args[0][1]
         self.assertIn("正在重新连接", status)
 
@@ -5179,8 +5016,8 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(payload, actual)
             self.assertTrue(mtou_protocol.encode_message(actual))
             return
-        if operation in ("ready", "error", "cache_ready", "cache_playing", "cache_complete",
-                         "cache_progress", "cache_stopped", "cache_cleared",
+        if operation in ("ready", "error", "realtime_metrics", "cache_ready", "cache_playing",
+                         "cache_complete", "cache_progress", "cache_stopped", "cache_cleared",
                          "cache_paused", "cache_resumed", "cache_seeked",
                          "cache_looped", "cache_loop_changed"):
             if expected["accepted"]:
@@ -5353,6 +5190,7 @@ class ProtocolTests(unittest.TestCase):
             actual = mtou_protocol.make_hello_message(
                 payload["maya_version"], scene["linear_unit"],
                 scene["unit_scale_cm"], scene["fps"],
+                capabilities=payload["capabilities"],
                 plugin_version=payload.get("plugin_version"),
                 maya_subject_id=payload.get("maya_subject_id"),
                 restart_token=payload.get("restart_token"))

@@ -31,6 +31,7 @@ change listener is called outside the lock and defers its own work.
 
 import threading
 
+from .strings import text
 from .config import CACHED_MODE, LINKAGE_MODE, REALTIME_MODE
 
 
@@ -168,25 +169,25 @@ class TimeControl(object):
             current = self._lease
             if self._terminated:
                 raise TimeControlRefused(
-                    "STREAM_INTERRUPTED", "连接已结束，无法切换预览模式。")
+                    "STREAM_INTERRUPTED", text("mode_connection_closed"))
             if current is not None and current.owner is owner \
                     and current.state == state:
                 return current
             if state == LINKAGE_MODE and self._cache_holds_locked():
                 raise TimeControlRefused(
                     "CACHE_NOT_CLEARED",
-                    "缓存播放仍在使用该连接。" if current is not None
+                    text("cache_connection_held") if current is not None
                     and current.state == CACHED_MODE
-                    else "Unreal 尚未确认清除缓存。",
+                    else text("cache_clear_unconfirmed"),
                     "time control: {0}, pending clear {1!r}".format(
                         current.state if current is not None else REALTIME_MODE,
                         self._pending_clear))
             if current is not None:
                 raise TimeControlRefused(
                     "MODE_CONFLICT",
-                    "镜头联动进行中，无法进入缓存播放。"
+                    text("cache_linkage_conflict")
                     if current.state == LINKAGE_MODE
-                    else "缓存播放进行中，无法再次进入。",
+                    else text("cache_already_entered"),
                     "time control: {0}, requested {1}".format(current.state, state))
             lease = TimeControlLease(self, state, owner, receive)
             self._lease = lease

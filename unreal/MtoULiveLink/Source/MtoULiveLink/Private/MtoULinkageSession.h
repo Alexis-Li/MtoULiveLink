@@ -96,6 +96,7 @@ public:
 
     /** Current status snapshot for the panel and the editor pump. */
     FMtoULinkageView GetView() const;
+    int32 GetModeRevision() const { return ModeRevision; }
 
     /** Scheduling measurement since the session began or the last reset. */
     const FMtoULinkageScheduleStats& GetScheduleStats() const { return Stats; }

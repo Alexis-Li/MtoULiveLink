@@ -9,44 +9,22 @@ from .scene import require_maya
 
 
 def normalize_playback_cap(value):
-    if value is None:
-        return DEFAULT_PLAYBACK_CAP
     text = str(value).strip().lower()
     if text in ("follow scene", "follow_scene", "scene"):
-        return "Follow Scene"
-    for choice in PLAYBACK_CAP_CHOICES[1:]:
-        if text in (choice.lower(), choice.split()[0]):
+        return 60
+    for choice in PLAYBACK_CAP_CHOICES:
+        if text in (str(choice), "{0} fps".format(choice)):
             return choice
     return DEFAULT_PLAYBACK_CAP
 
 
-def playback_cap_fps(value):
-    value = normalize_playback_cap(value)
-    if value == "Follow Scene":
-        return None
-    return float(value.split()[0])
-
-
-def save_playback_cap(value):
-    value = normalize_playback_cap(value)
-    if cmds is not None:
-        try:
-            cmds.optionVar(stringValue=(PLAYBACK_CAP_OPTION_VAR, value))
-        except (AttributeError, RuntimeError, TypeError):
-            pass
-    return value
-
-
 def load_playback_cap():
-    value = DEFAULT_PLAYBACK_CAP
-    if cmds is not None:
-        try:
-            if cmds.optionVar(exists=PLAYBACK_CAP_OPTION_VAR):
-                value = cmds.optionVar(query=PLAYBACK_CAP_OPTION_VAR)
-        except (AttributeError, RuntimeError, TypeError):
-            value = DEFAULT_PLAYBACK_CAP
-    value = normalize_playback_cap(value)
-    return save_playback_cap(value)
+    try:
+        if cmds is not None and cmds.optionVar(exists=PLAYBACK_CAP_OPTION_VAR):
+            return normalize_playback_cap(cmds.optionVar(query=PLAYBACK_CAP_OPTION_VAR))
+    except (AttributeError, RuntimeError, TypeError):
+        pass
+    return DEFAULT_PLAYBACK_CAP
 
 
 def maya_is_playing():
@@ -58,7 +36,7 @@ def maya_is_playing():
         return False
 
 
-class MayaTimeline(object):
+class MayaTimeline:
     """Small adapter around Maya's current frame and Playback Range APIs."""
 
     def current_frame(self):

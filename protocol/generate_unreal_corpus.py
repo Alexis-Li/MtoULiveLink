@@ -33,7 +33,7 @@ OPERATIONS = {
     "cache_paused", "cache_resumed", "cache_seeked", "cache_looped",
     "cache_loop_changed",
     "cache_stopped", "cache_cleared",
-    "hello", "hello_ack",
+    "hello", "hello_ack", "realtime_metrics",
     "restart_request", "restart_prepared", "restart_cancel", "restart_state",
     "mode", "mode_state", "leave_linkage",
     "camera_time",

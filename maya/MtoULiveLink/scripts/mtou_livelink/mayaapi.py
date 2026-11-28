@@ -35,7 +35,7 @@ _batch_mode = None
 
 
 def _in_batch_mode():
-    """True in a Maya without an idle loop; read once, on the importing thread."""
+    """True in a Maya without an idle loop; read when host work first starts."""
     global _batch_mode
     if _batch_mode is None:
         try:
@@ -47,8 +47,6 @@ def _in_batch_mode():
         _batch_mode = value
     return _batch_mode
 
-
-_in_batch_mode()
 
 
 def run_deferred(action, fallback):

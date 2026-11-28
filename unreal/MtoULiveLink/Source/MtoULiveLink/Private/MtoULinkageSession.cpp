@@ -370,7 +370,6 @@ void FMtoULinkageSession::ReportResidual(const FString& Residual, const TCHAR* C
 
 void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello, const FString& SourceInstanceId)
 {
-    (void)Hello;
     // The greeting is answered before any object is negotiated: the session
     // identity, the capabilities, the explicitly selected target (empty until
     // the user pairs) and the common space both sides must match.
@@ -400,7 +399,7 @@ void FMtoULinkageSession::NoteHello(const FMtoUHelloMessage& Hello, const FStrin
         true,
         Targets,
         SpaceRevision,
-        Anchor, SourceInstanceId));
+        Anchor, SourceInstanceId, Hello.bRealtimeMetrics));
     Detail = FString::Printf(TEXT("Greeted %s (Maya %s)."), *Hello.Host, *Hello.MayaVersion);
     PublishView();
 }

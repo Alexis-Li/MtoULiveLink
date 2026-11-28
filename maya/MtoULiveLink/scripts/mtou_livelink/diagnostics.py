@@ -3,201 +3,37 @@
 # Licensed under the GPL with additional terms; see NOTICE.
 """Stable diagnostic codes and the diagnostics derived from Unreal replies."""
 
-from . import config
-from .config import WORKFLOW_MODEL
+from time import localtime, strftime
 
-REALTIME_STAGE_LABELS = (
-    ("inputs", "角色输入检查"),
-    ("matrices", "骨骼矩阵读取"),
-    ("curves", "曲线读取"),
-    ("compare", "姿势变化检查"),
-    ("transforms", "局部化、分解与坐标转换"),
-    ("validation", "有限值检查"),
-    ("encoding", "JSON 编码"),
-    ("sample_total", "采样总耗时"),
-    ("send", "发送耗时"),
-)
+from . import config
+from .config import CACHED_MODE, CONTROL_MAYA, CONTROL_UNREAL, LINKAGE_MODE, REALTIME_MODE, WORKFLOW_MODEL
+from .strings import DIAGNOSTICS, REALTIME_STAGE_LABELS, text
 
 
 def realtime_diagnostic_text(metrics):
-    if metrics is None:
+    if not metrics:
         return ""
     lines = [
-        "实时预览性能：",
-        "实际发送频率：{0} 帧/秒（最近 1 秒）".format(metrics["sent_hz"]),
-        "成功发送：{0} 帧 · 被新帧替换：{1} 帧".format(
+        text("realtime_performance_title"),
+        text("realtime_sent_frequency").format(metrics["sent_hz"]),
+        text("realtime_delivery").format(
             metrics["sent_frames"], metrics["replaced_frames"]),
     ]
     stages = metrics["stages"]
     for stage, label in REALTIME_STAGE_LABELS:
         if stage in stages:
-            lines.append("{0}：{1:.2f} ms（最近一次执行） / {2:.2f} ms（平均）".format(
+            lines.append(text("realtime_stage").format(
                 label, stages[stage]["latest_ms"], stages[stage]["mean_ms"]))
     return "\n".join(lines)
 
 
-DIAGNOSTICS = {
-    "PROTOCOL_VERSION_MISMATCH": (
-        "连接失败 · 插件协议版本不匹配",
-        "请从同一发行包重新安装两端组件，重启 Maya 和 UE 后连接。"),
-    "UNREAL_NOT_REACHABLE": (
-        "无法连接 Unreal Editor",
-        "请确认 UE 已启动、MtoU_LiveLink 已启用，并检查 54321 端口。"),
-    "SECOND_CLIENT_REJECTED": (
-        "Unreal 已连接另一个 Maya",
-        "请先断开另一个 Maya 会话，再重新连接。"),
-    "NO_BINDING_ACTOR": (
-        "UE 关卡中没有 MtoU Binding Actor",
-        "请在 UE 中将当前服装的 Binding 拖入关卡后重试。"),
-    "MULTIPLE_BINDING_ACTORS": (
-        "UE 关卡中有多个 MtoU Binding Actor",
-        "请删除旧 Actor，仅保留当前服装的一个 Binding Actor。"),
-    "INVALID_BINDING": (
-        "UE Binding 资产无效",
-        "请确认 Binding 已指定有效的 Skeletal Mesh。"),
-    "SKELETON_MISMATCH": (
-        "骨架与 Unreal Skeletal Mesh 不匹配",
-        "请按 UE 详情检查首个未映射路径、父级与导入改名候选；"
-        "确认资产确实不一致后再重新导出或导入。"),
-    "BLENDSHAPE_MISMATCH": (
-        "BlendShape 不完全匹配，连接可用但表情可能不完整",
-        "请查看详情中 Maya 和 UE 各自缺少的名称，并确认 UE 服装是否正确。"),
-    "NO_VISIBLE_SKINNED_MESH": (
-        "没有找到可见的蒙皮网格",
-        "请确认 Display 控制器已选择正确服装，并检查角色、头发和服装的显示状态。"),
-    "INVALID_FRAME_RATE": (
-        "Maya 场景帧率不受支持",
-        "请将 Maya Time Unit 设置为 1–60 fps 范围内的动画帧率。"),
-    "INVALID_MESSAGE": (
-        "Maya 与 UE 的传输数据无效",
-        "请确认两端插件版本一致；若仍失败，请复制诊断详情。"),
-    "STREAM_INTERRUPTED": (
-        "Live Link 连接已中断",
-        "请确认 UE 仍在运行且 Binding Actor 有效，然后重新连接。"),
-    "SUBJECT_CHANGED": (
-        "连接对象已变更，连接已停止",
-        "请确认当前 Maya 角色和 UE 目标，然后手动连接。"),
-    "RESTART_TIMEOUT": (
-        "自动重新连接超时，连接已停止",
-        "请查看诊断中的等候阶段，然后手动连接。"),
-    "RESTART_CANCELLED": (
-        "已取消自动重新连接",
-        "可在确认当前角色和目标后手动连接。"),
-    "SAMPLING_FAILED": (
-        "Maya 动画采样失败",
-        "请检查骨架、BlendShape 和当前服装是否在连接期间被修改。"),
-    "BIND_POSE_INVALID": (
-        "无法读取可靠的 Maya 绑定姿势",
-        "请检查绑定矩阵是否包含非有限值、不可逆矩阵，或存在无法可靠决胜的冲突。"),
-    "INCOMPLETE_SKELETON": (
-        "角色骨架存在未能发布的关节分支",
-        "请检查详情中的首个缺失关节路径及原因；只有 joint 与通向关节的 transform"
-        "才能发布，中间出现其他类型节点时请整理绑定后重试。"),
-    "INTERNAL_ERROR": (
-        "MtoU_LiveLink 发生内部错误",
-        "请复制诊断详情并重新启动连接。"),
-    "ROLE_SETUP_FAILED": (
-        "角色设置未完成",
-        "请按弹窗中的提示检查根骨骼和 Display 控制器。"),
-    "DUPLICATE_BONE_NAMES": (
-        "骨架中存在重名骨骼",
-        "可以继续连接并由 UE 尝试映射；也可点击“选中重名骨骼”定位整理。"),
-    "BONE_NAME_REMAP": (
-        "UE 已自动映射重名骨骼",
-        "连接可用；建议后续统一 Maya 与 UE 的骨骼名称，并保留本次映射详情。"),
-    "PAIRING_REQUIRED": (
-        "UE 尚未配对镜头联动目标",
-        "请在 UE 详情面板中配对主角色（有副对象时也配对副对象），"
-        "然后重新连接或进入镜头联动。"),
-    "TARGET_UNKNOWN": (
-        "UE 配对目标已不存在",
-        "请确认 Binding Actor 仍在关卡中且未被删除或卸载，然后重新配对。"),
-    "WRITER_NOT_ISOLATABLE": (
-        "UE 目标的写入者无法安全隔离",
-        "请按 UE 详情中的来源处理该轨道或动画后重新进入镜头联动；工具不会暂停整个镜头 Sequence。"),
-    "SHARED_WRITER": (
-        "UE 目标与其他对象共享写入者",
-        "请解除共享轨道或改用独立目标，再重新进入镜头联动。"),
-    "MOVING_SOCKET": (
-        "UE 目标挂在会移动的 socket 上",
-        "请把目标改为世界锚定的 Actor，避免父级运动被应用两次。"),
-    "ANCHOR_MISMATCH": (
-        "副对象与主角色在 UE 中的放置不一致",
-        "请把副对象的绑定 Actor 放到与主角色相同的位置和朝向；"
-        "联动期间不要移动任一目标。"),
-    "OBJECT_SET_UNSUPPORTED": (
-        "当前操作只支持单个角色",
-        "缓存播放和模型工作流只支持主角色；请先在“对象配对”窗口中移除副对象。"),
-    "MODE_CONFLICT": (
-        "镜头联动模式冲突",
-        "请等待当前转换结束，或先返回实时预览后重试。"),
-    "CACHE_NOT_CLEARED": (
-        "缓存播放尚未清除，无法进入镜头联动",
-        "请先返回实时预览并等待缓存清除完成，再进入镜头联动。"),
-    "SET_REVISION_STALE": (
-        "角色集合修订号不一致",
-        "请重新连接以建立当前集合，再进入镜头联动。"),
-    "SPACE_REVISION_STALE": (
-        "UE 使用了过期的共同空间",
-        "请重新建立会话；仅修改版本号不能继续联动。"),
-    "EVAL_STALE": (
-        "UE 已取消该求值目标",
-        "无需处理；工具会丢弃该结果并使用最新目标。"),
-    "RESOURCE_LIMIT": (
-        "镜头联动数据超出冻结的资源上限",
-        "请缩短角色或减少 BlendShape 后重试；预算在测试前固定，不会为通过而放宽。"),
-    "RECOVERY_REFUSED": (
-        "之前的状态无法安全恢复",
-        "请按诊断详情中的残留路径处理后重试。"),
-    "LINKAGE_NOT_ACTIVE": (
-        "当前不在镜头联动状态",
-        "请先进入镜头联动，再执行该操作。"),
-    "CACHED_PLAYBACK_NOT_READY": (
-        "缓存播放需要已连接的 Unreal",
-        "请先完成角色设置并连接 Unreal，再进入缓存播放。"),
-    "CACHED_PLAYBACK_NO_CACHE": (
-        "没有可上传的缓存",
-        "请先捕获当前 Maya 播放范围或自定义范围。"),
-    "CACHED_PLAYBACK_SPACE": (
-        "临时磁盘空间不足",
-        "请缩短 Playback Range 或清理当前用户的临时磁盘空间后重试。"),
-    "CACHED_PLAYBACK_CANCELLED": (
-        "缓存捕获已取消",
-        "已删除未完成缓存并恢复到实时预览。"),
-    "CACHED_PLAYBACK_INCOMPATIBLE": (
-        "缓存与当前角色快照不兼容",
-        "请为当前角色和服装重新捕获缓存。"),
-    "CACHED_UPLOAD_FAILED": (
-        "缓存上传被 Unreal 拒绝",
-        "Unreal 已丢弃未完成的缓存；请重新捕获后再试。"),
-    "CACHED_UPLOAD_TIMEOUT": (
-        "Unreal 未在时限内确认缓存上传",
-        "已恢复实时预览，连接保持。请再次切换到“缓存播放”并点击“捕获并上传”。"),
-    "CACHED_UPLOAD_INTERRUPTED": (
-        "缓存上传未能完成",
-        "已恢复实时预览，连接保持。请再次切换到“缓存播放”并点击“捕获并上传”。"),
-    "CACHED_PLAYBACK_FRAME_LIMIT": (
-        "缓存帧数超过 20,000 上限，捕获已提前停止",
-        "请缩短 Playback Range 后重新捕获。"),
-    "CACHED_PLAYBACK_PAYLOAD_LIMIT": (
-        "缓存编码体积超过 1 GiB 上限，捕获已提前停止",
-        "请缩短 Playback Range 或减少 BlendShape 数量后重新捕获。"),
-    "CACHED_PLAYBACK_PERFORMANCE": (
-        "缓存回放跟不上捕获帧率，已停止",
-        "已完整保留缓存；请关闭占用性能的程序后在 UE 中再次播放。"),
-    "CACHED_PLAYBACK_CAPTURE_RANGE": (
-        "捕获范围无效",
-        "请输入整数开始和结束帧，结束帧不得早于开始帧。"),
-    "PREVIEW_NOT_READY": (
-        "模型预览尚未生成，无法连接模型工作流",
-        "请先在 UE 中对该 Binding Actor 执行 Refresh Preview 生成预览，再重新连接。"),
-    "PREVIEW_BUILD_FAILED": (
-        "模型预览生成失败",
-        "请按诊断详情修复输入后，在 UE 中重新执行 Refresh Preview。"),
-    "PREVIEW_MORPH_MISMATCH": (
-        "Maya 与模型预览的 BlendShape 没有交集",
-        "请确认当前服装与 UE Binding 一致并重新生成预览；也可关闭“传递 BS”进行仅骨骼对比。"),
-}
+def cache_summary_text(summary):
+    if summary is None:
+        return ""
+    start, end = summary.capture_range
+    date = strftime("%Y-%m-%d %H:%M:%S", localtime(summary.capture_time))
+    return text("cache_summary").format(
+        start, end, summary.frame_count, summary.scene_fps, date)
 
 
 def make_diagnostic(code, message="", solution="", details=""):
@@ -212,7 +48,7 @@ def make_diagnostic(code, message="", solution="", details=""):
 
 
 # What a version line shows for an item the peer did not provide.
-UNKNOWN_PEER_VALUE = "未知（对端未提供）"
+UNKNOWN_PEER_VALUE = text("peer_value_unknown")
 
 
 def _peer_text(value):
@@ -220,7 +56,7 @@ def _peer_text(value):
 
 
 def _version_line(side, plugin_version, protocol_version):
-    return "{0} · 插件 {1}，协议 {2}".format(
+    return text("version_line").format(
         side, _peer_text(plugin_version), _peer_text(protocol_version))
 
 
@@ -239,8 +75,8 @@ def version_mismatch_diagnostic(plugin_version=None, protocol_version=None,
             "protocol_version": config.PROTOCOL_VERSION}
     diagnostic["versions"] = {"maya": maya, "unreal": unreal}
     diagnostic["version_lines"] = [
-        _version_line("Maya 端", maya["plugin_version"], maya["protocol_version"]),
-        _version_line("UE 端", plugin_version, protocol_version),
+        _version_line(text("maya_side"), maya["plugin_version"], maya["protocol_version"]),
+        _version_line(text("ue_side"), plugin_version, protocol_version),
     ]
     return diagnostic
 
@@ -248,7 +84,7 @@ def version_mismatch_diagnostic(plugin_version=None, protocol_version=None,
 def error_reply_diagnostic(reply):
     """The diagnostic of one Unreal ``error``: the same when it is reported and
     when it later ends the connection, so the panel recognises a repeat."""
-    message = reply.get("message") or "Unreal 报告了一个错误。"
+    message = reply.get("message") or text("peer_error")
     code = reply.get("code") or "STREAM_INTERRUPTED"
     details = reply.get("details") or message
     if code == "PROTOCOL_VERSION_MISMATCH":
@@ -299,3 +135,203 @@ def filter_bone_driven_differences(init_message, reply):
         reply = dict(reply)
         reply["missing_in_maya"] = []
     return reply
+
+
+class DiagnosticHistory:
+    """The latest operation result. Earlier async replies cannot replace it."""
+
+    def __init__(self):
+        self.stamp = 0
+        self.operation = None
+        self._latest = {}
+
+    @property
+    def latest(self):
+        return dict(self._latest)
+
+    def begin(self, operation):
+        self.stamp += 1
+        self.operation = operation
+        return self.stamp
+
+    def record(self, diagnostic, operation=None, outcome="failure", stamp=None):
+        if stamp is not None:
+            if stamp != self.stamp:
+                return
+        elif operation != self.operation or operation is not None:
+            self.begin(operation or self.operation)
+        self._latest = dict(diagnostic, operation=operation or self.operation, outcome=outcome)
+
+
+LINKAGE_MODE_LABELS = {
+    REALTIME_MODE: text("realtime_preview"),
+    CACHED_MODE: text("cached_playback"),
+    LINKAGE_MODE: text("linkage_label"),
+}
+
+LINKAGE_CONTROL_LABELS = {CONTROL_MAYA: "Maya", CONTROL_UNREAL: "Unreal"}
+
+# The applied lag the status line reports: below it Maya keeps up and the line
+# says 同步正常. Display only; the protocol's convergence window is unchanged.
+LINKAGE_LAG_NOTICE_SECONDS = 0.5
+
+
+OPERATIONS = {
+    "role": text("set_role"), "display": text("set_display"),
+    "preferences": text("restore_preferences"), "preferences_save": text("save_preferences"),
+    "connect": text("connect"), "reconnect": text("reconnect"), "disconnect": text("disconnect"),
+    "cached_mode": text("enter_cached"), "realtime_mode": text("return_realtime"),
+    "cache": text("cache_operation"), "linkage": text("sequence_linkage"), "linkage_exit": text("exit_linkage"),
+    "secondary": text("set_secondary_operation"), "secondary_remove": text("remove_secondary"), "preview": text("realtime_preview"),
+}
+OUTCOMES = {"failure": text("result_failed"), "warning": text("result_warning"), "success": text("result_success")}
+
+
+def diagnostic_parts(result):
+    if not result:
+        return text("no_operation_result"), ""
+    title = " · ".join(filter(None, (OPERATIONS.get(result.get("operation")),
+                                     OUTCOMES.get(result.get("outcome")), result.get("code"))))
+    body = []
+    for value in (result.get("summary"), result.get("message"), result.get("details")):
+        if value and value not in body:
+            body.append(value)
+    if result.get("solution"):
+        body.append(text("result_solution").format(result["solution"]))
+    return title, "\n".join(body)
+
+
+def diagnostic_result(result):
+    return "\n".join(filter(None, diagnostic_parts(result)))
+
+def linkage_diagnostic_text(status):
+    """镜头联动 read-back for 诊断详情: everything the status line leaves out."""
+    labels = status.get("labels") or {}
+
+    def value(key):
+        item = status.get(key)
+        return "—" if item is None else item
+
+    age = status.get("applied_age")
+    records = status.get("recovery_records") or ()
+    lines = [
+        text("linkage_details"),
+        text("diagnostic_state").format(status.get("line") or "—"),
+        labels.get("control") or text("unset_control"),
+        labels.get("mode") or text("unset_mode"),
+        "mode_revision：{0} · session：{1} · set：{2} · space：{3}".format(
+            value("mode_revision"), value("session_id"),
+            value("set_revision"), value("space_revision")),
+        labels.get("target") or text("unset_target"),
+        text("target_eval").format(value("target")),
+        labels.get("applied") or text("no_applied"),
+        text("applied_eval").format(value("applied_eval_id")),
+        text("sample_serial").format(value("applied_sample_serial")),
+        text("application_age").format("—" if age is None else text("seconds_one").format(age)),
+        labels.get("lag") or text("unset_lag"),
+        text("applied_refused").format(
+            status.get("applied_count") or 0, status.get("refused_count") or 0),
+        text("last_application_failure").format(
+            text("none") if status.get("apply_failure") is None
+            else status.get("apply_failure") or text("peer_reason_missing")),
+        text("targets_in_flight").format(
+            (status.get("issued") or 0) + (status.get("pending") or 0)),
+        text("detail_line").format(status.get("detail") or "—"),
+        text("resource_recovery").format(text("none") if not records else text("item_count").format(len(records))),
+    ]
+    lines.extend("  {0}".format(record) for record in records)
+    return "\n".join(lines)
+
+def object_set_diagnostic_text(state):
+    """对象集合 for 诊断详情: the negotiated set, its revision and the removal.
+
+    Scene paths stay in the pairing window; the diagnostics name only the
+    set identity the two hosts negotiated.
+    """
+    lines = [
+        text("set_details"),
+        text("secondary_details").format(text("configured") if state["has_secondary"] else text("not_configured")),
+        text("diagnostic_state").format(state.get("state") or "—"),
+        text("set_revision_details").format(
+            "、".join(state["members"]) or "—",
+            "—" if state.get("set_revision") is None else state.get("set_revision")),
+    ]
+    if state["last_removal"]:
+        lines.append(text("last_secondary_removal").format(state["last_removal"]))
+    return "\n".join(lines)
+
+def linkage_status_line(mode, status, recovery, overdue, wait, held):
+    """Return ``(line, tooltip)``: the linkage card's one status line.
+
+    Only the state, a lag Maya cannot keep up with, and a failed restore are
+    shown; the evaluation, sample and revision read-back stays in 诊断详情.
+    """
+    hints = []
+    if mode == LINKAGE_MODE:
+        parts = [text("linkage_active_label"), text("unreal_control")]
+        lag = status.lag_seconds if status is not None else None
+        applied = status is not None and status.applied_eval_id
+        # An overdue target is the lag in effect: it has waited longer than
+        # the last complete application took.
+        behind = float(wait) if overdue else (
+            float(lag) if lag is not None else 0.0)
+        failure = status.apply_failure if status is not None else None
+        if failure is not None:
+            # Unreal could not complete the latest group: Maya is not the cause,
+            # and the last complete application stays what Unreal shows.
+            parts.append(text("linkage_retry_for").format(_seconds_label(behind))
+                         if overdue else text("linkage_retry"))
+            hints.append(text("linkage_retry_help").format(
+                             "（{0}）".format(failure) if failure else ""))
+        elif overdue or behind >= LINKAGE_LAG_NOTICE_SECONDS:
+            parts.append(text("maya_lag").format(_seconds_label(behind)))
+            hints.append(text("maya_lag_help"))
+        elif not applied:
+            parts.append(text("linkage_synchronizing"))
+        else:
+            parts.append(text("linkage_in_sync"))
+    else:
+        parts = [text("linkage_not_entered")]
+        if mode == CACHED_MODE:
+            parts.append(text("cache_in_progress"))
+        if held:
+            parts.append(text("unreal_takeover"))
+            hints.append(text("return_unreal_writers"))
+    if recovery:
+        parts.append(text("recovery_failures").format(len(recovery)))
+        hints.append(text("recovery_help"))
+    line = " · ".join(parts)
+    tooltip = "\n".join([line] + hints)
+    return line, tooltip
+
+def _seconds_label(value):
+    return "{0:.1f}".format(value) if value < 10 else "{0:.0f}".format(value)
+
+def _frame_label(value):
+    if value is None:
+        return "—"
+    return "{0:.2f}".format(float(value))
+
+def linkage_status_labels(mode, control, status, recovery, overdue, active):
+    """The status row's labels; one source for the card and the window."""
+    target, applied, lag_label = "—", "—", "—"
+    if active:
+        target = _frame_label(
+            status.target_display_frame if status is not None else None)
+        applied = _frame_label(
+            status.applied_display_frame if status is not None else None)
+        lag = status.lag_seconds if status is not None else None
+        if lag is not None:
+            lag_label = text("seconds_two").format(float(lag))
+            if overdue:
+                lag_label += text("not_converged")
+    return {
+        "control": text("control_label").format(
+            LINKAGE_CONTROL_LABELS.get(control, "—")),
+        "mode": text("mode_label").format(LINKAGE_MODE_LABELS.get(mode, "—")),
+        "target": text("target_time").format(target),
+        "applied": text("latest_applied").format(applied),
+        "lag": text("lag_label").format(lag_label),
+        "recovery": text("recovery_label").format(
+            text("none") if not recovery else "；".join(recovery)),
+    }

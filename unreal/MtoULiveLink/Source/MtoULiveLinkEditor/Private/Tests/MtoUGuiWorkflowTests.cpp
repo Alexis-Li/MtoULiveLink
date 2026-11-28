@@ -881,15 +881,20 @@ private:
                 {
                     return false;
                 }
-                FString MayaDiagnostic;
+                FString MayaDiagnostic, MayaLatest;
                 const TSharedPtr<FJsonObject>* Diagnostics = nullptr;
                 if (MayaResult->TryGetObjectField(TEXT("panel_diagnostics"), Diagnostics))
                 {
                     (*Diagnostics)->TryGetStringField(Stage, MayaDiagnostic);
                 }
-                if (!bHasReason || !MayaDiagnostic.Contains(TEXT("Error code: ") + Code)
-                    || !MayaDiagnostic.Contains(ExpectedDetail) || !ActorDetail.Contains(ExpectedDetail)
-                    || !SourceStatus().Contains(ExpectedDetail))
+                const TSharedPtr<FJsonObject>* Latest = nullptr;
+                if (MayaResult->TryGetObjectField(TEXT("panel_latest_diagnostics"), Latest))
+                {
+                    (*Latest)->TryGetStringField(Stage, MayaLatest);
+                }
+                if (!bHasReason || !MayaLatest.Contains(Code) || !MayaLatest.Contains(ExpectedDetail)
+                    || !MayaDiagnostic.Contains(Code) || !MayaDiagnostic.Contains(ExpectedDetail)
+                    || !ActorDetail.Contains(ExpectedDetail) || !SourceStatus().Contains(ExpectedDetail))
                 {
                     return Abort(FString::Printf(TEXT("%s: expected %s and '%s' on both hosts; Maya diagnostics:\n%s"),
                         *Stage, *Code, *ExpectedDetail, *MayaDiagnostic));

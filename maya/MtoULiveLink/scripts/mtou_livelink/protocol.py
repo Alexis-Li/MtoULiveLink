@@ -164,6 +164,7 @@ DEFAULT_CAPABILITIES = {
     "linkage": True,
     "cache": True,
     "model": True,
+    "realtime_metrics": True,
 }
 
 
@@ -607,6 +608,11 @@ def validate_reply(reply):
             "targets": list,
             "space": dict,
         },
+        "realtime_metrics": {
+            "session_id": int,
+            "set_revision": int,
+            "editor_fps": int,
+        },
         "object_removed": {
             "session_id": (int, float),
             "object_id": str,
@@ -654,7 +660,8 @@ def validate_reply(reply):
         "cache_resumed": {"source_frame": (int, float)},
         "camera_time": {"cut": dict},
         "applied": {"display_frame": (int, float)},
-        "hello_ack": {"detail": str},
+        "hello_ack": {"detail": str, "ue_host_version": str, "ue_plugin_version": str},
+        "realtime_metrics": {"apply_ms": (int, float)},
         # ``kind`` may be absent (a peer of another version answers
         # PROTOCOL_VERSION_MISMATCH without one) and then reads as a failure;
         # ``eval_id`` and ``sample_serial`` identify the group an error refused.
@@ -672,7 +679,7 @@ def validate_reply(reply):
     if fields is None:
         raise ValueError(
             "protocol reply type must be 'ready', 'error', a cache outcome"
-            " or a linkage message")
+            ", realtime metrics or a linkage message")
     for name, expected_type in fields.items():
         if name not in reply:
             raise ValueError("protocol reply requires field '{0}'".format(name))
@@ -684,6 +691,20 @@ def validate_reply(reply):
     for name, expected_type in optional.get(reply_type, {}).items():
         if name in reply and not isinstance(reply[name], expected_type):
             raise ValueError("protocol reply field '{0}' has the wrong JSON type".format(name))
+    if reply_type == "realtime_metrics":
+        for name in ("session_id", "set_revision", "editor_fps"):
+            value = exact_int(reply[name])
+            minimum = 0 if name == "editor_fps" else 1
+            if value is None or not minimum <= value <= 2147483647:
+                raise ValueError("realtime_metrics field '{0}' is out of range".format(name))
+        if "apply_ms" in reply:
+            try:
+                value = finite_float(reply["apply_ms"])
+            except OverflowError:
+                value = None
+            if value is None or value < 0.0:
+                raise ValueError("realtime_metrics apply_ms must be a finite nonnegative number")
+        return reply
     for name in ("revision", "target_morph_count", "accepted_morph_count",
                  "upload_id", "play_id", "clear_id",
                  "applied_frame_count", "applied_frames", "round",
@@ -711,6 +732,10 @@ def validate_reply(reply):
             raise ValueError("ready names an unknown object_id")
     if reply_type == "hello_ack":
         _opaque_identity(reply["source_instance_id"], "source_instance_id")
+        capabilities = reply["capabilities"]
+        if ("realtime_metrics" in capabilities
+                and exact_bool(capabilities["realtime_metrics"]) is None):
+            raise ValueError("hello_ack capabilities.realtime_metrics must be a JSON boolean")
         target_ids = []
         for target in reply["targets"]:
             if not isinstance(target, dict):

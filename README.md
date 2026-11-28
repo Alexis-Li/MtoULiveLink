@@ -60,7 +60,9 @@ Missing required identity fields stop negotiation and require updating both host
 End the current session first, then:
 
 - Upgrade: drag the new Maya component's `install.mel` into Maya, replace the
-  Unreal plugin, and reconnect.
+  Unreal plugin, and reconnect. In the new Maya panel, set the character and
+  any second object in **连接** the first time you open each scene. An earlier
+  **Follow Scene** transmission limit becomes **60** fps.
 - Roll back: drag the previous Maya component's `install.mel` into Maya. If
   the previous release has no `install.mel`, first delete the files listed
   under removal, then install it as its instructions describe. Restore the
@@ -78,8 +80,9 @@ End the current session first, then:
   those mappings. Unused exported branches do not prevent connection, but one
   Unreal bone is driven by exactly one Maya bone: rename a Maya bone when two of
   them publish the same name under the same parent.
-- Select the deformation root and use **Set Character**; a Display controller
-  is optional. The outfit is the current visible set of meshes skinned to that
+- Select the deformation root and click **设置角色** on the **连接** page. A
+  Display controller is optional. The outfit is the current visible set of
+  meshes skinned to that
   skeleton. Hidden meshes, including those hidden by an ancestor, LOD visibility
   or a visibility override, do not contribute BlendShapes. Visible Template and
   Reference meshes do. A unique recognised Display enum keeps its outfit label;
@@ -89,7 +92,8 @@ End the current session first, then:
   Primary Driver garment. Keep garment and non-garment geometry in separate
   imported material slots.
 - To preview BlendShapes, use matching Maya BlendShape and Unreal Morph Target
-  names and enable **Transfer BS** (传递 BS) in Maya.
+  names. **动画** always sends BlendShapes. For **模型**, enable **传递 BS** in
+  Maya's **连接** page.
 
 ### Separate character parts
 
@@ -132,32 +136,62 @@ on the Binding. All enabled parts pose and display under one connection:
    occupy the daily view.
    The connection reads 未连接 before the first session, 已连接 while streaming,
    正在重新连接 during input-change negotiation, and 连接已中断 after stopping.
-   Read the reason and use **Connect** in Maya after a stop.
-3. In Maya, click the **MtoU** shelf button, select the deformation root joint, and click
-   **Set Character** (设置角色). Switch between **Animation** (动画) and **Model**
-   (模型) at the top. Below are Connection Controls (set character, connect,
-   disconnect, and connection status), Scene Info (root, outfit, and frame rate
-   on the left; bone/BlendShape counts and cache on the right; a long name is
-   shortened, hover it for the full name), Preview & Playback (preview mode,
-   transmission cap, and cache actions in Cached Playback), Camera Linkage (one
-   status line and the linkage buttons), Tools
-   (Display and duplicate-bone selection), and Diagnostics (status and
-   诊断详情, whose **复制完整诊断** copies the whole report). The warning switch
-   sits below Diagnostics.
-4. Select **Animation** (动画) and click **Connect** (连接); the indicator turns
-   green. Pose, scrub, or play in Maya to preview the result in Unreal. **Cap**
-   (上限) on the preview row limits the real-time transmission rate. A disabled
-   button carries its reason as a tooltip. Repeated warnings for the same
-   session appear once; new errors still interrupt.
+   Read the reason and click **连接** in Maya after a stop.
+3. In Maya, click the **MtoU** shelf button. On the **连接** page, select the
+   deformation root joint and click **设置角色**. Use **重设** when choosing a new
+   root. This page shows the character, outfit, root path, and bone, BlendShape
+   and outfit mesh counts. **选择 Display 控制器**, **选中重名骨骼** when available,
+   and the second-object controls are on this page. Hover a shortened name or
+   path to read it in full.
+4. Switch the workflow to **动画** and click **连接** in the header. Pose, scrub,
+   or play in Maya to preview the result in Unreal.
 
-In Real-time Preview, Maya sends a new pose when the evaluated pose changes
-and skips identical samples while the character is still. To investigate slow
-preview, open **诊断详情** in Maya and **高级设置与诊断** on the Unreal Binding
-Actor. Under **实时预览性能**, Maya reports stage timings and the actual send
-rate. Unreal reports parse, retarget and application times, how often a new pose
-finishes updating the displayed skeletons, and editor FPS as a separate value.
-Use **复制完整诊断** on both hosts while the connection is active to capture the
-readings.
+The header stays visible on all four pages (**连接**, **预览**, **相机**, **诊断**).
+It shows the connection state, who controls time, the character and outfit,
+and the scene frame rate or current frame. In live preview, the link from M
+(Maya) to U (Unreal) shows how many frames were sent in the last second.
+During Cached Playback and Sequence linkage, look for **UE 播放** and
+**UE 控制时间**. Use **连接** or **断开** from any page. Hover a disabled button
+to see why it is unavailable.
+
+### Settings per scene
+
+Maya remembers the workflow, **传递 BS**, **出错时弹窗提示**, transmission limit,
+capture range and its start/end frames, and the roots and selected Display
+controllers for the character and second object. These settings are stored in
+your Maya preferences by scene file path. An unnamed scene keeps them for the
+current panel session, and the first save or Save As carries them to the new
+path. Opening a scene or reopening the panel or Maya restores and checks its
+settings. If updating a reference changes a recorded path, check **诊断** and
+set the missing root or Display controller again. Saved settings leave the
+scene file untouched.
+
+### Diagnostics and performance
+
+Open **诊断** to see **最近一次操作**, with the error code, full message and
+recovery steps when available. **此前的连接差异** shows earlier BlendShape
+differences or bone-name mappings. **完整诊断** opens a
+resizable window with the same latest result at the top and the connection,
+character, performance, camera and linkage details below. It refreshes as
+results arrive. Scroll long messages and select text to copy it with Ctrl+C.
+**出错时弹窗提示** controls popups for connection warnings, failed connections
+and unexpected disconnections. Repeated warnings appear once per connection,
+and the results are always recorded in **诊断**.
+
+Real-time preview sends new poses when the evaluated pose changes and skips
+identical samples while the character is still. Under **性能**, Maya shows
+sampling and measured **UE 应用** time beside the scene's time budget per frame.
+It also shows the actual send rate, the number of pending frames replaced by
+newer ones, and Unreal's editor frame rate. A dash means a reading is
+unavailable, for example when a compatible older Unreal component supplies
+no metrics.
+**完整诊断** shows the host, loaded plugin and protocol versions for each side.
+A version or host reading the peer does not supply also appears as a dash.
+
+In the Unreal Binding Actor's **高级设置与诊断**, **实时预览性能** shows parse,
+retarget and application times, how often a new pose finishes updating the
+displayed skeletons, and the editor frame rate. Use **复制完整诊断** there while
+connected to capture those readings for a report.
 
 While connected, Unreal keeps updating in the background, including when Maya
 is in front. The running status shows **连接期间 UE 在后台保持更新**. Disconnecting
@@ -168,7 +202,7 @@ stay unchanged. A minimized editor does not draw its viewport.
 ## Changes while connected
 
 For the same captured Maya character and Unreal targets, changing the visible
-outfit mesh set, **Animation/Model**, **Transfer BS**, or **Additional Parts**
+outfit mesh set, **动画** / **模型**, **传递 BS**, or **Additional Parts**
 ends the old session and automatically negotiates the latest inputs. This
 also applies to Undo/Redo and relevant Driver or Preview input/reimport changes.
 The old cache is cleared and camera linkage resources are restored; a successful
@@ -176,8 +210,8 @@ new session returns to realtime preview, so enter linkage again when needed.
 A label-only rename, a part reorder, a Template/Reference style change with the
 same visible mesh set, and garment comparison keep the current session.
 
-Both hosts show **正在重新连接**. Repeated Connect is disabled; **Disconnect**
-cancels the operation. Usable differences and failures appear in status and
+Both hosts show **正在重新连接**. **连接** is disabled during this step, and
+**断开** cancels the operation. Usable differences and failures appear in status and
 diagnostics without a Maya confirmation dialog. Old-session preparation has a
 5-second limit and the whole automatic operation has a 32-second limit; ongoing
 edits do not extend them. A failure or timeout stops the operation without retries.
@@ -190,24 +224,28 @@ pairing stops the connection. Recreating an object with the same name does not
 resume it. Manual disconnect, transport loss, refused negotiation and resource
 restoration failure also stop it; later edits do not connect a stopped tool.
 Inspect the reason on the surviving Maya panel, Unreal Source or Actor Details,
-correct the input and click **Connect** explicitly. An Unreal restart requires
+correct the input and click **连接** explicitly. An Unreal restart requires
 that explicit connection too.
 
 Model still needs **Refresh Preview** after a Primary Driver, Preview Static Mesh,
 **Driver Garment Slot Override** or relevant imported-data change. Automatic
 negotiation stops if Preview is not ready; it never refreshes it for you. An
-explicit refresh also ends streaming and requires **Connect** afterwards.
+explicit refresh also ends streaming and requires **连接** afterwards.
 Animation does not require a ready garment Preview.
 
 ## Animation preview
 
-Use **Animation** for real-time character preview. For a captured animation
-range, choose **Cached Playback** (缓存播放) in Maya. Leave **Custom Capture Range**
-(自定义捕获范围) off to use the current playback range, or turn it on and enter
-integer start and end frames. Click **Capture and Upload** (捕获并上传), then wait
-for **Ready**. The range includes both endpoints and the scene frame rate is
-fixed when capture starts; capture does not change Maya's playback range.
-Single frames and negative start frames are supported.
+Use **动画** for real-time character preview. On Maya's **预览** page, choose
+**实时** and set **传输上限** to 15, 20, 24, 30, or 60 fps. During playback, Maya
+uses the lower of this limit and the scene frame rate.
+
+To capture part of an animation, choose **缓存播放** on the same page. Under
+**捕获范围**, choose **播放范围** to use Maya's current playback range, or choose
+**自定义** and enter integer start and end frames. Click **捕获并上传** and wait
+for the cache to show 缓存已就绪. **取消捕获** is available while capture is in
+progress. The range includes both endpoints and the scene frame rate is fixed
+when capture starts. Capture leaves Maya's playback range as it was. Single
+frames and negative start frames are supported.
 
 In the Unreal Binding Actor's **预览控制**, check the source range, rate, current
 applied source frame, and cache state. **播放** starts from the first frame, and
@@ -223,11 +261,13 @@ wraps from the last frame back to the first and shows the current round; turning
 it off completes the current round. Locating and looping reuse the uploaded
 cache. Natural completion holds the final frame. To prepare a new range in Maya,
 click **捕获并上传** again; the old UE playback ends before sampling begins.
-Switch Maya back to **实时预览** to clear the UE cache and resume live poses.
-After a connection loss, reconnect and use **上传保留缓存** if a compatible
-complete local cache remains. Maya's status line shows capture, upload, Ready,
-playback, pause, seek, loop, stop, and failure; a run completed after a seek or
-a loop round is reported as a playback segment rather than a full replay.
+On Maya's **预览** page, switch back to **实时** to clear the Unreal cache and
+resume live poses.
+After a connection loss, reconnect. If a compatible complete local cache
+remains, choose **缓存播放** and click **上传保留缓存**. The cache status on Maya's
+**预览** page shows capture, upload, ready, playback, pause, seek, loop, stop,
+and failure. A run completed after a seek or a loop round is reported as a
+playback segment.
 
 A capture is limited to 20,000 frames or 1 GiB; use a shorter range if you reach
 that limit. Invalid ranges fail before sampling. Sampling or upload failures
@@ -243,37 +283,42 @@ comparison work without it.
 1. In Unreal, select the Binding Actor, click **配对为主角色** under **镜头联动**
    (the row then reads 已配对为主角色), and open the Level Sequence you want to
    follow.
-2. In Maya, connect the character as usual and click **进入联动** on the main
-   panel's **镜头联动** card (or click **进入联动** in the Unreal Details panel;
-   Maya follows either one). Maya stops its own playback, follows the sequence
-   time and the evaluated camera, and answers with the complete pose of the
-   character.
-3. Both hosts show one status line, for example
-   镜头联动中 · Unreal 控制时间 · 同步正常. When Maya cannot keep up, the line
-   says Maya 跟不上 with the lag; pause the Sequencer to let Maya catch up, or
-   close programs that load the machine. If it happens often, see
-   [Common problems](#common-problems). When Unreal cannot display a pose
-   completely, Maya's line says 应用失败 and Maya retries on its own; if it
-   persists, read the reason in Maya's 诊断详情. A lagging or refused pose is
-   never reported as synchronised. The evaluation, sample and revision read-back stays in Maya's
-   诊断详情 and Unreal's **高级设置与诊断**, ready for **复制完整诊断**.
-4. **返回实时** restores Maya's timeline, view and gate and keeps Maya paused
-   while Unreal keeps its takeover; user playback resumes in Maya. **结束预览**
-   also returns the original writers to the sequence and stays available after
-   **返回实时** until it does. Both buttons work from either host.
+2. In Maya, connect the character as usual. Open **相机** and click **开始联动**
+   under **Sequence 联动**, or click **进入联动** in the Unreal Details panel.
+   Maya pauses its own playback, follows the evaluated Unreal camera and
+   Sequence time, and sends back the character's complete pose. The Maya
+   header and **相机** page show **UE 控制时间** during linkage.
+3. Watch the linkage status on the **相机** page and in Unreal's **镜头联动**.
+   When Maya cannot keep up, it shows Maya 跟不上 with the lag. Pause Sequencer
+   to let Maya catch up, or close programs that load the machine. If it
+   happens often, see [Common problems](#common-problems). If Unreal cannot
+   display a complete pose, Maya shows 应用失败 and retries. For a persistent
+   failure, open **诊断** > **完整诊断** in Maya. Linkage readings also appear in
+   Unreal's **高级设置与诊断**, where **复制完整诊断** copies the full report.
+4. **返回实时** restores Maya's timeline, view and camera gate and leaves Maya
+   paused while Unreal keeps its takeover. Resume Maya playback when ready.
+   To return the original animation tracks to Sequencer, use **结束联动** in
+   Maya or **结束预览** in Unreal. This remains available after **返回实时**
+   until Unreal returns the tracks.
+
+The **UE 相机** section has placeholders for the camera list, **更新相机** and
+**从文件导入相机…**. Camera import and updates, the current level and sublevels,
+stand-in details, and Maya control of Sequence time are still pending. You
+can already follow Unreal's camera and time using **开始联动**.
 
 While linkage is active, a camera edit, a pause, a cut or an explicit jump
-cancels the old target; a continuously moving camera never cancels the answer
-already on its way. Unreal refuses a target whose writers cannot be isolated
-safely, and names the reason, instead of pausing the whole sequence. During
-Cached Playback **进入联动** is unavailable on both hosts: click **实时** in Maya,
-and it becomes available once Unreal confirms the cache was cleared. A failed
-restore appears on both hosts only when it happens (恢复失败 in Maya, 恢复未完成 in Unreal):
-open Maya's 诊断详情 or Unreal's **高级设置与诊断** for the resources that were
-not restored, restore them by hand (for example unlock the camera or reset the
-time range in Maya, or check the track in the Sequencer), or reopen the level.
-If Maya cannot restore its previous state when Unreal starts linkage again,
-the connection ends. Resolve the items in 诊断详情 before reconnecting.
+cancels the old target. During continuous camera movement, poses already on
+their way can finish. Unreal names the reason if it cannot safely take over
+a target's tracks. During Cached Playback, **开始联动** in Maya and
+**进入联动** in Unreal are unavailable. Choose **实时** on Maya's **预览** page
+and wait for Unreal to confirm that it cleared the cache. If restoration
+fails, Maya shows 恢复失败 and Unreal shows 恢复未完成. Open Maya's **诊断** >
+**完整诊断** or Unreal's **高级设置与诊断** to see what needs restoring. Follow the
+report, for example by unlocking the camera or resetting the time range in
+Maya, checking the track in Sequencer, or reopening the level. If Maya cannot
+restore its previous state when Unreal starts linkage again, the connection
+ends. Resolve the items in **完整诊断** and then reconnect.
+
 Closing or switching the Level Sequence, closing its level or deleting the
 paired actor ends linkage: Unreal returns the writers and Maya restores itself.
 Opening or creating another Maya scene ends the connection after linkage
@@ -293,16 +338,15 @@ object, every workflow stays as described above.
    placement comes from its root in Maya. In its Details, click
    **配对为副对象** under **镜头联动**. The main character's actor must be paired
    with **配对为主角色**.
-2. In Maya, click **打开对象配对窗口** on the **镜头联动** card, select the
-   object's root joint and click **设为副对象**. Its Display controller is optional
-   and supplies only an outfit label.
+2. In Maya, select the object's root joint. In **连接**, click **设为副对象**
+   under **副对象**. You can select its Display controller with the root to
+   supply an outfit label.
 3. Connect as usual. Unreal shows both objects from the same Maya time; in
    camera linkage it shows a new pose only when every display of both objects
    holds it.
-4. To continue with the main character only, click **移除副对象** in the Maya
-   window or in the second actor's Details. Unreal gives the object's tracks
-   back to the sequence and its actor stops following Maya; the main character
-   keeps going without reconnecting.
+4. To continue with the main character only, click **移除副对象** in Maya's
+   **连接** page or in the second actor's Details. Unreal returns the object's
+   tracks to the sequence, and the main character continues without reconnecting.
 
 Setting a different second object, replacing either Actor's Binding instance,
 pairing or unpairing an Actor of the connected set, or deleting a paired Actor
@@ -323,8 +367,8 @@ what to restore by hand.
    show ready, warning, or failed. A failure names the cause in Chinese while
    connection remains a separate status. Expand **高级设置与诊断** to inspect and
    copy the original error; the rest of the Driver character remains visible.
-3. In Maya, select **Model** (模型), confirm the outfit and **Transfer BS**
-   setting, then click **Connect**.
+3. On Maya's **连接** page, select **模型** and check the outfit and **传递 BS**.
+   Click **连接** in the header.
 4. Pose the character in Maya to inspect garment deformation in Unreal.
 5. In the Binding Actor's **预览控制**, click **显示原始服装** and **显示生成服装**
    to compare the same pose under the same actor transform, camera, and light.
@@ -340,14 +384,14 @@ what to restore by hand.
 | Does Unreal keep updating when Maya is in front? | During a connection, Unreal keeps background editor and viewport updates active. You can leave **Use Less CPU when in Background** enabled. Disconnecting restores your normal background behavior without changing that preference or viewport Realtime. A minimized editor does not draw its viewport. |
 | Maya reports an incomplete MtoU_LiveLink install | The message names the missing file. Extract the whole Maya component again, drag its `install.mel` into a Maya viewport, then restart Maya. |
 | The MtoU button still opens the earlier version after installation | The current Maya session had already loaded the earlier version; restart Maya. |
-| Maya reports 连接失败 · 插件协议版本不匹配 | The dialog lists the plugin and protocol version that the Maya component and Unreal each have loaded; an item the other side did not provide reads 未知（对端未提供）. Install both components again from one release, restart Maya and Unreal, then connect. If Maya only shows the earlier text "Maya 与 UE 插件版本不匹配", its Maya component is older: search Unreal's Output Log for "another protocol version", where one warning names both sides' plugin and protocol versions. |
+| Maya reports 连接失败 · 插件协议版本不匹配 | Open **诊断** > **完整诊断** or read the popup, if enabled, for the loaded Maya and Unreal versions. A missing value appears as a dash in the report and as 未知（对端未提供） in the popup. Install both components again from one release, restart Maya and Unreal, then connect. If Maya only shows the earlier text "Maya 与 UE 插件版本不匹配", its Maya component is older: search Unreal's Output Log for "another protocol version", where one warning names both sides' plugin and protocol versions. |
 | Skeleton mismatch | Start from the reported root cause: the first unmapped Maya path and parent, the blocked Maya and unreached Unreal counts, and any suggested import rename. When the details report that one required bone is claimed by two Maya bones, rename one of them in Maya. Then check the selected Maya root, the hierarchy, and whether the Unreal Driver mesh is up to date. |
 | An Additional Part is rejected | The diagnostics name the part and the reason. Check the shared **Skeleton** asset, the reported required bones and their parent chains in Maya, and the shared reference poses. If skin weights cannot be read, rebuild or reimport the mesh with CPU skin data available. |
 | Preview refresh fails | Check mesh alignment and separate garment/body material slots. Correct the reported issue and refresh again. |
 | Auto garment selection rejects an intentionally reduced mesh | Inspect the source for duplicates or mixed garment/body slots. If the reduction is intentional, set **Driver Garment Slot Override** on the Binding to the garment's separate slots, then refresh and inspect the result. |
-| BlendShapes do not appear | Check **Transfer BS**, matching names, the selected outfit, and the connection diagnostics. Refresh the Model preview after changing its source assets. |
+| BlendShapes do not appear | Check **传递 BS** on Maya's **连接** page, matching names, the selected outfit, and **诊断**. Refresh the Model preview after changing its source assets. |
 | Camera linkage often shows Maya 跟不上 with a lag | In Maya open **Windows > Settings/Preferences > Plug-in Manager** (Chinese UI: **窗口 > 设置/首选项 > 插件管理器**), clear **Auto load** for the plug-ins you do not use, for example MASH, XGen (`xgenToolkit`), GPU Cache, Scene Assembly, LookdevX and Type, then restart Maya. Plug-ins a scene needs are still loaded when you open it. |
-| Connection stops after a change | Same-subject input changes normally negotiate automatically; read the stopped reason if they fail. Model requires a ready Preview: refresh after changing or reimporting its inputs, then click **Connect**. Explicit Refresh, subject replacement, manual disconnect and failures require **Connect**; later edits do not resume them. See [Changes while connected](#changes-while-connected). |
+| Connection stops after a change | Same-subject input changes normally negotiate automatically; read the stopped reason if they fail. Model requires a ready Preview: refresh after changing or reimporting its inputs, then click **连接**. Explicit Refresh, subject replacement, manual disconnect and failures require **连接**; later edits do not resume them. See [Changes while connected](#changes-while-connected). |
 
 Keep the Binding Actor that takes part in the connection and its level loaded
 while previewing; deleting that actor or unloading its level ends the connection.
@@ -363,8 +407,8 @@ permission and terms in [NOTICE](NOTICE), and comes with no warranty. You may
 use and modify it freely, commercially or inside a company. If you give a copy
 to anyone else, keep the notices, provide the source, mark your changes and do
 not present a modified version as the original. Both archives contain `LICENSE`
-and `NOTICE`. The notice is also under **关于** at the bottom right of the Maya
-panel and in the plugin's entry in Unreal's **Edit > Plugins**.
+and `NOTICE`. The notice is also under **关于** on Maya's **诊断** page and in
+the plugin's entry in Unreal's **Edit > Plugins**.
 
 ## Further reading
 

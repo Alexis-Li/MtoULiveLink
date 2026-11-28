@@ -1,40 +1,11 @@
 # ruff: noqa: E402
-"""Opt-in window lifecycle and exit check in real Maya GUI sessions.
+"""Opt-in window lifecycle, panel visuals and scene settings in real Maya 2024.
 
-Run with a host Python (not mayapy):
-
-    python maya_gui_window_check.py --maya <Maya2024>/bin/maya.exe
-        --app-dir-template <initialized MAYA_APP_DIR> --evidence <scratch dir>
-
-``--app-dir-template`` is a Maya preference directory a person has already
-started Maya with once and whose first-start dialogs they answered; the check
-never answers them. Every scenario copies it, so neither the person's daily
-preferences nor the template change, and starts its own Maya GUI process with
-``TEMP`` inside the evidence directory, where Maya writes a crash log.
-
-The package comes from ``tools/package.py`` like the install check;
-the panel is opened from the extracted copy. Windows close with the
-``WM_CLOSE`` message their title-bar button sends, and buttons are clicked
-through Qt, so Maya runs its own close and click handling.
-
-1. ``exit_after_all_closed``: the panel was closed before Maya quits.
-2. ``exit_objects_open``: the panel and the 对象配对 window are open when Maya
-   quits.
-3. ``objects_close_cycles``: the 对象配对 window is opened from the panel twice
-   (one window) and closed from its title bar 20 times.
-4. ``objects_owned_paths``: three rounds of the 对象配对 window's own close
-   button, closing the panel (which closes it), switching workflow (which
-   keeps it), a new scene and opening a scene with it open; then Maya quits
-   with it open.
-
-Maya quits through ``cmds.quit`` or, with ``--quit title-bar``, by closing
-its main window as a person does. A scenario passes when every expectation
-held, Maya ran the quit, exited with code 0 within the timeout, wrote no
-crash log and its Script Editor history has no Python traceback or line
-naming ``mtou_livelink``. Inside Maya the same
-file runs one scenario, chosen by ``MTOU_WINDOW_STEP``, and keeps
-``<scenario>.json`` current after every stage, so a crash leaves the stage
-it happened in.
+Run with host Python and pass an initialized Maya 2024 preference template.
+Each lifecycle scenario opens the packaged panel in a fresh preference copy.
+The optional visual scenario records four pages and the complete diagnostics.
+The optional scene settings scenario reuses one isolated preference copy in
+two successive Maya processes. The template is never changed.
 """
 
 import json
@@ -45,19 +16,14 @@ import sys
 import time
 from pathlib import Path
 
-MAIN = "MtoULiveLinkWindow"
-OBJECTS = "MtoULiveLinkObjectsWindow"
-STEPS = ("exit_after_all_closed", "exit_objects_open", "objects_close_cycles",
-         "objects_owned_paths")
+LIFECYCLE_STEPS = ("exit_after_all_closed", "exit_diagnostics_open",
+                   "diagnostics_close_cycles", "owner_paths")
+SETTINGS_STEPS = ("scene_settings_write", "scene_settings_restore")
+STEPS = (*LIFECYCLE_STEPS, "panel_visuals", "scene_settings")
 CLOSE_CYCLES = 20
 OWNED_ROUNDS = 3
-WAIT_SECONDS = 15.0
+WAIT_SECONDS = 20.0
 WM_CLOSE = 0x0010
-# An open panel holds the timeUnitChanged scriptJob and the before-new and
-# before-open OpenMaya callbacks. Its after-open scriptJobs exist only for a
-# message whose callback Maya refused, which Maya 2022 and later never do.
-PANEL_SCRIPT_JOBS = 1
-SCENE_REPLACE_CALLBACKS = 2
 
 
 # ------------------------------------------------------------------ in Maya
@@ -66,19 +32,36 @@ def _in_maya():
 
     import maya.cmds as cmds
     import maya.utils
-    from PySide2 import QtCore
 
     step = os.environ["MTOU_WINDOW_STEP"]
     evidence = Path(os.environ["MTOU_WINDOW_EVIDENCE"])
     sys.path.insert(0, str(Path(os.environ["MTOU_WINDOW_RELEASE"]) / "scripts"))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import maya_gui_controls as gui
+    from maya_gui_panel_scenarios import panel_visuals, scene_settings
+
+    # Its own socket and port, reserved before the packaged component reads PORT.
+    listener = None
+    if step == "panel_visuals":
+        import socket
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        os.environ["MTOU_LIVELINK_PORT"] = str(listener.getsockname()[1])
+
+    callbacks = gui.CallbackCensus.install()
     import MtoULiveLink
-    from mtou_livelink import controller as panel
+    from mtou_livelink.qt_compat import QtCore, maya_main_window
 
     result = {"step": step, "pid": os.getpid(), "maya_version": cmds.about(version=True),
+              "app_dir": Path(os.environ["MAYA_APP_DIR"]).name,
               "api": cmds.about(apiVersion=True), "cut": cmds.about(cutIdentifier=True),
               "entry_file": MtoULiveLink.__file__, "stage": "start", "stages": [],
               "snapshots": [], "errors": [], "quit_requested": False}
     path = evidence / (step + ".json")
+    owned_jobs = set()
+    panel = None
+    controller = None
 
     def write():
         path.write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str),
@@ -89,168 +72,152 @@ def _in_maya():
         result["stages"].append(name)
         write()
 
-    def widget(name, find):
-        from PySide2.QtWidgets import QWidget
-        from shiboken2 import wrapInstance
-
-        from maya import OpenMayaUI as omui
-        pointer = getattr(omui.MQtUtil, find)(name)
-        return wrapInstance(int(pointer), QWidget) if pointer else None
-
-    def windows():
-        names = cmds.lsUI(windows=True) or []
-        return {name: names.count(name) for name in (MAIN,)}
-
-    def panel_jobs():
-        """Script jobs that call the panel; Maya keeps adding its own."""
-        return [job for job in cmds.scriptJob(listJobs=True) or [] if "Controller" in job]
-
     def snapshot(label):
-        controller = panel.CONTROLLER
-        if not result.get("all_jobs_sample"):
-            result["all_jobs_sample"] = cmds.scriptJob(listJobs=True) or []
-        entry = {"label": label, "windows": windows(), "script_jobs": len(panel_jobs()),
-                 "scene_replace_callbacks":
-                     len(controller._scene_replace_callbacks) if controller else 0}
+        callback_ids = list(callbacks.live)
+        entry = {
+            "label": label,
+            "windows": {name: len(gui.windows(name, visible_only=False))
+                        for name in (gui.MAIN, gui.DIAGNOSTICS)},
+            "script_jobs": sum(cmds.scriptJob(exists=job) for job in owned_jobs),
+            "callback_ids": callback_ids,
+            "scene_callbacks": list(controller._scene_replace_callbacks) if controller else [],
+            "exit_callback": controller._maya_exit_callback if controller else None,
+            "nodes": sorted(cmds.ls("MtoU_*", long=True) or []),
+        }
         result["snapshots"].append(entry)
         write()
         return entry
 
-    def expect(label, condition, detail=""):
-        if not condition:
-            result["errors"].append("{0}: {1}".format(label, detail or "expectation failed"))
-            write()
-
     def wait(label, predicate):
-        """Yielded to the runner, which returns to Maya's event loop meanwhile."""
+        """Return to the Qt event loop until a visible or Maya-side change is ready."""
         return label, predicate
 
-    # ------------------------------------------------------------ actions
     def open_panel():
+        nonlocal panel, controller
         stage("open panel")
-        MtoULiveLink.run()
-        yield wait("panel open", lambda: cmds.window(MAIN, exists=True))
+        panel = MtoULiveLink.run()
+        controller = panel.controller
+        owned_jobs.update(controller._script_jobs)
+        yield wait("panel open", lambda: gui.windows(gui.MAIN) == [panel])
+        saved = snapshot("one running panel")
+        assert MtoULiveLink.run() is panel and MtoULiveLink.main() is panel
+        again = snapshot("repeated run and main")
+        for field in ("windows", "script_jobs", "callback_ids"):
+            assert again[field] == saved[field], (field, saved, again)
+        assert saved["script_jobs"] == 1, saved
+        assert len(saved["scene_callbacks"]) == 9, saved
+        assert saved["exit_callback"] in saved["callback_ids"], saved
+        assert set(saved["scene_callbacks"]).issubset(saved["callback_ids"]), saved
 
-    def close_natively(name):
-        import ctypes
-        stage("title-bar close " + name)
-        hwnd = int(widget(name, "findWindow").window().winId())
-        if not ctypes.windll.user32.PostMessageW(hwnd, WM_CLOSE, 0, 0):
-            raise RuntimeError("WM_CLOSE was not posted to " + name)
-        yield wait(name + " closed", lambda: not cmds.window(name, exists=True))
+    def close_natively(widget, object_name):
+        stage("title-bar close " + object_name)
+        post_close(widget)
+        yield wait(object_name + " destroyed",
+                   lambda: not gui.windows(object_name, visible_only=False))
 
     def until_idle(label):
-        """Wait for Maya's idle queue, where its scene-change script jobs run."""
         done = []
         cmds.evalDeferred(lambda: done.append(True), lowestPriority=True)
         yield wait(label + " settled", lambda: bool(done))
 
-    def click_workflow(attribute):
-        stage("workflow " + attribute)
-        widget(getattr(panel.CONTROLLER, attribute), "findControl").click()
-        yield wait("workflow switched", lambda: True)
+    def open_diagnostics():
+        stage("open complete diagnostics")
+        gui.page(panel, gui.DIAGNOSTIC_PAGE)
+        gui.click(panel, "diagnosticsButton")
+        yield wait("one diagnostic window", lambda: len(gui.windows(gui.DIAGNOSTICS)) == 1)
+        details, = gui.windows(gui.DIAGNOSTICS)
+        gui.click(panel, "diagnosticsButton")
+        assert gui.windows(gui.DIAGNOSTICS, visible_only=False) == [details]
+        return details
 
-    def objects_windows():
-        return (cmds.lsUI(windows=True) or []).count(OBJECTS)
+    def close_panel():
+        yield from close_natively(panel, gui.MAIN)
+        yield wait("owned diagnostics destroyed",
+                   lambda: not gui.windows(gui.DIAGNOSTICS, visible_only=False))
+        entry = snapshot("all windows closed")
+        assert controller.closed and not any(entry["windows"].values()), entry
+        assert not entry["script_jobs"] and not entry["callback_ids"] and not entry["nodes"], entry
 
-    def open_objects():
-        stage("open objects window")
-        button = widget(panel.CONTROLLER._objects_window_button, "findControl")
-        button.click()
-        yield wait("objects window open", lambda: cmds.window(OBJECTS, exists=True))
-        button.click()  # a second click reuses the window
-        yield wait("objects reuse", lambda: True)
-        expect("one objects window", objects_windows() == 1, str(objects_windows()))
-
-    def check_panel_usable(label):
-        controller = panel.CONTROLLER
-        expect(label + " panel open", cmds.window(MAIN, exists=True))
-        expect(label + " panel button", bool(
-            widget(controller._objects_window_button, "findControl")))
-
-    # ---------------------------------------------------------- scenarios
     def exit_after_all_closed():
         yield from open_panel()
-        check_panel_usable("before close")
-        yield from close_natively(MAIN)
-        expect("no tool window", windows() == {MAIN: 0}, str(windows()))
-        expect("panel script jobs released", snapshot("all closed")["script_jobs"] == 0)
+        yield from open_diagnostics()
+        yield from close_panel()
 
-    def exit_objects_open():
+    def exit_diagnostics_open():
         yield from open_panel()
-        yield from open_objects()
+        yield from open_diagnostics()
 
-    def objects_close_cycles():
+    def diagnostics_close_cycles():
         yield from open_panel()
+        baseline = snapshot("diagnostics cycles baseline")
         for cycle in range(CLOSE_CYCLES):
-            label = "objects cycle {0}".format(cycle + 1)
-            yield from open_objects()
-            yield from close_natively(OBJECTS)
-            check_panel_usable(label)
-            entry = snapshot(label)
-            expect(label + " state", objects_windows() == 0
-                   and panel.CONTROLLER._objects_window is None
-                   and entry["script_jobs"] == PANEL_SCRIPT_JOBS
-                   and entry["scene_replace_callbacks"] == SCENE_REPLACE_CALLBACKS,
-                   "objects windows {0}, {1}".format(objects_windows(), entry))
+            details = yield from open_diagnostics()
+            yield from close_natively(details, gui.DIAGNOSTICS)
+            entry = snapshot("diagnostics cycle " + str(cycle + 1))
+            for field in ("windows", "script_jobs", "callback_ids", "nodes"):
+                assert entry[field] == baseline[field], (field, entry, baseline)
+        yield from close_panel()
 
-    def objects_owned_paths():
+    def owner_paths():
         scene = evidence / (step + "-scene.ma")
         cmds.file(rename=str(scene))
         cmds.file(save=True, type="mayaAscii", force=True)
         yield from open_panel()
-        for round_index in range(OWNED_ROUNDS):
-            label = "objects round {0}".format(round_index + 1)
-            yield from open_objects()
-            stage("objects close button")
-            widget(panel.CONTROLLER._objects_window._close_button, "findControl").click()
-            yield wait("objects window closed by its button",
-                       lambda: not cmds.window(OBJECTS, exists=True))
-            yield from open_objects()
-            yield from close_natively(MAIN)  # the panel closes its child window
-            expect(label + " panel close", objects_windows() == 0 and windows()[MAIN] == 0,
-                   str(objects_windows()))
+        for cycle in range(OWNED_ROUNDS):
+            yield from open_diagnostics()
+            yield from close_panel()
             yield from open_panel()
-            yield from open_objects()
-            yield from click_workflow("_model_workflow_button")
-            expect(label + " workflow keeps the objects window", objects_windows() == 1
-                   and panel.CONTROLLER._objects_window is not None, str(objects_windows()))
-            yield from click_workflow("_animation_workflow_button")
-            yield from open_objects()
-            stage("new scene")
-            cmds.file(new=True, force=True)
-            yield from until_idle("new scene")
-            expect(label + " new scene keeps one objects window", objects_windows() <= 1)
-            yield from open_objects()
-            stage("open scene")
-            cmds.file(str(scene), open=True, force=True)
-            yield from until_idle("open scene")
-            expect(label + " open scene keeps one objects window", objects_windows() <= 1)
-            entry = snapshot(label)
-            expect(label + " state", entry["windows"][MAIN] == 1
-                   and entry["script_jobs"] == PANEL_SCRIPT_JOBS
-                   and entry["scene_replace_callbacks"] == SCENE_REPLACE_CALLBACKS, str(entry))
-        yield from open_objects()
+            details = yield from open_diagnostics()
+            gui.page(panel, gui.CONNECTION)
+            assert gui.control(panel, "setSecondaryButton").isVisible()
+            gui.click(panel, "workflowModel")
+            gui.click(panel, "workflowAnimation")
+            assert gui.windows(gui.DIAGNOSTICS) == [details]
+            for label, replace in (("new scene", lambda: cmds.file(new=True, force=True)),
+                                   ("open scene", lambda: cmds.file(str(scene), open=True,
+                                                                    force=True))):
+                stage(label)
+                replace()
+                yield from until_idle(label)
+                assert gui.windows(gui.MAIN) == [panel]
+                assert len(gui.windows(gui.DIAGNOSTICS, visible_only=False)) <= 1
+                assert not panel.controller.objects_state()["secondary"]
+                yield from open_diagnostics()
+            entry = snapshot("scene replacement round " + str(cycle + 1))
+            assert entry["script_jobs"] == 1 and len(entry["callback_ids"]) == 10, entry
 
-    # ------------------------------------------------------------- runner
-    scenario = {"exit_after_all_closed": exit_after_all_closed,
-                "exit_objects_open": exit_objects_open,
-                "objects_close_cycles": objects_close_cycles,
-                "objects_owned_paths": objects_owned_paths}[step]()
+    def visual_scenario():
+        yield from open_panel()
+        yield from panel_visuals(panel, listener, evidence, result, stage, wait)
+        yield from close_panel()
+
+    def settings_scenario():
+        yield from open_panel()
+        yield from scene_settings(evidence, step, result, stage, wait, until_idle,
+                                  open_panel, close_panel, lambda: panel)
+        yield from close_panel()
+
+    scenario = {
+        "exit_after_all_closed": exit_after_all_closed,
+        "exit_diagnostics_open": exit_diagnostics_open,
+        "diagnostics_close_cycles": diagnostics_close_cycles,
+        "owner_paths": owner_paths,
+        "panel_visuals": visual_scenario,
+        **dict.fromkeys(SETTINGS_STEPS, settings_scenario),
+    }[step]()
 
     def quit_maya():
         snapshot("before quit")
         result["quit_requested"] = True
         stage("quit")
+        cmds.file(modified=False)  # the disposable scenario never saves on exit
         if os.environ.get("MTOU_WINDOW_QUIT") == "title-bar":
-            import ctypes
-
-            main = widget("MayaWindow", "findWindow")
-            if main is not None and ctypes.windll.user32.PostMessageW(
-                    int(main.winId()), WM_CLOSE, 0, 0):
+            try:
+                post_close(maya_main_window())
                 return
-            result["errors"].append("WM_CLOSE was not posted to MayaWindow")
-            write()
+            except RuntimeError as exc:
+                result["errors"].append(str(exc))
+                write()
         cmds.quit(force=True)
 
     def advance(pending=None, deadline=None):
@@ -258,51 +225,33 @@ def _in_maya():
             if pending is not None:
                 label, predicate = pending
                 if not predicate():
-                    if time.time() > deadline:
+                    if time.monotonic() > deadline:
                         raise RuntimeError("timed out waiting for " + label)
                     QtCore.QTimer.singleShot(50, lambda: advance(pending, deadline))
                     return
             pending = next(scenario)
-            # Return to Maya's event loop before checking, as a user's next
-            # click would.
             QtCore.QTimer.singleShot(
-                50, lambda: advance(pending, time.time() + WAIT_SECONDS))
+                0, lambda: advance(pending, time.monotonic() + WAIT_SECONDS))
         except StopIteration:
             quit_maya()
         except Exception:
-            result["errors"].append(traceback.format_exc()[-1500:])
-            diagnose()
+            result["errors"].append(traceback.format_exc())
             quit_maya()
 
-    def diagnose():
-        """What the panel saw when a step failed, and a direct open attempt."""
-        controller = panel.CONTROLLER
-        report = {"windows": windows(), "all_windows": cmds.lsUI(windows=True) or []}
-        try:
-            button = widget(controller._objects_window_button, "findControl")
-            report["button"] = {"name": controller._objects_window_button,
-                                "found": button is not None,
-                                "enabled": bool(button and button.isEnabled()),
-                                "visible": bool(button and button.isVisible())}
-            report["held"] = repr(controller._objects_window)
-            controller.open_objects_window()
-            report["direct_open_exists"] = cmds.window(OBJECTS, exists=True)
-        except Exception:
-            report["direct_open_error"] = traceback.format_exc()[-1500:]
-        result["diagnosis"] = report
-        write()
-
     def when_ready():
-        # Errors raised inside a clicked control only reach the Script
-        # Editor. Recording starts here, after Maya has echoed the startup
-        # command's result.
         cmds.scriptEditorInfo(historyFilename=str(evidence / (step + "-script-editor.txt")),
                               writeHistory=True)
         stage("ready")
         advance()
 
-    # Let Maya finish building its UI, as the install check does.
-    maya.utils.executeDeferred(lambda: QtCore.QTimer.singleShot(3000, when_ready))
+    maya.utils.executeDeferred(when_ready)
+
+
+def post_close(widget):
+    import ctypes
+
+    if not ctypes.windll.user32.PostMessageW(int(widget.winId()), WM_CLOSE, 0, 0):
+        raise RuntimeError("WM_CLOSE was not posted to " + widget.objectName())
 
 
 # ------------------------------------------------------------- host driver
@@ -343,10 +292,15 @@ def crash_files(*folders):
     return sorted(found)
 
 
-def run_step(maya, template, evidence, release, step, timeout, quit_mode="command"):
-    app_dir = evidence / ("mayaapp-" + step)
+def run_step(maya, template, evidence, release, step, timeout, quit_mode):
+    app_name = "scene-settings" if step in SETTINGS_STEPS else step
+    app_dir = evidence / ("mayaapp-" + app_name)
     temp = evidence / ("temp-" + step)
-    shutil.copytree(str(template), str(app_dir))
+    if step == SETTINGS_STEPS[-1]:
+        if not app_dir.is_dir():
+            raise RuntimeError("the first scene settings process left no preference directory")
+    else:
+        shutil.copytree(template, app_dir)
     temp.mkdir()
     env = dict(os.environ)
     env.update({"MAYA_APP_DIR": str(app_dir), "TEMP": str(temp), "TMP": str(temp),
@@ -399,14 +353,26 @@ def main(argv):
     summary = {"template_prefs": check_template(template), "quit": args.quit, "steps": {}}
     evidence = Path(args.evidence).resolve()
     if evidence.exists():
-        shutil.rmtree(evidence)
+        parser.error("--evidence must be a new folder: " + str(evidence))
     evidence.mkdir(parents=True)
     archive = _build_package(evidence)
     release = _extract(archive, evidence / "release" / "MtoULiveLink")
     summary["archive"] = archive.name
-    for step in args.step or STEPS:
-        summary["steps"][step] = run_step(
-            args.maya, template, evidence, release, step, args.timeout, args.quit)
+    for scenario in args.step or LIFECYCLE_STEPS:
+        steps = SETTINGS_STEPS if scenario == "scene_settings" else (scenario,)
+        for step in steps:
+            summary["steps"][step] = run_step(
+                args.maya, template, evidence, release, step, args.timeout, args.quit)
+            if not summary["steps"][step]["passed"]:
+                break
+        if scenario == "scene_settings" and all(
+                summary["steps"].get(step, {}).get("passed") for step in steps):
+            write_process, restore_process = (summary["steps"][step]["maya"] for step in steps)
+            if (write_process["pid"] == restore_process["pid"]
+                    or write_process["app_dir"] != restore_process["app_dir"]):
+                restore_process["errors"].append(
+                    "scene settings must use two Maya processes with one shared preference copy")
+                summary["steps"][steps[-1]]["passed"] = False
     summary["passed"] = all(outcome["passed"] for outcome in summary["steps"].values())
     (evidence / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")

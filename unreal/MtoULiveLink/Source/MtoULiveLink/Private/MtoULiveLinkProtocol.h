@@ -86,6 +86,7 @@ struct FMtoUHelloMessage
     bool bLinkage = false;
     bool bCache = false;
     bool bModel = false;
+    bool bRealtimeMetrics = false;
 };
 
 /** Coordination shape only: the Source owns session/phase/token admission. */
@@ -395,7 +396,10 @@ public:
         const TArray<FMtoUHelloTarget>& Targets,
         int32 SpaceRevision,
         const TSharedPtr<FJsonObject>& Anchor,
-        const FString& SourceInstanceId = FString());
+        const FString& SourceInstanceId = FString(),
+        bool bRealtimeMetrics = false);
+    static TArray<uint8> EncodeRealtimeMetrics(
+        int32 SessionId, int32 SetRevision, int32 EditorFPS, TOptional<double> ApplyMs);
     /** Unreal removed the second object and confirms the new set revision. */
     static TArray<uint8> EncodeObjectRemoved(
         int32 SessionId,

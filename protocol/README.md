@@ -17,11 +17,11 @@ Git history.
 ## Version pairing
 
 - This **unreleased** v12 development contract includes required subject
-  identities and coordinated restart. Earlier v12 development snapshots do
-  not interoperate with it. Missing identities fail closed; `version: 12`
-  alone and `plugin_version` never imply support. This development refinement
-  does not change the rule that a breaking change to a released protocol
-  increments its version.
+  identities, coordinated restart and opt-in realtime metrics. Earlier v12
+  snapshots missing the required identities fail closed. A v12 peer that
+  implements the identity and restart contract can still negotiate and stream
+  without metrics. Version and plugin release numbers alone never grant that
+  capability. A change to a released protocol still increments its version.
 - Both hosts declare `version: 12`: Maya's `PROTOCOL_VERSION` and the Unreal
   plugin report the same value.
 - The Maya client opens with `hello`. A peer that cannot answer with the same
@@ -164,7 +164,12 @@ with its specific code and changes no host state.
 
 1. Maya sends `hello` with its scene units, rate and capabilities. Unreal
    answers `hello_ack` with the `session_id`, its capabilities, the explicitly
-   paired targets and the common space.
+   paired targets and the common space. The acknowledgement may include
+   `ue_host_version` and `ue_plugin_version` as strings. These report the
+   running Unreal Editor build and the version of the loaded Live Link
+   plugin. The protocol version stays in `version`. A missing version
+   field for the Editor or plugin is unknown, and these values never drive
+   protocol decisions.
 2. Maya sends one `init` per object in `set_objects` order. Each carries the
    selected `workflow` (`animation` or `model`), whether BlendShapes are
    transmitted, the parent-first bone list with bind-local transforms and the
@@ -209,6 +214,32 @@ quaternion, is a structural error that closes the connection. A frame with a
 non-finite value or a number outside the Unreal float range, or one naming an
 object the set no longer holds, is dropped, the exact bone or curve is
 reported and the connection stays open.
+
+### Realtime metrics
+
+The optional Boolean `capabilities.realtime_metrics` is negotiated per
+connection. Maya declares `true` in `hello` when it supports the message.
+Unreal declares `true` in `hello_ack` only if it supports the message and
+Maya also declared support. Absence or `false` disables metrics. Old Maya
+peers close on an unknown reply type, so Unreal sends `realtime_metrics`
+only after this exchange and after sending Ready for every object in the
+set. The capability and version fields have no effect on ordinary preview.
+
+While Maya controls time in realtime, Unreal sends the latest snapshot
+about once a second. The optional snapshot uses one replaceable outgoing
+slot and yields to control replies. `session_id` and `set_revision` are
+positive 32-bit JSON integers. `editor_fps` is a nonnegative 32-bit JSON
+integer counting editor ticks in the last second. `apply_ms` is the latest
+finite, nonnegative duration in milliseconds for the whole participating
+set to finish applying a realtime pose. Unreal omits it until such an
+application completes. An explicit zero is a measurement.
+
+Switching time authority, changing the set, disconnecting or restarting
+clears the old snapshot and any pending send. Maya ignores a snapshot
+without negotiation, with an old session or set revision, or received
+while another mode owns time or its return to realtime is unconfirmed.
+A malformed snapshot with the wrong field type or range is
+`INVALID_MESSAGE`.
 
 ## Object set
 
@@ -569,7 +600,7 @@ observed, never assumes its peer received the same text.
 
 | `type` | Payload | Notes |
 | --- | --- | --- |
-| `hello` | `version`, `host`, `maya_version`, `scene{linear_unit, unit_scale_cm, fps}`, `capabilities{linkage, cache, model}`, `maya_subject_id`; optional `plugin_version`, `restart_token` | first message of a connection; `plugin_version` is the Maya component's release, shown when a protocol version is refused |
+| `hello` | `version`, `host`, `maya_version`, `scene{linear_unit, unit_scale_cm, fps}`, `capabilities{linkage, cache, model[, realtime_metrics]}`, `maya_subject_id`; optional `plugin_version`, `restart_token` | first message of a connection; `plugin_version` is the Maya component's release, shown when a protocol version is refused |
 | `restart_request`, `restart_prepared`, `restart_cancel` | see [Coordinated restart](#coordinated-restart-after-an-input-change) | old-session coordination only |
 | `init` | `version`, `revision`, `workflow`, `blendshapes_enabled`, `bones[[name, parent_index, transform]]` parent first (root parent `-1`), `curves[name]`, `object_id`, `set_revision`, `space_revision`, `set_objects` | one per object of the set, in `set_objects` order; an existing pairing must name the placed Binding Actor |
 | `frame` | `transforms`, `curves` for the primary, plus `objects[{object_id, transforms, curves}]` for the other object of a two-object set | one realtime sample of the whole set at one Maya time |
@@ -587,7 +618,8 @@ observed, never assumes its peer received the same text.
 
 | `type` | Payload | Notes |
 | --- | --- | --- |
-| `hello_ack` | `version`, `session_id`, `source_instance_id`, `capabilities`, `targets[{object_id, kind, binding_path, generation}]`, `space{space_revision, anchor}` | `targets` lists the explicitly paired targets, primary first; empty until the user pairs |
+| `hello_ack` | `version`, `session_id`, `source_instance_id`, `capabilities`, `targets[{object_id, kind, binding_path, generation}]`, `space{space_revision, anchor}`; optional `ue_host_version`, `ue_plugin_version` | `targets` lists the explicitly paired targets, primary first; empty until the user pairs |
+| `realtime_metrics` | `session_id`, `set_revision`, `editor_fps`; optional `apply_ms` | optional negotiated snapshot for realtime preview |
 | `ready` | `revision`, `workflow`, `missing_in_unreal`, `missing_in_maya`, `bone_name_remaps`, `target_morph_count`, `accepted_morph_count`, `session_id`, `object_id`, `set_revision`, `space_revision`, `target_instance_id` | negotiation result for one object |
 | `error` | `code`, `message`, `details`, `kind`; `eval_id` and `sample_serial` for a refused `group`; `upload_id` and/or `play_id` for a cache error; `protocol_version` and `plugin_version` for `PROTOCOL_VERSION_MISMATCH` | a stable code from the table below; text is diagnostic only. `kind` is `scheduling` or `failure` (see [Error kinds](#error-kinds)). A recoverable cache error carries the positive identity of the upload or play attempt it belongs to; each field is omitted when the error has none, including a refused stale `cache_clear` and structural errors (see [Cached playback](#cached-playback)). The routing by `upload_id` and `play_id` does not depend on `kind`, `eval_id` or `sample_serial`. `protocol_version` and `plugin_version` name the refusing release (see [Version pairing](#version-pairing)) |
 | `cache_ready` | `upload_id`, `revision`, `frame_count` | the complete upload was accepted |
@@ -698,12 +730,14 @@ removal, linkage transitions, groups and applied evidence, required greeting
 identities, restart message shapes and invalid stages/codes/tokens, complete
 Ready identity sets (`ready_set`), resources, an
 earlier-version `hello`, `init`, `frame`, `cache_begin` and `hello_ack`.
+The corpus also covers successful-version fields, optional realtime metrics
+negotiation and snapshots, and invalid field types and ranges.
 The cancelled-target and paused-resample refusals are pinned by the linkage
 unit tests on both hosts rather than by a corpus case.
 
 ## Changing the protocol
 
-Except for the unreleased v12 development refinement described in
+Except for the unreleased v12 development changes described in
 [Version pairing](#version-pairing), a change to any message shape, meaning,
 identity rule, limit or code is a new
 protocol version: update this document, the corpus and `protocol_version`,
