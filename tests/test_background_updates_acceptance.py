@@ -401,7 +401,8 @@ class BackgroundAcceptanceTests(unittest.TestCase):
 def driver_functions():
     tree = ast.parse(DRIVER.read_text(encoding="utf-8"))
     functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)
-                 and node.name in ("connect_role", "record_connection", "run_command", "start")]
+                 and node.name in ("connect_role", "open_scene", "record_connection",
+                                   "reopen_scene", "run_command", "start")]
     controller = mock.Mock()
     controller.objects_state.return_value = {"secondary": None}
     namespace = {"FIXTURE": {"root": "root"}, "CONTROLLER": controller,
@@ -451,6 +452,22 @@ class MayaDriverCommandTests(unittest.TestCase):
         self.assertEqual(2, new["session_id"])
         self.assertIsNone(new["code"])
 
+    def test_reopen_recreates_disposable_motion_before_connecting(self):
+        state = driver_functions()
+        calls = mock.Mock()
+        state["FIXTURE"].update(scene="fixture.ma", start_frame=42)
+        state.update(cmds=calls.cmds, key_test_motion=calls.key_test_motion,
+                     key_test_morphs=calls.key_test_morphs, connect_role=calls.connect_role)
+        state["reopen_scene"]()
+        self.assertEqual([
+            mock.call.cmds.file("fixture.ma", open=True, force=True, prompt=False,
+                                executeScriptNodes=False, ignoreVersion=True),
+            mock.call.key_test_motion(),
+            mock.call.key_test_morphs(),
+            mock.call.cmds.currentTime(42.0, update=True),
+            mock.call.connect_role(),
+        ], calls.mock_calls)
+
     def test_evaluated_time_ack_follows_synchronous_time_change(self):
         state = driver_functions()
         state["cmds"].currentTime.return_value = 123.0
@@ -471,7 +488,7 @@ class MayaDriverCommandTests(unittest.TestCase):
             with self.subTest(disconnected=disconnected):
                 state = driver_functions()
                 state.update({name: mock.Mock() for name in (
-                    "write_result", "open_scene", "key_test_motion", "key_test_morphs",
+                    "write_result", "open_scene",
                     "DialogObserver", "QtWidgets", "QtCore", "launch_panel",
                     "install_session_census", "connect_role", "fail", "tick")})
                 state["FIXTURE"]["start_disconnected"] = disconnected

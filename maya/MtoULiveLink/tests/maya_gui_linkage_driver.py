@@ -226,6 +226,8 @@ class DialogObserver(QtCore.QObject):
 
 
 def open_scene():
+    """Load the fixture and recreate its disposable animation keys on each open."""
+    load_start = time.time()
     try:
         cmds.file(FIXTURE["scene"], open=True, force=True, prompt=False,
                   executeScriptNodes=False, ignoreVersion=True)
@@ -233,6 +235,9 @@ def open_scene():
         if not FIXTURE.get("allow_scene_load_warnings") or not cmds.objExists(FIXTURE["root"]):
             raise
         RESULT["scene_load_warning"] = str(exc)[:400]
+    RESULT.setdefault("load_seconds", round(time.time() - load_start, 1))
+    key_test_motion()
+    key_test_morphs()
 
 
 def joint_path(short, root=None):
@@ -893,11 +898,7 @@ def start():
         QtWidgets.QApplication.instance().installEventFilter(DIALOG_OBSERVER)
         RESULT["phase"] = "loading"
         write_result()
-        load_start = time.time()
         open_scene()
-        RESULT["load_seconds"] = round(time.time() - load_start, 1)
-        key_test_motion()
-        key_test_morphs()
         CALLBACKS = gui.CallbackCensus.install()
         install_session_census()
         launch_panel()
