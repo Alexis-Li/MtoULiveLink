@@ -1,6 +1,7 @@
 """Real Maya acceptance scenes for panel visuals, diagnostics and saved settings."""
 
 import hashlib
+import socket
 import threading
 
 import maya.cmds as cmds
@@ -152,14 +153,27 @@ def panel_visuals(panel, listener, evidence, result, stage, wait):
     browser = gui.control(details, "diagnosticDetails")
     before = browser.toPlainText()
     assert "此前的连接差异" in before and "FixtureSmile" in before, before
-    clients[0].sendall(encode({"type": "error", "kind": "failure", "code": "INVALID_BINDING",
-                               "message": "验收时绑定失败", "details": long_detail}))
-    peer.stop.set()
+    client = clients[0]
+    client.sendall(encode({"type": "error", "kind": "failure", "code": "INVALID_BINDING",
+                           "message": "验收时绑定失败", "details": long_detail}))
+    # End the peer's output after the error and drain Maya's input until it
+    # closes. Closing with unread frames can reset the connection on Windows.
+    client.shutdown(socket.SHUT_WR)
     latest = gui.control(panel, "diagnosticLatest")
-    yield wait("updated diagnostics panel and already open window", lambda:
-               controller.snapshot()["connection"] == "interrupted"
-               and "INVALID_BINDING" in latest.toPlainText()
-               and "INVALID_BINDING" in browser.toPlainText())
+
+    def failure_visible():
+        state = controller.snapshot()
+        result["wire_failure_observed"] = {
+            "connection": state["connection"], "code": state["diagnostic"].get("code"),
+            "main": latest.toPlainText().splitlines()[:2],
+            "details": browser.toPlainText().strip().splitlines()[:2],
+        }
+        return (state["connection"] == "interrupted"
+                and "INVALID_BINDING" in latest.toPlainText()
+                and "INVALID_BINDING" in browser.toPlainText())
+
+    yield wait("updated diagnostics panel and already open window", failure_visible)
+    peer.stop.set()
     open_text = browser.toPlainText()
     failure = controller.snapshot()["diagnostic"]
     solution = failure["solution"]
@@ -275,13 +289,15 @@ def scene_settings(evidence, step, result, stage, wait, until_idle, open_panel, 
         cmds.select(display, replace=True)
         gui.click(panel, "setDisplayButton")
         _set_secondary(panel, secondary)
+        gui.page(panel, gui.PREVIEW)
+        gui.set_checked(panel, "cap30", True)
+        gui.set_capture_range(panel, 11, 37)
+        gui.page(panel, gui.CONNECTION)
         gui.set_checked(panel, "workflowModel", True)
         gui.set_checked(panel, "blendshapesCheck", False)
         gui.page(panel, gui.DIAGNOSTIC_PAGE)
         gui.set_checked(panel, "popupCheck", False)
         gui.page(panel, gui.PREVIEW)
-        gui.set_checked(panel, "cap30", True)
-        gui.set_capture_range(panel, 11, 37)
         expected_unnamed = dict(settings_a, playback_cap=30)
         verify(expected_unnamed, "unnamed")
 
