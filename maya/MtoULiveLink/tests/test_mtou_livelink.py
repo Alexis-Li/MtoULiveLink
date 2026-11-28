@@ -5016,7 +5016,7 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(payload, actual)
             self.assertTrue(mtou_protocol.encode_message(actual))
             return
-        if operation in ("ready", "error", "cache_ready", "cache_playing", "cache_complete",
+        if operation in ("ready", "error", "realtime_metrics", "cache_ready", "cache_playing", "cache_complete",
                          "cache_progress", "cache_stopped", "cache_cleared",
                          "cache_paused", "cache_resumed", "cache_seeked",
                          "cache_looped", "cache_loop_changed"):
@@ -5190,6 +5190,7 @@ class ProtocolTests(unittest.TestCase):
             actual = mtou_protocol.make_hello_message(
                 payload["maya_version"], scene["linear_unit"],
                 scene["unit_scale_cm"], scene["fps"],
+                capabilities=payload["capabilities"],
                 plugin_version=payload.get("plugin_version"),
                 maya_subject_id=payload.get("maya_subject_id"),
                 restart_token=payload.get("restart_token"))

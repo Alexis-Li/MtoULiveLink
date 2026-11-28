@@ -261,6 +261,14 @@ class SenderWorker(threading.Thread):
         self._realtime_sent = 0
         self._realtime_sent_times = deque()
         self._realtime_replaced = 0
+        self._peer_realtime_metrics = False
+        self._ue_metrics = None
+        self._metrics_set_revision = None
+        self._metrics_pending_set = None
+        self._metrics_pending_clear = None
+        self._metrics_pending_leave = None
+        self._metrics_mode_revision = 0
+        self._metrics_peer_realtime = True
         # Unbounded by design: the cached upload streams hundreds of frames
         # through the same ordered path. Linkage controls keep their own bound
         # in the linkage session instead of constraining this queue.
@@ -311,7 +319,11 @@ class SenderWorker(threading.Thread):
             if self._state != "ready" or self._stop_event.is_set():
                 return None
             self._prune_sent_times(time.monotonic())
-            return {"sent_frames": self._realtime_sent,
+            ue = self._ue_metrics or {}
+            return {"ue_apply_ms": ue.get("apply_ms"),
+                    "ue_editor_fps": ue.get("editor_fps"),
+                    "ue_set_revision": ue.get("set_revision"),
+                    "sent_frames": self._realtime_sent,
                     "sent_hz": len(self._realtime_sent_times),
                     "replaced_frames": self._realtime_replaced,
                     "stages": self._realtime_timings.snapshot()}
@@ -323,6 +335,7 @@ class SenderWorker(threading.Thread):
     def _begin_ordered_locked(self):
         with self._lock:
             self._ordered_mode = True
+            self._ue_metrics = None
             latest = self._latest.take()
         while True:
             try:
@@ -337,6 +350,9 @@ class SenderWorker(threading.Thread):
         packet = encode_message(frame_message)
         with self._lock:
             if self._restart_phase is None:
+                if self._peer_realtime_metrics and frame_message.get("type") == "cache_clear":
+                    self._metrics_pending_clear = frame_message["clear_id"]
+                    self._ue_metrics = None
                 self._ordered.put((packet, False))
 
     def submit_control(self, message, *, discard_latest=False):
@@ -350,6 +366,13 @@ class SenderWorker(threading.Thread):
         with self._send_lock:
             with self._lock:
                 if self._restart_phase is None:
+                    if self._peer_realtime_metrics:
+                        if message.get("type") == "leave_linkage":
+                            self._metrics_pending_leave = message["mode_revision"]
+                            self._ue_metrics = None
+                        elif message.get("type") == "remove_object":
+                            self._metrics_pending_set = message["set_revision"]
+                            self._ue_metrics = None
                     if discard_latest:
                         self._latest.take()
                     if self._ordered_mode:
@@ -467,6 +490,7 @@ class SenderWorker(threading.Thread):
         if self._restart_phase is None:
             self._restart = self._restart or RestartWindow(self)
             self._restart_phase = "coordinating"
+            self._ue_metrics = None
             self._state = "restarting"
             self._latest.take()
 
@@ -653,6 +677,9 @@ class SenderWorker(threading.Thread):
             return False
         with self._lock:
             self._hello_reply = reply
+            self._peer_realtime_metrics = (
+                self._hello_message["capabilities"].get("realtime_metrics") is True
+                and reply["capabilities"].get("realtime_metrics") is True)
             if self._restart is not None:
                 self._init_available = False
                 self._state = "preparing_init"
@@ -715,6 +742,7 @@ class SenderWorker(threading.Thread):
             if self._restart is not None and self._restart.failure is not None:
                 raise _RestartInterrupted()
             self._target_identities = targets
+            self._metrics_set_revision = self._init_messages[0].get("set_revision")
             self._restart = None
             self._init_started = True
             self._state = "ready"
@@ -754,6 +782,45 @@ class SenderWorker(threading.Thread):
                 self._restart.stop(make_diagnostic(reply["code"], details=reply["detail"]))
                 self._peer_stopped = True
                 raise _RestartInterrupted()
+
+    def _receive_realtime_metrics(self, reply):
+        """Only retain a snapshot of the ready, current set under Maya's time."""
+        with self._lock:
+            if (self._peer_realtime_metrics and self._state == "ready"
+                    and not self._stop_event.is_set() and not self._ordered_mode
+                    and self._metrics_peer_realtime
+                    and self._metrics_pending_set is None
+                    and self._metrics_pending_clear is None
+                    and self._metrics_pending_leave is None
+                    and reply["session_id"] == self._hello_reply["session_id"]
+                    and reply["set_revision"] == self._metrics_set_revision):
+                self._ue_metrics = reply
+
+    def _note_metrics_authority_locked(self, reply):
+        if not self._peer_realtime_metrics:
+            return
+        kind = reply["type"]
+        session_id = self._hello_reply["session_id"]
+        if kind == "cache_cleared" and self._metrics_pending_clear is not None:
+            if reply["clear_id"] >= self._metrics_pending_clear:
+                self._metrics_pending_clear = None
+        elif kind == "mode_state" and reply["session_id"] == session_id:
+            revision = reply["mode_revision"]
+            if revision >= self._metrics_mode_revision:
+                if (revision != self._metrics_mode_revision
+                        or (reply["mode"] == REALTIME_MODE) != self._metrics_peer_realtime):
+                    self._ue_metrics = None
+                self._metrics_mode_revision = revision
+                self._metrics_peer_realtime = reply["mode"] == REALTIME_MODE
+                if self._metrics_pending_leave is not None and revision >= self._metrics_pending_leave:
+                    self._metrics_pending_leave = None
+        elif kind == "object_removed" and reply["session_id"] == session_id:
+            revision = reply["set_revision"]
+            if revision > self._metrics_set_revision:
+                self._ue_metrics = None
+                self._metrics_set_revision = revision
+                if self._metrics_pending_set is not None and revision >= self._metrics_pending_set:
+                    self._metrics_pending_set = None
 
     def _pop_stream_packet(self):
         with self._lock:
@@ -814,8 +881,13 @@ class SenderWorker(threading.Thread):
             if reply["type"] == "restart_state":
                 self._receive_restart_state(reply)
                 continue
+            if reply["type"] == "realtime_metrics":
+                self._receive_realtime_metrics(reply)
+                continue
             with self._lock:
                 restarting = self._restart_phase is not None
+                if not restarting:
+                    self._note_metrics_authority_locked(reply)
                 self._reason = None
             if restarting:
                 # Poses and mode replies already in flight belong to the old
@@ -1201,6 +1273,9 @@ class StreamingSession(object):
         delivery = self._worker.realtime_metrics()
         if delivery is None:
             return None
+        if (delivery.pop("ue_set_revision", None) != self._set_revision
+                or self._sampling_paused or self._removal_pending is not None):
+            delivery.update(ue_apply_ms=None, ue_editor_fps=None)
         stages = self._sample_timings.snapshot()
         stages.update(delivery["stages"])
         return dict(delivery, stages=stages, samples=self._samples,

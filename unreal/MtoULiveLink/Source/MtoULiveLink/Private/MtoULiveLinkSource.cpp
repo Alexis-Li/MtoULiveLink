@@ -363,6 +363,54 @@ void FMtoULiveLinkSource::ClearRealtimeApplications()
     FirstRealtimeGeneration = 0;
     DisplayApplications.Reset();
     RecentApplications.Reset();
+    ClearRealtimePeerMetrics();
+}
+
+void FMtoULiveLinkSource::ClearRealtimePeerMetrics()
+{
+    bHaveRealtimeApplySample = false;
+    NextRealtimeMetricsSeconds = 0.0;
+    FScopeLock Lock(&PendingMutex);
+    PendingRealtimeMetrics.Reset();
+}
+
+void FMtoULiveLinkSource::UpdateRealtimePeerMetrics(double Now)
+{
+    if (RealtimeMetricsSession == 0 || RealtimeMetricsSession != GameThreadSession
+        || Now < NextRealtimeMetricsSeconds || !CacheSession.AcceptsLiveFrames()
+        || bWorkerLinkageActive.Load() || bWorkerLinkageAwaitingPeer.Load())
+    {
+        return;
+    }
+    const FMtoUTimeControlView Time = GetTimeControlView();
+    if (!Time.bConnected || Time.bTransitioning || Time.Authority != EMtoUTimeAuthority::Maya)
+    {
+        if (NextRealtimeMetricsSeconds != 0.0)
+        {
+            ClearRealtimePeerMetrics();
+        }
+        return;
+    }
+    // Wait for the first full one-second FPS window of the ready epoch.
+    const bool bFirstWindow = NextRealtimeMetricsSeconds == 0.0;
+    NextRealtimeMetricsSeconds = Now + RealtimeRateWindowSeconds;
+    if (bFirstWindow)
+    {
+        return;
+    }
+
+    RealtimeMetricsModeRevision = Time.ModeRevision;
+    FMtoUOutgoing Reply;
+    Reply.SessionId = GameThreadSession;
+    const TOptional<double> ApplyMs = bHaveRealtimeApplySample
+        ? TOptional<double>(RealtimeApplyTiming.LatestSeconds * 1000.0) : TOptional<double>();
+    Reply.Packet = FMtoUProtocol::EncodeRealtimeMetrics(static_cast<int32>(GameThreadSession),
+        NegotiatedSetRevision, RecentEditorFrames.Num(), ApplyMs);
+    FScopeLock Lock(&PendingMutex);
+    if (CurrentWorkerSession == GameThreadSession)
+    {
+        PendingRealtimeMetrics = MoveTemp(Reply);
+    }
 }
 
 void FMtoULiveLinkSource::NoteRealtimeDisplayApplication(
@@ -414,6 +462,7 @@ void FMtoULiveLinkSource::NoteRealtimeDisplayApplication(
     const double Now = FPlatformTime::Seconds();
     LastAppliedGeneration = Generation;
     RealtimeApplyTiming.Add(Now - FirstStart);
+    bHaveRealtimeApplySample = true;
     RecentApplications.Add(Now);
 }
 
@@ -693,6 +742,7 @@ void FMtoULiveLinkSource::Update()
             PendingFrame.Reset();
         }
     }
+    UpdateRealtimePeerMetrics(Now);
 }
 
 bool FMtoULiveLinkSource::IsSourceStillValid() const
@@ -857,6 +907,10 @@ void FMtoULiveLinkSource::ApplySessionEndLocked(uint64 SessionId, EMtoUSessionEn
 {
     // Record the publication gate before replacing any component or writer.
     EndedSession = SessionId;
+    if (RealtimeMetricsSession == SessionId)
+    {
+        ClearRealtimePeerMetrics();
+    }
     if (Reason == EMtoUSessionEndReason::InputChanged && GreetedSession == SessionId)
     {
         Restart.Begin(SessionId, RestartNow());
@@ -898,6 +952,12 @@ void FMtoULiveLinkSource::EndStreamingSessionOnGameThread(uint64 SessionId, bool
     if (!bNegotiated && !bGreeted)
     {
         return;
+    }
+    if (RealtimeMetricsSession == SessionId)
+    {
+        RealtimeMetricsSession = 0;
+        RealtimeMetricsModeRevision = 0;
+        ClearRealtimePeerMetrics();
     }
     if (EndedSession == SessionId)
     {
@@ -1074,6 +1134,7 @@ uint32 FMtoULiveLinkSource::Run()
     uint64 ActiveSession = 0;
     // Every init of the declared set arrives before any other message.
     bool bHelloReceived = false;
+    bool bRealtimeMetricsOffered = false;
     bool bHelloReplySent = false;
     bool bInitReceived = false;
     int32 WorkerInitsExpected = 0;
@@ -1177,6 +1238,7 @@ uint32 FMtoULiveLinkSource::Run()
                     CurrentWorkerSession = 0;
                     PendingInits.Reset();
                     PendingFrame.Reset();
+                    PendingRealtimeMetrics.Reset();
                 }
             }
             DisconnectedSessions.Enqueue(ActiveSession);
@@ -1184,6 +1246,7 @@ uint32 FMtoULiveLinkSource::Run()
         CloseSocket(*SocketSubsystem, ClientSocket);
         ActiveSession = 0;
         bHelloReceived = false;
+        bRealtimeMetricsOffered = false;
         bHelloReplySent = false;
         bInitReceived = false;
         WorkerInitsExpected = 0;
@@ -1541,6 +1604,28 @@ uint32 FMtoULiveLinkSource::Run()
                     WorkerObjectCounts.Remove(Reply.RemovedObjectId);
                 }
             }
+            if (ClientSocket && bReady && bRealtimeMetricsOffered)
+            {
+                TOptional<FMtoUOutgoing> Metrics;
+                {
+                    FScopeLock Lock(&PendingMutex);
+                    if (PendingRealtimeMetrics.IsSet() && PendingRealtimeMetrics->SessionId == ActiveSession
+                        && OutgoingReplies.IsEmpty()
+                        && ClientSocket->Wait(ESocketWaitConditions::WaitForWrite, FTimespan::Zero()))
+                    {
+                        Metrics = MoveTemp(PendingRealtimeMetrics);
+                        PendingRealtimeMetrics.Reset();
+                    }
+                }
+                if (Metrics.IsSet() && !IsRestartBlocked(ActiveSession))
+                {
+                    bDidWork = true;
+                    if (!SendWorkerPacket(*ClientSocket, Metrics->Packet))
+                    {
+                        MarkDisconnected();
+                    }
+                }
+            }
         }
 
         // While a cache frame is held for backpressure the socket reader
@@ -1683,6 +1768,10 @@ uint32 FMtoULiveLinkSource::Run()
                                     TEXT("RESOURCE_LIMIT"),
                                     TEXT("The linkage control queue is full."));
                                 break;
+                            }
+                            if (!bHelloReceived)
+                            {
+                                bRealtimeMetricsOffered = Hello.bRealtimeMetrics;
                             }
                             bHelloReceived = true;
                             FMtoUPendingHello Pending;
@@ -2508,7 +2597,11 @@ void FMtoULiveLinkSource::DrainLinkageHellosOnGameThread()
         if (!bAutomatic && GreetedSession == Hello.SessionId)
         {
             if (Hello.Message.MayaSubjectId == MayaSubjectId)
-            { LinkageSession.NoteHello(Hello.Message, SourceInstanceId); }
+            {
+                // Duplicate greetings cannot renegotiate a capability.
+                Hello.Message.bRealtimeMetrics = RealtimeMetricsSession == Hello.SessionId;
+                LinkageSession.NoteHello(Hello.Message, SourceInstanceId);
+            }
             else
             {
                 RequestSessionEndOnGameThread(Hello.SessionId, EMtoUSessionEndReason::SubjectChanged);
@@ -2558,6 +2651,7 @@ void FMtoULiveLinkSource::DrainLinkageHellosOnGameThread()
         }
         if (!bAutomatic) { CaptureSubjectsOnGameThread(); MayaSubjectId = Hello.Message.MayaSubjectId; }
         GreetedSession = Hello.SessionId;
+        RealtimeMetricsSession = Hello.Message.bRealtimeMetrics ? Hello.SessionId : 0;
         if (LinkageSession.GetSessionId() != static_cast<int32>(Hello.SessionId))
         { LinkageSession.BeginSession(static_cast<int32>(Hello.SessionId)); }
         LinkageSession.NoteHello(Hello.Message, SourceInstanceId);
@@ -2747,6 +2841,7 @@ void FMtoULiveLinkSource::RemoveSecondaryObjectOnGameThread(
     check(IsInGameThread());
     const int32 Index = SessionObjects.IndexOfByPredicate(
         [&ObjectId](const FMtoUSessionObject& Object) { return Object.ObjectId == ObjectId; });
+    ClearRealtimeApplications();
     FString Residual;
     if (Index <= 0)
     {
@@ -2775,7 +2870,6 @@ void FMtoULiveLinkSource::RemoveSecondaryObjectOnGameThread(
         }
         // 3. The object leaves the stream: its subject goes away and its
         //    displays show their own Binding state again.
-        ClearRealtimeApplications();
         FMtoUSessionObject Removed = MoveTemp(SessionObjects[Index]);
         SessionObjects.RemoveAt(Index);
         SetObjects.Remove(ObjectId);
@@ -3770,6 +3864,15 @@ void FMtoULiveLinkSource::SendLinkageControlPacketOnGameThread(TArray<uint8> Pac
     {
         return;
     }
+    if (RealtimeMetricsSession == static_cast<uint64>(SessionId))
+    {
+        const int32 ModeRevision = LinkageSession.GetModeRevision();
+        if (ModeRevision != RealtimeMetricsModeRevision)
+        {
+            RealtimeMetricsModeRevision = ModeRevision;
+            ClearRealtimeApplications();
+        }
+    }
     if (bControl && !TryAdmitOutgoingControl())
     {
         // Overflow is an error, never an unbounded backlog.
@@ -3870,6 +3973,7 @@ void FMtoULiveLinkSource::ApplyCacheTransitionOnGameThread(
     switch (Transition.Kind)
     {
         case EKind::Entered:
+            ClearRealtimeApplications();
             SetStatus(TEXT("Cached Playback entry; holding recent pose"));
             break;
         case EKind::Receiving:
@@ -3921,6 +4025,7 @@ void FMtoULiveLinkSource::ApplyCacheTransitionOnGameThread(
             }
             break;
         case EKind::Cleared:
+            ClearRealtimeApplications();
             SetStatus(TEXT("Connected to Maya"));
             Packet = FMtoUProtocol::EncodeCacheCleared(
                 Transition.UploadId, Transition.PlayId, Transition.ClearId);

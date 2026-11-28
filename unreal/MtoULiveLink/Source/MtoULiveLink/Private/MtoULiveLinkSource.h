@@ -564,6 +564,8 @@ private:
     FMtoURealtimeTiming RealtimeParseTiming; // Worker-owned, under PendingMutex.
     TQueue<uint64, EQueueMode::Spsc> DisconnectedSessions;
     TQueue<FMtoUOutgoing, EQueueMode::Spsc> OutgoingReplies;
+    // An optional snapshot may be replaced. The worker drains controls first.
+    TOptional<FMtoUOutgoing> PendingRealtimeMetrics; // Under PendingMutex.
     // Linkage intake: the greeting, the control messages and the staged pose
     // groups the worker parsed. The game thread drains every one of them, so
     // the editor hooks and the published pose stay on one thread.
@@ -618,7 +620,14 @@ private:
     uint64 EditorFrames = 0;
     uint64 LastEditorFrame = 0;
 
+    uint64 RealtimeMetricsSession = 0;
+    double NextRealtimeMetricsSeconds = 0.0;
+    int32 RealtimeMetricsModeRevision = 0;
+    bool bHaveRealtimeApplySample = false;
+
     void ClearRealtimeApplications();
+    void ClearRealtimePeerMetrics();
+    void UpdateRealtimePeerMetrics(double Now);
     // The worker session an end request closed, until the worker's disconnect
     // reaches EndStreamingSessionOnGameThread. Later messages, inits and
     // frames of it fail closed even before the worker closes the socket.

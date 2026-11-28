@@ -33,6 +33,7 @@
 #include "LiveLinkInstance.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/CommandLine.h"
+#include "Misc/EngineVersion.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Parse.h"
 #include "Misc/OutputDevice.h"
@@ -501,15 +502,17 @@ bool SendBytes(FSocket& Socket, const uint8* Data, int32 Num)
     return Offset == Num;
 }
 
-FSocket* ConnectGreetedLoopback(ISocketSubsystem& SocketSubsystem, uint16 Port)
+FSocket* ConnectGreetedLoopback(
+    ISocketSubsystem& SocketSubsystem, uint16 Port, bool bRealtimeMetrics = false)
 {
     FSocket* Socket = ConnectLoopback(SocketSubsystem, Port);
     if (Socket)
     {
-        const TArray<uint8> Hello = Packet(TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD
+        const TArray<uint8> Hello = Packet(FString::Printf(TEXT("{\"type\":\"hello\"," MTOU_PROTOCOL_VERSION_FIELD
             ",\"maya_subject_id\":\"automation-subject\",\"host\":\"maya\",\"maya_version\":\"2024\","
             "\"scene\":{\"linear_unit\":\"cm\",\"unit_scale_cm\":1,\"fps\":24},"
-            "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true}}"));
+            "\"capabilities\":{\"linkage\":true,\"cache\":true,\"model\":true%s}}"),
+            bRealtimeMetrics ? TEXT(",\"realtime_metrics\":true") : TEXT("")));
         if (!SendBytes(*Socket, Hello.GetData(), Hello.Num())) { DestroySocket(SocketSubsystem, Socket); }
     }
     return Socket;
@@ -518,9 +521,11 @@ FSocket* ConnectGreetedLoopback(ISocketSubsystem& SocketSubsystem, uint16 Port)
 bool ReceivePacket(
     FSocket& Socket,
     TArray<uint8>& OutPayload,
-    TFunctionRef<void()> Pump = []() {}, bool bIncludeHello = false)
+    TFunctionRef<void()> Pump = []() {}, bool bIncludeHello = false,
+    FMtoUFrameDecoder* DecoderForMetrics = nullptr)
 {
-    FMtoUFrameDecoder Decoder;
+    FMtoUFrameDecoder LocalDecoder;
+    FMtoUFrameDecoder& Decoder = DecoderForMetrics ? *DecoderForMetrics : LocalDecoder;
     FString Error;
     return PollUntil([&]()
     {
@@ -534,7 +539,16 @@ bool ReceivePacket(
         while (Decoder.Pop(OutPayload, Error) == EMtoUDecodeResult::Message)
         {
             FString Type, TypeError;
-            if (!FMtoUProtocol::PeekType(OutPayload, Type, TypeError) || bIncludeHello || Type != TEXT("hello_ack")) { return true; }
+            if (!FMtoUProtocol::PeekType(OutPayload, Type, TypeError))
+            {
+                return true;
+            }
+            if ((!bIncludeHello && Type == TEXT("hello_ack"))
+                || (DecoderForMetrics && Type == TEXT("realtime_metrics")))
+            {
+                continue;
+            }
+            return true;
         }
         return false;
     });
@@ -1408,11 +1422,13 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             {
                 // The Maya release the greeting names, when it names one.
                 FString PayloadPluginVersion;
-                const TSharedPtr<FJsonObject>* GreetingObject = nullptr;
-                if (Case->TryGetObjectField(TEXT("payload"), GreetingObject))
-                {
-                    (*GreetingObject)->TryGetStringField(TEXT("plugin_version"), PayloadPluginVersion);
-                }
+                const TSharedPtr<FJsonObject> Greeting = Case->GetObjectField(TEXT("payload"));
+                Greeting->TryGetStringField(TEXT("plugin_version"), PayloadPluginVersion);
+                bool bRealtimeMetrics = false;
+                Greeting->GetObjectField(TEXT("capabilities"))->TryGetBoolField(
+                    TEXT("realtime_metrics"), bRealtimeMetrics);
+                TestEqual(*(Id + TEXT(" reads realtime metrics support")),
+                    Message.bRealtimeMetrics, bRealtimeMetrics);
                 TestEqual(*FString::Printf(TEXT("%s reads the plugin version"), *Id),
                     Message.PluginVersion, PayloadPluginVersion);
             }
@@ -1794,7 +1810,7 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
             || Operation == TEXT("cache_paused") || Operation == TEXT("cache_resumed")
             || Operation == TEXT("cache_seeked") || Operation == TEXT("cache_looped")
             || Operation == TEXT("cache_loop_changed")
-            || Operation == TEXT("cache_cleared"))
+            || Operation == TEXT("cache_cleared") || Operation == TEXT("realtime_metrics"))
         {
             const TSharedPtr<FJsonObject> Source = Case->GetObjectField(TEXT("payload"));
             TArray<uint8> PacketBytes;
@@ -1859,6 +1875,8 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                     return !Capabilities.IsValid() || !Capabilities->HasField(Name)
                         || Capabilities->GetBoolField(Name);
                 };
+                bool bRealtimeMetrics = false;
+                Capabilities->TryGetBoolField(TEXT("realtime_metrics"), bRealtimeMetrics);
                 PacketBytes = FMtoUProtocol::EncodeHelloAck(
                     static_cast<int32>(Source->GetNumberField(TEXT("session_id"))),
                     Capability(TEXT("linkage")),
@@ -1869,7 +1887,17 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                         ? static_cast<int32>(Space->GetNumberField(TEXT("space_revision")))
                         : 1,
                     Space.IsValid() ? Space->GetObjectField(TEXT("anchor")) : nullptr,
-                    Source->GetStringField(TEXT("source_instance_id")));
+                    Source->GetStringField(TEXT("source_instance_id")), bRealtimeMetrics);
+            }
+            else if (Operation == TEXT("realtime_metrics"))
+            {
+                double ApplyMs = 0.0;
+                const bool bHasApplication = Source->TryGetNumberField(TEXT("apply_ms"), ApplyMs);
+                PacketBytes = FMtoUProtocol::EncodeRealtimeMetrics(
+                    static_cast<int32>(Source->GetNumberField(TEXT("session_id"))),
+                    static_cast<int32>(Source->GetNumberField(TEXT("set_revision"))),
+                    static_cast<int32>(Source->GetNumberField(TEXT("editor_fps"))),
+                    bHasApplication ? TOptional<double>(ApplyMs) : TOptional<double>());
             }
             else if (Operation == TEXT("mode_state"))
             {
@@ -2143,7 +2171,25 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                 else if (Operation == TEXT("hello_ack"))
                 {
                     RequiredFields = {TEXT("source_instance_id"), TEXT("version"), TEXT("session_id"), TEXT("capabilities"),
-                        TEXT("targets"), TEXT("space")};
+                        TEXT("targets"), TEXT("space"), TEXT("ue_host_version"), TEXT("ue_plugin_version")};
+                }
+                else if (Operation == TEXT("realtime_metrics"))
+                {
+                    RequiredFields = {TEXT("session_id"), TEXT("set_revision"), TEXT("editor_fps")};
+                    for (const TCHAR* Field : RequiredFields)
+                    {
+                        TestEqual(*(Id + TEXT(" encodes ") + Field),
+                            Encoded->GetNumberField(Field), Source->GetNumberField(Field));
+                    }
+                    double ApplyMs = 0.0;
+                    const bool bHasApplication = Encoded->TryGetNumberField(TEXT("apply_ms"), ApplyMs);
+                    TestEqual(*(Id + TEXT(" application sample presence")),
+                        bHasApplication, Source->HasField(TEXT("apply_ms")));
+                    if (bHasApplication)
+                    {
+                        TestEqual(*(Id + TEXT(" application sample")),
+                            ApplyMs, Source->GetNumberField(TEXT("apply_ms")));
+                    }
                 }
                 else if (Operation == TEXT("mode_state"))
                 {
@@ -2206,6 +2252,18 @@ bool FMtoUConformanceCorpusTest::RunTest(const FString& Parameters)
                 }
                 if (Operation == TEXT("hello_ack"))
                 {
+                    const TSharedPtr<FJsonObject> Capabilities = Encoded->GetObjectField(TEXT("capabilities"));
+                    bool bExpectedMetrics = false;
+                    Source->GetObjectField(TEXT("capabilities"))->TryGetBoolField(
+                        TEXT("realtime_metrics"), bExpectedMetrics);
+                    bool bActualMetrics = false;
+                    Capabilities->TryGetBoolField(TEXT("realtime_metrics"), bActualMetrics);
+                    TestEqual(*(Id + TEXT(" sends the negotiated capability")),
+                        bActualMetrics, bExpectedMetrics);
+                    TestEqual(*(Id + TEXT(" reports the running editor version")),
+                        Encoded->GetStringField(TEXT("ue_host_version")), FEngineVersion::Current().ToString());
+                    TestEqual(*(Id + TEXT(" reports the loaded plugin version")),
+                        Encoded->GetStringField(TEXT("ue_plugin_version")), FMtoUProtocol::PluginVersionName());
                     TestEqual(*(Id + TEXT(" Source instance identity")),
                         Encoded->GetStringField(TEXT("source_instance_id")),
                         Source->GetStringField(TEXT("source_instance_id")));
@@ -5711,6 +5769,7 @@ struct FMtoUNaturalRefreshState
     AMtoULiveLinkActor* Actor = nullptr;
     FName RootBoneId = NAME_None;
     FString InitPacket;
+    FMtoUFrameDecoder MetricsDecoder;
     TArray<TPair<FLevelEditorViewportClient*, bool>> SavedBase;
     bool bSetupFailed = false;
 };
@@ -5880,7 +5939,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             *ChildBoneName,
             *TransformJson(TestSkeleton->GetRefBonePose()[1]));
 
-        FSocket* Client = ConnectGreetedLoopback(*SocketSubsystem, Port);
+        FSocket* Client = ConnectGreetedLoopback(*SocketSubsystem, Port, true);
         Self->TestNotNull(TEXT("Maya client connects"), Client);
         if (!Client)
         {
@@ -5892,7 +5951,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         Self->TestTrue(TEXT("init is sent"), SendBytes(*Client, InitBytes.GetData(), InitBytes.Num()));
         TArray<uint8> Payload;
         Self->TestTrue(TEXT("negotiation reaches ready"),
-            ReceivePacket(*Client, Payload, [&]() { Source->Update(); }));
+            ReceivePacket(*Client, Payload, [&]() { Source->Update(); }, false, &State->MetricsDecoder));
         Self->TestTrue(TEXT("ready response is received"),
             FromUtf8(Payload).Contains(TEXT("\"type\":\"ready\"")));
         Self->TestTrue(TEXT("connected stream requests background updates"), HasDemand());
@@ -5937,7 +5996,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             SendBytes(*Client, ClearBytes.GetData(), ClearBytes.Num()));
         TArray<uint8> ClearPayload;
         Self->TestTrue(TEXT("clear is acknowledged"),
-            ReceivePacket(*Client, ClearPayload, [&]() { Source->Update(); })
+            ReceivePacket(*Client, ClearPayload, [&]() { Source->Update(); }, false, &State->MetricsDecoder)
             && FromUtf8(ClearPayload).Contains(TEXT("\"type\":\"cache_cleared\"")));
         Self->TestTrue(TEXT("leaving cached ownership retains background updates"), HasDemand());
         return true;
@@ -6061,7 +6120,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             SendBytes(Client, BadBegin.GetData(), BadBegin.Num()));
         TArray<uint8> ErrorPayload;
         Self->TestTrue(TEXT("mismatched revision reports a recoverable error"),
-            ReceivePacket(Client, ErrorPayload, [&]() { Source.Update(); })
+            ReceivePacket(Client, ErrorPayload, [&]() { Source.Update(); }, false, &State->MetricsDecoder)
             && FromUtf8(ErrorPayload).Contains(TEXT("CACHE_REVISION_MISMATCH")));
         Self->TestTrue(TEXT("recoverable failure retains background updates"), HasDemand());
         const TArray<uint8> ClearBytes = Packet(TEXT("{\"type\":\"cache_clear\",\"clear_id\":2}"));
@@ -6069,7 +6128,7 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
             SendBytes(Client, ClearBytes.GetData(), ClearBytes.Num()));
         TArray<uint8> ClearPayload;
         Self->TestTrue(TEXT("recovery clear is acknowledged"),
-            ReceivePacket(Client, ClearPayload, [&]() { Source.Update(); })
+            ReceivePacket(Client, ClearPayload, [&]() { Source.Update(); }, false, &State->MetricsDecoder)
             && FromUtf8(ClearPayload).Contains(TEXT("\"type\":\"cache_cleared\"")));
         Self->TestTrue(TEXT("recovery clear keeps background updates"), HasDemand());
         return true;
@@ -6147,6 +6206,51 @@ bool FMtoUCacheClearNaturalRefreshTest::RunTest(const FString& Parameters)
         [Self]() -> bool
         {
             Self->AddError(TEXT("Actual application rate did not decay during stationary preview."));
+            return true;
+        }, 5.0f));
+
+    ADD_LATENT_AUTOMATION_COMMAND(FUntilCommand(
+        [Self, State]() -> bool
+        {
+            if (State->bSetupFailed || !State->Source || !State->Actor || !State->Client)
+            {
+                return true;
+            }
+            uint8 Buffer[4096];
+            int32 Read = 0;
+            if (State->Client->Recv(Buffer, UE_ARRAY_COUNT(Buffer), Read) && Read > 0)
+            {
+                State->MetricsDecoder.Append(Buffer, Read);
+            }
+            TArray<uint8> Payload;
+            FString Error;
+            while (State->MetricsDecoder.Pop(Payload, Error) == EMtoUDecodeResult::Message)
+            {
+                TSharedPtr<FJsonObject> Json;
+                double ApplyMs = 0.0;
+                double EditorFPS = 0.0;
+                if (JsonObjectFromBytes(Payload, Json)
+                    && Json->GetStringField(TEXT("type")) == TEXT("realtime_metrics")
+                    && Json->TryGetNumberField(TEXT("apply_ms"), ApplyMs)
+                    && Json->TryGetNumberField(TEXT("editor_fps"), EditorFPS) && EditorFPS > 0.0)
+                {
+                    const TOptional<FMtoURealtimeMetrics> Metrics =
+                        State->Source->GetRealtimeMetrics(*State->Actor);
+                    if (Metrics.IsSet()
+                        && FMath::IsNearlyEqual(ApplyMs, Metrics->Apply.LatestSeconds * 1000.0))
+                    {
+                        Self->TestTrue(TEXT("the wire timing measures the final naturally displayed pose"), ApplyMs > 0.0);
+                        Self->TestEqual(TEXT("the wire snapshot names the current set"),
+                            Json->GetNumberField(TEXT("set_revision")), 1.0);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        },
+        [Self]() -> bool
+        {
+            Self->AddError(TEXT("No current wire snapshot reported actual display application time and editor FPS."));
             return true;
         }, 5.0f));
 
@@ -17975,6 +18079,160 @@ bool FMtoUSessionEndLinkageSessionTest::RunTest(const FString& Parameters)
     World->DestroyWorld(false);
     GEngine->DestroyWorldContext(World);
     CollectGarbage(GARBAGE_COLLECTION_KEEPFLAGS);
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMtoURealtimeMetricsWireTest,
+    "MtoULiveLink.Source.RealtimeMetricsWire",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMtoURealtimeMetricsWireTest::RunTest(const FString& Parameters)
+{
+    (void)Parameters;
+    FMtoUSessionEndFixture Fixture;
+    ON_SCOPE_EXIT { Fixture.Close(); };
+    if (!Fixture.Open(*this))
+    {
+        return false;
+    }
+    const auto NoSnapshot = [this](FMtoUSessionEndMaya& Maya, const TCHAR* Label)
+    {
+        TArray<uint8> Payload;
+        TestFalse(Label, Maya.Reader.Next(*Maya.Socket, TEXT("realtime_metrics"),
+            Payload, [&]() { Maya.Pump(); }, 1.1));
+    };
+    const auto ReadSnapshot = [this](FMtoUSessionEndMaya& Maya, int32 Revision)
+    {
+        TSharedPtr<FJsonObject> Snapshot;
+        if (TestTrue(TEXT("Maya receives a realtime metrics snapshot"),
+            Maya.ReadReply(TEXT("realtime_metrics"), Snapshot)))
+        {
+            TestEqual(TEXT("snapshot belongs to this session"),
+                Snapshot->GetNumberField(TEXT("session_id")), static_cast<double>(Maya.SessionId));
+            TestEqual(TEXT("snapshot belongs to the active set"),
+                Snapshot->GetNumberField(TEXT("set_revision")), static_cast<double>(Revision));
+            TestTrue(TEXT("editor FPS is a nonnegative count"), Snapshot->GetNumberField(TEXT("editor_fps")) >= 0.0);
+            TestFalse(TEXT("an unmeasured apply time is omitted"), Snapshot->HasField(TEXT("apply_ms")));
+        }
+    };
+    const auto GreetWithMetrics = [this, &Fixture](FMtoUSessionEndMaya& Maya)
+    {
+        Maya.Socket = ConnectGreetedLoopback(*Fixture.Sockets, Fixture.Port, true);
+        TSharedPtr<FJsonObject> Ack;
+        if (!TestNotNull(TEXT("the client offering metrics connects"), Maya.Socket)
+            || !TestTrue(TEXT("the enabled greeting is answered"), Maya.ReadReply(TEXT("hello_ack"), Ack)))
+        {
+            return false;
+        }
+        Maya.SessionId = static_cast<int32>(Ack->GetNumberField(TEXT("session_id")));
+        TestTrue(TEXT("both peers support metrics"),
+            Ack->GetObjectField(TEXT("capabilities"))->GetBoolField(TEXT("realtime_metrics")));
+        TestEqual(TEXT("greeting reports the running Unreal Editor build"),
+            Ack->GetStringField(TEXT("ue_host_version")), FEngineVersion::Current().ToString());
+        TestEqual(TEXT("greeting reports the loaded plugin descriptor version"),
+            Ack->GetStringField(TEXT("ue_plugin_version")), FMtoUProtocol::PluginVersionName());
+        TestEqual(TEXT("greeting reports the live protocol version"),
+            Ack->GetNumberField(TEXT("version")), static_cast<double>(FMtoUProtocol::Version));
+        return true;
+    };
+
+    {
+        FMtoUSessionEndMaya Legacy(Fixture);
+        if (!Legacy.SendGreeting(*this))
+        {
+            return false;
+        }
+        TSharedPtr<FJsonObject> Ack;
+        if (!TestTrue(TEXT("the previous greeting is answered"), Legacy.ReadReply(TEXT("hello_ack"), Ack)))
+        {
+            return false;
+        }
+        TestFalse(TEXT("an old Maya never negotiates metrics"),
+            Ack->GetObjectField(TEXT("capabilities"))->HasField(TEXT("realtime_metrics")));
+        if (!Legacy.Negotiate(*this))
+        {
+            return false;
+        }
+        NoSnapshot(Legacy, TEXT("Ready alone does not send an unknown message to old Maya"));
+    }
+    TestTrue(TEXT("the previous session ends"), Fixture.WaitSessionOver());
+
+    AMtoULiveLinkActor* Secondary = Fixture.Place();
+    if (!TestNotNull(TEXT("a secondary binding is placed"), Secondary)
+        || !TestTrue(TEXT("the secondary binding is paired"), PairLinkageTarget(Secondary, TEXT("secondary"))))
+    {
+        return false;
+    }
+    int32 PreviousSession = 0;
+    {
+        FMtoUSessionEndMaya Maya(Fixture);
+        if (!GreetWithMetrics(Maya))
+        {
+            return false;
+        }
+        PreviousSession = Maya.SessionId;
+        const TCHAR* Set = TEXT("[\"character\",\"secondary\"]");
+        const TArray<uint8> PrimaryInit = Fixture.InitPacket(Set);
+        const TArray<uint8> SecondaryInit = Fixture.InitPacket(Set, FMtoUObjectIds::Secondary);
+        NoSnapshot(Maya, TEXT("only greeting does not start telemetry"));
+        TSharedPtr<FJsonObject> Reply;
+        if (!TestTrue(TEXT("primary init queued"), Maya.Send(PrimaryInit))
+            || !TestTrue(TEXT("primary becomes ready"), Maya.ReadReply(TEXT("ready"), Reply)))
+        {
+            return false;
+        }
+        NoSnapshot(Maya, TEXT("an incomplete object set does not send telemetry"));
+        if (!TestTrue(TEXT("secondary init queued"), Maya.Send(SecondaryInit))
+            || !TestTrue(TEXT("secondary becomes ready"), Maya.ReadReply(TEXT("ready"), Reply)))
+        {
+            return false;
+        }
+        TestFalse(TEXT("no snapshot precedes the complete Ready set"),
+            Maya.Reader.OtherTypes.Contains(TEXT("realtime_metrics")));
+        ReadSnapshot(Maya, 1);
+
+        FString Error;
+        if (!TestTrue(TEXT("Unreal starts Sequence linkage"), Fixture.Source->RequestLinkageEnter(1, Error))
+            || !TestTrue(TEXT("Maya receives Sequence authority"), Maya.ReadReply(TEXT("mode_state"), Reply)))
+        {
+            return false;
+        }
+        const int32 EnterRevision = static_cast<int32>(Reply->GetNumberField(TEXT("mode_revision")));
+        TestTrue(TEXT("Maya confirms Sequence authority"), Maya.ConfirmLinkage(*this, EnterRevision));
+        TestTrue(TEXT("Unreal acknowledges active Sequence authority"), Maya.ReadReply(TEXT("mode_state"), Reply));
+        NoSnapshot(Maya, TEXT("Sequence authority does not send realtime metrics"));
+        const int32 LeaveRevision = EnterRevision + 1;
+        TestTrue(TEXT("linkage exit sent"), Maya.Send(Packet(FString::Printf(
+            TEXT("{\"type\":\"leave_linkage\",\"session_id\":%d,\"mode_revision\":%d,\"target\":\"end\",\"detail\":\"\"}"),
+            Maya.SessionId, LeaveRevision))));
+        TestTrue(TEXT("Maya receives realtime authority again"), Maya.ReadReply(TEXT("mode_state"), Reply));
+        ReadSnapshot(Maya, 1);
+
+        TestTrue(TEXT("secondary removal sent"), Maya.Send(Packet(FString::Printf(
+            TEXT("{\"type\":\"remove_object\",\"session_id\":%d,\"object_id\":\"secondary\",\"set_revision\":2,\"detail\":\"\"}"),
+            Maya.SessionId))));
+        TestTrue(TEXT("secondary removal confirmed before another snapshot"), Maya.ReadReply(TEXT("object_removed"), Reply));
+        ReadSnapshot(Maya, 2);
+
+        TestTrue(TEXT("cache entry sent"), Maya.Send(Packet(TEXT("{\"type\":\"cache_enter\"}"))));
+        TestTrue(TEXT("cached playback holds the connection"), PollUntil([&]()
+        {
+            Maya.Pump();
+            return Fixture.Source->GetTimeControlView().Authority == EMtoUTimeAuthority::Cache;
+        }));
+        NoSnapshot(Maya, TEXT("cached playback does not send realtime metrics"));
+        TestTrue(TEXT("cache clear sent"), Maya.Send(Packet(TEXT("{\"type\":\"cache_clear\",\"clear_id\":1}"))));
+        TestTrue(TEXT("cache clear acknowledged before metrics resume"), Maya.ReadReply(TEXT("cache_cleared"), Reply));
+        ReadSnapshot(Maya, 2);
+    }
+    TestTrue(TEXT("the metrics session ends"), Fixture.WaitSessionOver());
+    FMtoUSessionEndMaya Next(Fixture);
+    if (!GreetWithMetrics(Next) || !Next.Negotiate(*this))
+    {
+        return false;
+    }
+    TestTrue(TEXT("reconnect obtains a new session identity"), Next.SessionId != PreviousSession);
+    ReadSnapshot(Next, 1);
     return true;
 }
 
