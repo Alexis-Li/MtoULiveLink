@@ -54,7 +54,7 @@ def _elision(panel, control_name, expected):
 
 
 def panel_visuals(panel, listener, evidence, result, stage, wait):
-    from mock_linkage_server import MockUnrealPeer, encode
+    from mock_linkage_server import MockUnrealPeer
     from mtou_livelink import qt_compat
     from mtou_livelink.qt_compat import QtWidgets
 
@@ -63,13 +63,31 @@ def panel_visuals(panel, listener, evidence, result, stage, wait):
     ) + "\n故障详情末行"
 
     class VisualPeer(MockUnrealPeer):
-        def _send(self, sock, message):
-            if message["type"] == "ready":
-                message.update(missing_in_unreal=["FixtureSmile"], accepted_morph_count=0,
-                               target_morph_count=0)
-            super()._send(sock, message)
+        def __init__(self, port):
+            super().__init__(port, targets=20)
+            self._output_lock = threading.Lock()
+            self._output_closed = False
 
-    peer = VisualPeer(listener.getsockname()[1], targets=20)
+        def _send(self, sock, message):
+            with self._output_lock:
+                if self._output_closed:
+                    # Keep draining in-flight Maya frames without replying
+                    # after sending this fixture's terminal error.
+                    return
+                if message["type"] == "ready":
+                    message.update(missing_in_unreal=["FixtureSmile"], accepted_morph_count=0,
+                                   target_morph_count=0)
+                super()._send(sock, message)
+
+        def fail(self, sock, details):
+            with self._output_lock:
+                super()._send(sock, {"type": "error", "kind": "failure", "code": "INVALID_BINDING",
+                                    "message": "验收时绑定失败", "details": details})
+                # Closing with unread frames can reset the connection on Windows.
+                sock.shutdown(socket.SHUT_WR)
+                self._output_closed = True
+
+    peer = VisualPeer(listener.getsockname()[1])
     clients = []
 
     def serve():
@@ -82,7 +100,8 @@ def panel_visuals(panel, listener, evidence, result, stage, wait):
         except (OSError, ValueError) as exc:
             peer.errors.append(str(exc))
 
-    threading.Thread(target=serve, name="MtoU visual acceptance peer", daemon=True).start()
+    server = threading.Thread(target=serve, name="MtoU visual acceptance peer", daemon=True)
+    server.start()
     root, _ = _character("LongCharacter" * 9, "LongDeformationRoot" * 6,
                          "LongFixtureGarment" * 9, morph="FixtureSmile")
     _set_role(panel, root)
@@ -153,18 +172,14 @@ def panel_visuals(panel, listener, evidence, result, stage, wait):
     browser = gui.control(details, "diagnosticDetails")
     before = browser.toPlainText()
     assert "此前的连接差异" in before and "FixtureSmile" in before, before
-    client = clients[0]
-    client.sendall(encode({"type": "error", "kind": "failure", "code": "INVALID_BINDING",
-                           "message": "验收时绑定失败", "details": long_detail}))
-    # End the peer's output after the error and drain Maya's input until it
-    # closes. Closing with unread frames can reset the connection on Windows.
-    client.shutdown(socket.SHUT_WR)
+    peer.fail(clients[0], long_detail)
     latest = gui.control(panel, "diagnosticLatest")
 
     def failure_visible():
         state = controller.snapshot()
         result["wire_failure_observed"] = {
             "connection": state["connection"], "code": state["diagnostic"].get("code"),
+            "operation": state["diagnostic"].get("operation"),
             "main": latest.toPlainText().splitlines()[:2],
             "details": browser.toPlainText().strip().splitlines()[:2],
         }
@@ -178,10 +193,14 @@ def panel_visuals(panel, listener, evidence, result, stage, wait):
     failure = controller.snapshot()["diagnostic"]
     solution = failure["solution"]
     assert failure["code"] == "INVALID_BINDING" and solution, failure
+    assert failure["operation"] == "preview", failure
+    latest_title = "实时预览 · 失败 · INVALID_BINDING"
+    assert latest.toPlainText().splitlines()[0] == latest_title
     history_heading = "此前的连接差异"
     current_text, separator, history_text = open_text.partition(history_heading)
     # The diagnostic heading and result must precede the connection metadata.
-    assert current_text.lstrip().startswith("[最近一次操作]") and separator, open_text
+    assert current_text.lstrip().startswith("[最近一次操作] " + latest_title), open_text
+    assert separator, open_text
     assert all(part in current_text for part in (
         "INVALID_BINDING", "验收时绑定失败", solution, "故障详情首行", "故障详情末行")), open_text
     assert "FixtureSmile" in history_text, history_text
@@ -235,9 +254,11 @@ def panel_visuals(panel, listener, evidence, result, stage, wait):
     assert gui.control(reopened, "diagnosticDetails").toPlainText() == open_text
     assert len(gui.windows(gui.DIAGNOSTICS, visible_only=False)) == 1
     result["latest_diagnostic"] = {
-        "code": failure["code"], "solution": solution, "same_text_reopened": True,
+        "code": failure["code"], "operation": failure["operation"], "title": latest_title,
+        "solution": solution, "same_text_reopened": True,
         "wrap_and_scroll": True, "copied_last_line": True,
     }
+    yield wait("protocol fixture finished", lambda: not server.is_alive())
     assert not peer.errors, peer.errors
 
 
