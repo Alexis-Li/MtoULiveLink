@@ -8,7 +8,7 @@ import maya.cmds as cmds
 import maya_gui_controls as gui
 
 
-def _character(group_name, root_name, outfit, display=False, morph=None):
+def _character(group_name, root_name, outfit, display_label=None, morph=None):
     group = cmds.group(empty=True, name=group_name)
     root = cmds.createNode("joint", name=root_name, parent=group)
     mesh = cmds.polyCube(name=outfit, constructionHistory=False)[0]
@@ -20,11 +20,11 @@ def _character(group_name, root_name, outfit, display=False, morph=None):
         cmds.delete(target)
     cmds.skinCluster(root, mesh, toSelectedBones=True)
     node = None
-    if display:
+    if display_label:
         node = cmds.circle(name="FixtureDisplay", constructionHistory=False)[0]
         node = cmds.parent(node, group)[0]
         cmds.addAttr(node, longName="wardrobe", attributeType="enum",
-                     enumName="ClothesAcceptance:ClothesAlternate")
+                     enumName=f"{display_label}:ClothesAlternate")
         node = cmds.ls(node, long=True)[0]
     return cmds.ls(root, long=True)[0], node
 
@@ -191,9 +191,22 @@ def panel_visuals(panel, listener, evidence, result, stage, wait):
     scroll_parent = latest.parentWidget()
     while scroll_parent is not None and not isinstance(scroll_parent, QtWidgets.QScrollArea):
         scroll_parent = scroll_parent.parentWidget()
-    assert scroll_parent is not None and scroll_parent.verticalScrollBar().maximum() > 0
+    assert scroll_parent is not None
     assert browser.lineWrapMode() != QtWidgets.QTextEdit.NoWrap
-    assert browser.verticalScrollBar().maximum() > 0
+
+    def text_is_scrollable():
+        result["diagnostic_geometry"] = {
+            "note_height": latest.height(),
+            "note_document_height": latest.document().size().height(),
+            "page_scroll_range": scroll_parent.verticalScrollBar().maximum(),
+            "details_scroll_range": browser.verticalScrollBar().maximum(),
+        }
+        sizes = result["diagnostic_geometry"]
+        return sizes["page_scroll_range"] > 0 and sizes["details_scroll_range"] > 0
+
+    yield wait("both diagnostic views have laid out and can scroll", text_is_scrollable)
+    shot("04-diagnostic")
+    shot("05-complete-diagnostics", details)
     cursor = browser.document().find("故障详情末行")
     assert not cursor.isNull()
     browser.setTextCursor(cursor)
@@ -225,8 +238,6 @@ def panel_visuals(panel, listener, evidence, result, stage, wait):
         "code": failure["code"], "solution": solution, "same_text_reopened": True,
         "wrap_and_scroll": True, "copied_last_line": True,
     }
-    shot("04-diagnostic")
-    shot("05-complete-diagnostics", reopened)
     assert not peer.errors, peer.errors
 
 
@@ -254,7 +265,7 @@ def scene_settings(evidence, step, result, stage, wait, until_idle, open_panel, 
     display = "|binding:Rig|binding:FixtureDisplay"
     secondary = "|SceneASecondary|Secondary"
     other = "|SceneB|LocalRoot"
-    common = {"display": None, "display_attribute": None, "secondary_root": None}
+    common = {"display": "", "display_attribute": "", "secondary_root": ""}
     settings_a = {"workflow": "model", "blendshapes_enabled": False, "show_popups": False,
                   "playback_cap": 24, "custom_range": True, "range_start": 11, "range_end": 37,
                   "root": primary, "secondary_root": secondary, "display": display,
@@ -271,14 +282,17 @@ def scene_settings(evidence, step, result, stage, wait, until_idle, open_panel, 
         observed = {key: getattr(settings, key) for key in expected}
         assert observed == expected, (label, observed, expected)
         assert snapshot()["root"] == expected["root"], (label, snapshot())
-        assert current_panel().controller.objects_state()["secondary"] == expected["secondary_root"]
+        assert current_panel().controller.objects_state()["secondary"] == (
+            expected["secondary_root"] or None)
         result.setdefault("settings", {})[label] = observed
 
     if step.endswith("_write"):
         stage("create disposable rig references and set unnamed scene preferences")
-        for path, group in ((binding, "Rig"), (same, "Rig"), (missing, "OtherRig")):
+        for path, group, outfit in ((binding, "Rig", "ClothesAcceptance"),
+                                    (same, "Rig", "ClothesReplacement"),
+                                    (missing, "OtherRig", "ClothesUnrelated")):
             cmds.file(new=True, force=True)
-            _character(group, "Root", "Garment", display=True)
+            _character(group, "Root", "Garment", display_label=outfit)
             _save_scene(path)
         cmds.file(new=True, force=True)
         cmds.file(str(binding), reference=True, namespace="binding")
@@ -363,7 +377,8 @@ def scene_settings(evidence, step, result, stage, wait, until_idle, open_panel, 
         cmds.file(str(same), loadReference=node)
         same_modified = cmds.file(query=True, modified=True)
         yield from until_idle("reference replaced")
-        yield wait("recover same binding path", lambda: snapshot()["root"] == primary)
+        yield wait("recover same binding path and new Display contents", lambda:
+                   snapshot()["root"] == primary and snapshot()["outfit"] == "ClothesReplacement")
         verify(settings_a, "reference with same paths")
         result["reference_uuid_changed"] = cmds.ls(primary, uuid=True)[0] != old_uuid
         assert result["reference_uuid_changed"]
